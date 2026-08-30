@@ -35,7 +35,7 @@ var (
 func main() {
 	pgURL := os.Getenv("POSTGRES_URL")
 	if pgURL == "" {
-		pgURL = "postgres://postgres:postgres@postgres:5432/postgres"
+		pgURL = "postgres://postgres@postgres:5432/postgres?sslmode=disable"
 	}
 
 	http.Handle("/metrics", promhttp.Handler())
