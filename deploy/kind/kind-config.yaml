@@ -1,0 +1,12 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: chronicle
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080  # dashboard reachable at localhost:8080
+        hostPort: 8080
+      - containerPort: 30090  # prometheus at localhost:9090
+        hostPort: 9090
+  - role: worker
+  - role: worker

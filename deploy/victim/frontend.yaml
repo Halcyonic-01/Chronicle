@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: chronicle-victim:latest
+        imagePullPolicy: Never
+        command: ["/frontend"]
+        env:
+        - name: API_URL
+          value: "http://api:8080"
+        ports:
+        - name: http
+          containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels:
+    app: frontend
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8080
+    nodePort: 30081
+  selector:
+    app: frontend
