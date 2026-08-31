@@ -61,9 +61,9 @@ func main() {
 	pgURL := os.Getenv("POSTGRES_URL")
 	if pgURL == "" {
 		if inCluster {
-			pgURL = "postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres"
+			pgURL = "postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable"
 		} else {
-			pgURL = "postgres://postgres:postgres@localhost:5432/postgres"
+			pgURL = "postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable"
 		}
 	}
 	pool, err := pgxpool.New(ctx, pgURL)
