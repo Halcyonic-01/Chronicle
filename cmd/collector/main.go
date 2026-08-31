@@ -40,10 +40,18 @@ func main() {
 	// Init GitHub client
 	ghClient := github.NewClient(nil)
 
+	inCluster := os.Getenv("KUBERNETES_SERVICE_HOST") != ""
+
 	// Init Prometheus client
-	promClient, err := api.NewClient(api.Config{
-		Address: "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
-	})
+	promURL := os.Getenv("PROMETHEUS_URL")
+	if promURL == "" {
+		if inCluster {
+			promURL = "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+		} else {
+			promURL = "http://localhost:9090"
+		}
+	}
+	promClient, err := api.NewClient(api.Config{Address: promURL})
 	if err != nil {
 		slog.Error("failed to init prom client", "err", err)
 		os.Exit(1)
@@ -52,7 +60,11 @@ func main() {
 	// Init Postgres Pool
 	pgURL := os.Getenv("POSTGRES_URL")
 	if pgURL == "" {
-		pgURL = "postgres://postgres:postgres@postgres.chronicle.svc.cluster.local:5432/postgres"
+		if inCluster {
+			pgURL = "postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable"
+		} else {
+			pgURL = "postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable"
+		}
 	}
 	pool, err := pgxpool.New(ctx, pgURL)
 	if err != nil {
