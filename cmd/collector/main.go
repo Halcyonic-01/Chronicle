@@ -20,9 +20,13 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 
+	"net/http"
+
+	chronicleapi "github.com/Halcyonic-01/Chronicle/internal/api"
 	"github.com/Halcyonic-01/Chronicle/internal/collect"
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
+	"github.com/Halcyonic-01/Chronicle/internal/replay"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
 )
 
@@ -85,6 +89,30 @@ func main() {
 	g.Go(func() error { return collect.NewPromCollector(promClient, events).Run(gctx) })
 	g.Go(func() error { return collect.NewLokiCollector(events).Run(gctx) })
 	g.Go(func() error { return store.NewWriter(pool).Run(gctx, events) })
+
+	// Phase 3: Snapshotter — takes a full cluster snapshot every 5 minutes.
+	inMemGraph := graph.New()
+	snapshotter := replay.NewSnapshotter(k8sClient, promClient, pool, inMemGraph)
+	g.Go(func() error { return snapshotter.Run(gctx) })
+
+	// Phase 3: HTTP API server — serves the replay endpoint to the dashboard.
+	replayer := replay.NewReplayer(pool)
+	apiHandler := chronicleapi.NewHandler(replayer)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/replay", apiHandler.Replay)
+	mux.HandleFunc("/api/events", apiHandler.Events)
+	g.Go(func() error {
+		slog.Info("Chronicle API listening", "addr", ":8181")
+		srv := &http.Server{Addr: ":8181", Handler: mux}
+		go func() {
+			<-gctx.Done()
+			srv.Close()
+		}()
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	})
 
 	// Graph sync loop
 	g.Go(func() error {

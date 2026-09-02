@@ -31,3 +31,4 @@ vendor/
 
 # User requested exclusions
 docs/
+collector
