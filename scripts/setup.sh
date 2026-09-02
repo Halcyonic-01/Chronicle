@@ -54,9 +54,10 @@ helm upgrade --install postgres bitnami/postgresql \
 # 5. Install Linkerd Service Mesh
 echo "Installing Linkerd Service Mesh..."
 if ! command -v linkerd &> /dev/null; then
-    curl -sL https://run.linkerd.io/install | sh
+    curl -sL https://run.linkerd.io/install-edge | sh
     export PATH=$PATH:$HOME/.linkerd2/bin
 fi
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml
 linkerd install --crds | kubectl apply -f -
 linkerd install | kubectl apply -f -
 kubectl annotate namespace default linkerd.io/inject=enabled --overwrite
