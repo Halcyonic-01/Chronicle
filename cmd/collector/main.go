@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -13,8 +14,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/api"
 	"golang.org/x/sync/errgroup"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/Halcyonic-01/Chronicle/internal/collect"
@@ -90,27 +93,54 @@ func main() {
 		meshBuilder := graph.NewMeshBuilder(promClient)
 		graphStore := store.NewGraphStore(pool)
 
+		// Run once immediately
+		syncGraph := func() {
+			var allEdges []graph.Edge
+			if pods, err := k8sClient.CoreV1().Pods("").List(gctx, metav1.ListOptions{}); err == nil {
+				if svcs, err := k8sClient.CoreV1().Services("").List(gctx, metav1.ListOptions{}); err == nil {
+					allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
+					knownSvcs := make(map[string]bool)
+					for _, s := range svcs.Items {
+						knownSvcs[s.Name] = true
+					}
+					for _, p := range pods.Items {
+						allEdges = append(allEdges, graph.InferCallEdges(p, knownSvcs)...)
+					}
+				}
+			} else {
+				slog.Warn("failed to fetch k8s resources for graph", "err", err)
+			}
+
+			if runtimeEdges, err := meshBuilder.RuntimeEdges(gctx); err == nil {
+				allEdges = append(allEdges, runtimeEdges...)
+			}
+
+			if len(allEdges) > 0 {
+				// Deduplicate edges to avoid primary key violations
+				deduped := make([]graph.Edge, 0, len(allEdges))
+				seen := make(map[string]bool)
+				for _, e := range allEdges {
+					key := fmt.Sprintf("%s|%s|%s", e.From.Key(), e.To.Key(), e.Kind)
+					if !seen[key] {
+						seen[key] = true
+						deduped = append(deduped, e)
+					}
+				}
+
+				if err := graphStore.Sync(gctx, deduped); err != nil {
+					slog.Error("failed to sync graph to postgres", "err", err)
+				}
+			}
+		}
+
+		syncGraph() // first run
+
 		for {
 			select {
 			case <-gctx.Done():
 				return gctx.Err()
 			case <-ticker.C:
-				// Fetch static edges (stubbed out for brevity, would fetch from k8sClient)
-				var allEdges []graph.Edge
-
-				// Fetch runtime edges
-				runtimeEdges, err := meshBuilder.RuntimeEdges(gctx)
-				if err != nil {
-					slog.Warn("failed to fetch runtime edges", "err", err)
-				} else {
-					allEdges = append(allEdges, runtimeEdges...)
-				}
-
-				if len(allEdges) > 0 {
-					if err := graphStore.Sync(gctx, allEdges); err != nil {
-						slog.Error("failed to sync graph to postgres", "err", err)
-					}
-				}
+				syncGraph()
 			}
 		}
 	})
