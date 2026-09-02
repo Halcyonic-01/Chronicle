@@ -50,6 +50,17 @@ helm upgrade --install postgres bitnami/postgresql \
     --set primary.persistence.enabled=false
 
 
+
+# 5. Install Linkerd Service Mesh
+echo "Installing Linkerd Service Mesh..."
+if ! command -v linkerd &> /dev/null; then
+    curl -sL https://run.linkerd.io/install | sh
+    export PATH=$PATH:$HOME/.linkerd2/bin
+fi
+linkerd install --crds | kubectl apply -f -
+linkerd install | kubectl apply -f -
+kubectl annotate namespace default linkerd.io/inject=enabled --overwrite
+
 echo "Setup complete! Dashboard and Prometheus will be available shortly on:"
 echo "Grafana: http://localhost:8080 (admin/prom-operator)"
 echo "Prometheus: http://localhost:9090"
