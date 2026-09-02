@@ -61,6 +61,17 @@ func (g *Graph) SetEdges(edges []Edge) {
 	}
 }
 
+// CurrentEdges returns a snapshot of all current active edges.
+func (g *Graph) CurrentEdges() []Edge {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var all []Edge
+	for _, edges := range g.outgoing {
+		all = append(all, edges...)
+	}
+	return all
+}
+
 // Upstream returns everything that could possibly have caused a failure at `start`.
 // Returns node key -> number of hops away.
 func (g *Graph) Upstream(start string, maxDepth int) map[string]int {
