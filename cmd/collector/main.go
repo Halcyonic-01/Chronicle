@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/google/go-github/v60/github"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Halcyonic-01/Chronicle/internal/collect"
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
 )
 
@@ -80,6 +82,38 @@ func main() {
 	g.Go(func() error { return collect.NewPromCollector(promClient, events).Run(gctx) })
 	g.Go(func() error { return collect.NewLokiCollector(events).Run(gctx) })
 	g.Go(func() error { return store.NewWriter(pool).Run(gctx, events) })
+
+	// Graph sync loop
+	g.Go(func() error {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		meshBuilder := graph.NewMeshBuilder(promClient)
+		graphStore := store.NewGraphStore(pool)
+
+		for {
+			select {
+			case <-gctx.Done():
+				return gctx.Err()
+			case <-ticker.C:
+				// Fetch static edges (stubbed out for brevity, would fetch from k8sClient)
+				var allEdges []graph.Edge
+
+				// Fetch runtime edges
+				runtimeEdges, err := meshBuilder.RuntimeEdges(gctx)
+				if err != nil {
+					slog.Warn("failed to fetch runtime edges", "err", err)
+				} else {
+					allEdges = append(allEdges, runtimeEdges...)
+				}
+
+				if len(allEdges) > 0 {
+					if err := graphStore.Sync(gctx, allEdges); err != nil {
+						slog.Error("failed to sync graph to postgres", "err", err)
+					}
+				}
+			}
+		}
+	})
 
 	slog.Info("Chronicle collectors started")
 
