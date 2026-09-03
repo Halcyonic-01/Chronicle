@@ -58,3 +58,26 @@ func InferCallEdges(pod corev1.Pod, knownSvcs map[string]bool) []Edge {
 	}
 	return edges
 }
+
+// BuildOwnerEdges builds 'owns' edges from Deployments to Pods.
+func BuildOwnerEdges(pods []corev1.Pod) []Edge {
+	var edges []Edge
+	for _, pod := range pods {
+		for _, ref := range pod.OwnerReferences {
+			if ref.Kind == "ReplicaSet" {
+				name := ref.Name
+				if idx := strings.LastIndex(name, "-"); idx > 0 {
+					name = name[:idx]
+				}
+				edges = append(edges, Edge{
+					From:   Node{Kind: "Deployment", Name: name, Namespace: pod.Namespace},
+					To:     Node{Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace},
+					Kind:   "owns",
+					Weight: 1.0,
+					Source: "static",
+				})
+			}
+		}
+	}
+	return edges
+}
