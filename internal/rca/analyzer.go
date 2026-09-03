@@ -16,7 +16,7 @@ type EventSource interface {
 	EventsBetween(context.Context, time.Time, time.Time) ([]event.Event, error)
 }
 type GraphSource interface {
-	Upstream(start string, maxDepth int) map[string]int
+	UpstreamAt(ctx context.Context, t time.Time, start string, maxDepth int) (map[string]int, error)
 }
 type Narrator interface {
 	Narrate(context.Context, *Result) (string, error)
@@ -73,7 +73,11 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	if hops <= 0 {
 		hops = 4
 	}
-	upstream := a.Graph.Upstream(key(symptom), hops)
+	upstream, err := a.Graph.UpstreamAt(ctx, symptom.IngestedAt, key(symptom), hops)
+	if err != nil {
+		return nil, fmt.Errorf("load graph at symptom time: %w", err)
+	}
+
 	candidates := make([]Candidate, 0, len(raw))
 	for _, e := range raw {
 		if !e.IngestedAt.Before(symptom.IngestedAt) || e.ID == symptom.ID {
