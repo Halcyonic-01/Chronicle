@@ -19,6 +19,7 @@ vendor/
 # Local env files
 .env
 .env.*
+!.env.example
 
 # IDEs and Editors
 .idea/

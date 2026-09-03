@@ -5,15 +5,49 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
 )
 
 type Handler struct {
 	replayer *replay.Replayer
+	analyzer *rca.Analyzer
+	rcaDB    *rca.PostgresEventSource
 }
 
-func NewHandler(replayer *replay.Replayer) *Handler {
-	return &Handler{replayer: replayer}
+func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.PostgresEventSource) *Handler {
+	return &Handler{replayer: replayer, analyzer: analyzer, rcaDB: rcaDB}
+}
+
+// POST /api/analyze?event_id=123
+func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"use POST"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	eventID := r.URL.Query().Get("event_id")
+	if eventID == "" {
+		http.Error(w, `{"error":"missing event_id"}`, http.StatusBadRequest)
+		return
+	}
+
+	evt, err := h.rcaDB.GetEvent(r.Context(), eventID)
+	if err != nil {
+		http.Error(w, `{"error":"event not found"}`, http.StatusNotFound)
+		return
+	}
+
+	res, err := h.analyzer.Analyze(r.Context(), *evt)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(res)
 }
 
 // GET /api/replay?t=2026-09-02T09:33:47Z

@@ -26,6 +26,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/collect"
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
+	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
 )
@@ -95,12 +96,23 @@ func main() {
 	snapshotter := replay.NewSnapshotter(k8sClient, promClient, pool, inMemGraph)
 	g.Go(func() error { return snapshotter.Run(gctx) })
 
-	// Phase 3: HTTP API server — serves the replay endpoint to the dashboard.
+	// Phase 4: RCA Analyzer
+	rcaDB := rca.NewPostgresEventSource(pool)
+	narrator := rca.NewOpenAICompatibleNarratorFromEnv()
+	analyzer := &rca.Analyzer{
+		Events:   rcaDB,
+		Graph:    inMemGraph,
+		Narrator: narrator,
+		MaxHops:  3,
+	}
+
+	// Phase 3/4: HTTP API server — serves the replay and RCA endpoints
 	replayer := replay.NewReplayer(pool)
-	apiHandler := chronicleapi.NewHandler(replayer)
+	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/replay", apiHandler.Replay)
 	mux.HandleFunc("/api/events", apiHandler.Events)
+	mux.HandleFunc("/api/analyze", apiHandler.Analyze)
 	g.Go(func() error {
 		slog.Info("Chronicle API listening", "addr", ":8181")
 		srv := &http.Server{Addr: ":8181", Handler: mux}
@@ -127,6 +139,7 @@ func main() {
 			if pods, err := k8sClient.CoreV1().Pods("").List(gctx, metav1.ListOptions{}); err == nil {
 				if svcs, err := k8sClient.CoreV1().Services("").List(gctx, metav1.ListOptions{}); err == nil {
 					allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
+					allEdges = append(allEdges, graph.BuildOwnerEdges(pods.Items)...)
 					knownSvcs := make(map[string]bool)
 					for _, s := range svcs.Items {
 						knownSvcs[s.Name] = true
@@ -154,6 +167,8 @@ func main() {
 						deduped = append(deduped, e)
 					}
 				}
+
+				inMemGraph.SetEdges(deduped) // Update the RCA/Snapshotter graph
 
 				if err := graphStore.Sync(gctx, deduped); err != nil {
 					slog.Error("failed to sync graph to postgres", "err", err)
