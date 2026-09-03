@@ -16,7 +16,9 @@ func (f fakeEvents) EventsBetween(context.Context, time.Time, time.Time) ([]even
 
 type fakeGraph map[string]int
 
-func (f fakeGraph) Upstream(string, int) map[string]int { return f }
+func (f fakeGraph) UpstreamAt(context.Context, time.Time, string, int) (map[string]int, error) {
+	return f, nil
+}
 func TestAnalyzeFiltersRanksAndUsesFallback(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike", Title: "API errors"}
