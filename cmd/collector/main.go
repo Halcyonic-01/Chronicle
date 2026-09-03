@@ -91,23 +91,71 @@ func main() {
 	g.Go(func() error { return collect.NewLokiCollector(events).Run(gctx) })
 	g.Go(func() error { return store.NewWriter(pool).Run(gctx, events) })
 
-	// Phase 3: Snapshotter — takes a full cluster snapshot every 5 minutes.
+	// Initialize Graph dependencies
 	inMemGraph := graph.New()
+	meshBuilder := graph.NewMeshBuilder(promClient)
+	graphStore := store.NewGraphStore(pool)
+
+	syncGraph := func() {
+		var allEdges []graph.Edge
+		if pods, err := k8sClient.CoreV1().Pods("").List(gctx, metav1.ListOptions{}); err == nil {
+			if svcs, err := k8sClient.CoreV1().Services("").List(gctx, metav1.ListOptions{}); err == nil {
+				allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
+				allEdges = append(allEdges, graph.BuildOwnerEdges(pods.Items)...)
+				knownSvcs := make(map[string]bool)
+				for _, s := range svcs.Items {
+					knownSvcs[s.Name] = true
+				}
+				for _, p := range pods.Items {
+					allEdges = append(allEdges, graph.InferCallEdges(p, knownSvcs)...)
+				}
+			}
+		} else {
+			slog.Warn("failed to fetch k8s resources for graph", "err", err)
+		}
+
+		if runtimeEdges, err := meshBuilder.RuntimeEdges(gctx); err == nil {
+			allEdges = append(allEdges, runtimeEdges...)
+		}
+
+		if len(allEdges) > 0 {
+			deduped := make([]graph.Edge, 0, len(allEdges))
+			seen := make(map[string]bool)
+			for _, e := range allEdges {
+				key := fmt.Sprintf("%s|%s|%s", e.From.Key(), e.To.Key(), e.Kind)
+				if !seen[key] {
+					seen[key] = true
+					deduped = append(deduped, e)
+				}
+			}
+
+			inMemGraph.SetEdges(deduped)
+			if err := graphStore.Sync(gctx, deduped); err != nil {
+				slog.Error("failed to sync graph to postgres", "err", err)
+			}
+		}
+	}
+
+	// Pre-warm the graph BEFORE starting the snapshotter
+	syncGraph()
+
+	// Phase 3: Snapshotter — takes a full cluster snapshot every 5 minutes.
 	snapshotter := replay.NewSnapshotter(k8sClient, promClient, pool, inMemGraph)
 	g.Go(func() error { return snapshotter.Run(gctx) })
+
+	// Phase 3/4: HTTP API server — serves the replay and RCA endpoints
+	replayer := replay.NewReplayer(pool)
 
 	// Phase 4: RCA Analyzer
 	rcaDB := rca.NewPostgresEventSource(pool)
 	narrator := rca.NewOpenAICompatibleNarratorFromEnv()
 	analyzer := &rca.Analyzer{
 		Events:   rcaDB,
-		Graph:    inMemGraph,
+		Graph:    &rca.ReplayerGraphSource{Replayer: replayer},
 		Narrator: narrator,
 		MaxHops:  3,
 	}
 
-	// Phase 3/4: HTTP API server — serves the replay and RCA endpoints
-	replayer := replay.NewReplayer(pool)
 	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/replay", apiHandler.Replay)
@@ -130,54 +178,6 @@ func main() {
 	g.Go(func() error {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		meshBuilder := graph.NewMeshBuilder(promClient)
-		graphStore := store.NewGraphStore(pool)
-
-		// Run once immediately
-		syncGraph := func() {
-			var allEdges []graph.Edge
-			if pods, err := k8sClient.CoreV1().Pods("").List(gctx, metav1.ListOptions{}); err == nil {
-				if svcs, err := k8sClient.CoreV1().Services("").List(gctx, metav1.ListOptions{}); err == nil {
-					allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
-					allEdges = append(allEdges, graph.BuildOwnerEdges(pods.Items)...)
-					knownSvcs := make(map[string]bool)
-					for _, s := range svcs.Items {
-						knownSvcs[s.Name] = true
-					}
-					for _, p := range pods.Items {
-						allEdges = append(allEdges, graph.InferCallEdges(p, knownSvcs)...)
-					}
-				}
-			} else {
-				slog.Warn("failed to fetch k8s resources for graph", "err", err)
-			}
-
-			if runtimeEdges, err := meshBuilder.RuntimeEdges(gctx); err == nil {
-				allEdges = append(allEdges, runtimeEdges...)
-			}
-
-			if len(allEdges) > 0 {
-				// Deduplicate edges to avoid primary key violations
-				deduped := make([]graph.Edge, 0, len(allEdges))
-				seen := make(map[string]bool)
-				for _, e := range allEdges {
-					key := fmt.Sprintf("%s|%s|%s", e.From.Key(), e.To.Key(), e.Kind)
-					if !seen[key] {
-						seen[key] = true
-						deduped = append(deduped, e)
-					}
-				}
-
-				inMemGraph.SetEdges(deduped) // Update the RCA/Snapshotter graph
-
-				if err := graphStore.Sync(gctx, deduped); err != nil {
-					slog.Error("failed to sync graph to postgres", "err", err)
-				}
-			}
-		}
-
-		syncGraph() // first run
-
 		for {
 			select {
 			case <-gctx.Done():
