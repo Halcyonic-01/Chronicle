@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Halcyonic-01/Chronicle/internal/heal"
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
 )
@@ -13,10 +14,16 @@ type Handler struct {
 	replayer *replay.Replayer
 	analyzer *rca.Analyzer
 	rcaDB    *rca.PostgresEventSource
+	healer   *heal.Engine
 }
 
-func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.PostgresEventSource) *Handler {
-	return &Handler{replayer: replayer, analyzer: analyzer, rcaDB: rcaDB}
+func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.PostgresEventSource, healer *heal.Engine) *Handler {
+	return &Handler{replayer: replayer, analyzer: analyzer, rcaDB: rcaDB, healer: healer}
+}
+
+type analyzeResponse struct {
+	*rca.Result
+	Action *heal.Action `json:"action,omitempty"`
 }
 
 // POST /api/analyze?event_id=123
@@ -47,7 +54,16 @@ func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(res)
+	var action *heal.Action
+	if h.healer != nil {
+		action, err = h.healer.Evaluate(r.Context(), res)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	json.NewEncoder(w).Encode(analyzeResponse{Result: res, Action: action})
 }
 
 // GET /api/replay?t=2026-09-02T09:33:47Z
