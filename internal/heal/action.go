@@ -85,6 +85,7 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	action := &Action{
 		ID:         ulid.Make().String(),
 		IncidentID: result.Symptom.ID,
+		Reasoning:  []string{},
 		DryRun:     true,
 		CreatedAt:  now().UTC(),
 		Status:     StatusSkipped,
