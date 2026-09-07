@@ -5,6 +5,7 @@ package heal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -13,25 +14,39 @@ import (
 )
 
 const (
-	StatusWouldRun = "would_run"
-	StatusSkipped  = "skipped"
-	StatusBlocked  = "blocked"
+	StatusWouldRun      = "would_run"
+	StatusSkipped       = "skipped"
+	StatusBlocked       = "blocked"
+	ApprovalNotRequired = "not_required"
+	ApprovalPending     = "pending"
+	ApprovalApproved    = "approved"
+	ApprovalDenied      = "denied"
+
+	ActionRestartPod         = "restart_pod"
+	ActionBumpMemory         = "bump_memory"
+	ActionRollbackDeployment = "rollback_deployment"
 )
 
 type Action struct {
-	ID         string    `json:"id"`
-	IncidentID string    `json:"incident_id"`
-	Rule       string    `json:"rule"`
-	CauseType  string    `json:"cause_type"`
-	Namespace  string    `json:"namespace"`
-	Target     string    `json:"target"`
-	Confidence float64   `json:"confidence"`
-	Reasoning  []string  `json:"reasoning"`
-	Status     string    `json:"status"`
-	Result     string    `json:"result"`
-	Error      string    `json:"error,omitempty"`
-	DryRun     bool      `json:"dry_run"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID             string          `json:"id"`
+	IncidentID     string          `json:"incident_id"`
+	Rule           string          `json:"rule"`
+	CauseType      string          `json:"cause_type"`
+	ActionType     string          `json:"action_type"`
+	Namespace      string          `json:"namespace"`
+	Target         string          `json:"target"`
+	Confidence     float64         `json:"confidence"`
+	Reasoning      []string        `json:"reasoning"`
+	Status         string          `json:"status"`
+	Result         string          `json:"result"`
+	Error          string          `json:"error,omitempty"`
+	Approval       string          `json:"approval"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	DryRun         bool            `json:"dry_run"`
+	CreatedAt      time.Time       `json:"created_at"`
+	DecisionBy     string          `json:"decision_by,omitempty"`
+	DecisionReason string          `json:"decision_reason,omitempty"`
+	DecidedAt      *time.Time      `json:"decided_at,omitempty"`
 }
 
 type Rule struct {
@@ -40,12 +55,13 @@ type Rule struct {
 	MinConfidence  float64
 	MaxPerHour     int
 	RequireApprove bool
+	ActionType     string
 }
 
 var defaultRules = []Rule{
-	{Name: "restart-deadlocked-pod", CauseType: "became_unready", MinConfidence: 0.80, MaxPerHour: 3},
-	{Name: "bump-memory-on-oom", CauseType: "oom_kill", MinConfidence: 0.85, MaxPerHour: 2},
-	{Name: "rollback-bad-deploy", CauseType: "deploy", MinConfidence: 0.90, MaxPerHour: 1, RequireApprove: true},
+	{Name: "restart-deadlocked-pod", CauseType: "became_unready", ActionType: ActionRestartPod, MinConfidence: 0.80, MaxPerHour: 3},
+	{Name: "bump-memory-on-oom", CauseType: "oom_kill", ActionType: ActionBumpMemory, MinConfidence: 0.85, MaxPerHour: 2},
+	{Name: "rollback-bad-deploy", CauseType: "deploy", ActionType: ActionRollbackDeployment, MinConfidence: 0.90, MaxPerHour: 1, RequireApprove: true},
 }
 
 type AuditStore interface {
@@ -86,6 +102,7 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 		ID:         ulid.Make().String(),
 		IncidentID: result.Symptom.ID,
 		Reasoning:  []string{},
+		Approval:   ApprovalNotRequired,
 		DryRun:     true,
 		CreatedAt:  now().UTC(),
 		Status:     StatusSkipped,
@@ -114,8 +131,13 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 		return action, e.Store.RecordAction(ctx, action)
 	}
 	action.Rule, action.CauseType = rule.Name, rule.CauseType
+	action.ActionType = rule.ActionType
 	action.Namespace, action.Target = top.Event.Namespace, top.Event.EntityName
+	action.Payload = append(json.RawMessage(nil), top.Event.Payload...)
 	action.Confidence, action.Reasoning = result.Confidence, append([]string(nil), top.Reasons...)
+	if rule.RequireApprove {
+		action.Approval = ApprovalPending
+	}
 	if result.Confidence < rule.MinConfidence {
 		action.Status = StatusBlocked
 		action.Result = fmt.Sprintf("confidence %.2f is below %.2f", result.Confidence, rule.MinConfidence)

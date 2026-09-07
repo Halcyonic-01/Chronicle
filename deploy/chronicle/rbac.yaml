@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chronicle
+  namespace: chronicle
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chronicle
+rules:
+- apiGroups: ["", "apps", "networking.k8s.io"]
+  resources: ["pods", "events", "services", "nodes", "configmaps", "secrets", "persistentvolumeclaims", "deployments", "ingresses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: chronicle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chronicle
+subjects:
+- kind: ServiceAccount
+  name: chronicle
+  namespace: chronicle

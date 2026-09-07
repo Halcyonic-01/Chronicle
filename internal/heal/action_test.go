@@ -7,6 +7,11 @@ import (
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 type memoryAudit struct {
@@ -94,5 +99,46 @@ func TestEmptyReasoningIsRepresentedAsAnEmptyList(t *testing.T) {
 	}
 	if reasoning == nil || len(reasoning) != 0 {
 		t.Fatalf("expected empty reasoning list, got %#v", reasoning)
+	}
+}
+
+func TestKubernetesExecutorDeletesOnlyApprovedNonDryRunPod(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "redis", Namespace: "default"}})
+	executor := NewKubernetesExecutor(client)
+	action := &Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis", Approval: ApprovalNotRequired, DryRun: false}
+	if _, err := executor.Execute(context.Background(), action); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Pods("default").Get(context.Background(), "redis", metav1.GetOptions{}); err == nil {
+		t.Fatal("pod was not deleted")
+	}
+}
+
+func TestKubernetesExecutorRequiresApprovalForRollback(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	executor := NewKubernetesExecutor(client)
+	action := &Action{ActionType: ActionRollbackDeployment, Approval: ApprovalPending, DryRun: false}
+	if _, err := executor.Execute(context.Background(), action); err == nil {
+		t.Fatal("unapproved rollback was accepted")
+	}
+}
+
+func TestKubernetesExecutorCapsMemoryIncrease(t *testing.T) {
+	client := fake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "redis", Namespace: "default"},
+		Spec:       appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "redis", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("100Mi")}}}}}}},
+	})
+	executor := NewKubernetesExecutor(client)
+	action := &Action{ActionType: ActionBumpMemory, Namespace: "default", Target: "redis-pod", Approval: ApprovalNotRequired, DryRun: false, Payload: []byte(`{"owner":"redis","original_mem_bytes":104857600}`)}
+	if _, err := executor.Execute(context.Background(), action); err != nil {
+		t.Fatal(err)
+	}
+	d, err := client.AppsV1().Deployments("default").Get(context.Background(), "redis", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := d.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+	if got := memory.Value(); got != 157286400 {
+		t.Fatalf("unexpected memory limit: %d", got)
 	}
 }
