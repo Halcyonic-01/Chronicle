@@ -30,6 +30,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
+	chronicleweb "github.com/Halcyonic-01/Chronicle/internal/web"
 )
 
 func main() {
@@ -159,11 +160,15 @@ func main() {
 	healStore := heal.NewPostgresAuditStore(pool)
 	healer := heal.NewEngine(healStore)
 
-	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer)
+	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer, graphStore, healStore, k8sClient)
 	mux := http.NewServeMux()
+	mux.Handle("/", chronicleweb.Handler())
 	mux.HandleFunc("/api/replay", apiHandler.Replay)
 	mux.HandleFunc("/api/events", apiHandler.Events)
 	mux.HandleFunc("/api/analyze", apiHandler.Analyze)
+	mux.HandleFunc("/api/graph", apiHandler.Graph)
+	mux.HandleFunc("/api/heal/actions", apiHandler.HealingActions)
+	mux.HandleFunc("/api/heal/actions/", apiHandler.DecideHealingAction)
 	g.Go(func() error {
 		slog.Info("Chronicle API listening", "addr", ":8181")
 		srv := &http.Server{Addr: ":8181", Handler: mux}

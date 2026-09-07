@@ -28,22 +28,25 @@ const (
 )
 
 type Action struct {
-	ID         string          `json:"id"`
-	IncidentID string          `json:"incident_id"`
-	Rule       string          `json:"rule"`
-	CauseType  string          `json:"cause_type"`
-	ActionType string          `json:"action_type"`
-	Namespace  string          `json:"namespace"`
-	Target     string          `json:"target"`
-	Confidence float64         `json:"confidence"`
-	Reasoning  []string        `json:"reasoning"`
-	Status     string          `json:"status"`
-	Result     string          `json:"result"`
-	Error      string          `json:"error,omitempty"`
-	Approval   string          `json:"approval"`
-	Payload    json.RawMessage `json:"payload,omitempty"`
-	DryRun     bool            `json:"dry_run"`
-	CreatedAt  time.Time       `json:"created_at"`
+	ID             string          `json:"id"`
+	IncidentID     string          `json:"incident_id"`
+	Rule           string          `json:"rule"`
+	CauseType      string          `json:"cause_type"`
+	ActionType     string          `json:"action_type"`
+	Namespace      string          `json:"namespace"`
+	Target         string          `json:"target"`
+	Confidence     float64         `json:"confidence"`
+	Reasoning      []string        `json:"reasoning"`
+	Status         string          `json:"status"`
+	Result         string          `json:"result"`
+	Error          string          `json:"error,omitempty"`
+	Approval       string          `json:"approval"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	DryRun         bool            `json:"dry_run"`
+	CreatedAt      time.Time       `json:"created_at"`
+	DecisionBy     string          `json:"decision_by,omitempty"`
+	DecisionReason string          `json:"decision_reason,omitempty"`
+	DecidedAt      *time.Time      `json:"decided_at,omitempty"`
 }
 
 type Rule struct {

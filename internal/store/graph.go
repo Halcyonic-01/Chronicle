@@ -55,3 +55,32 @@ func (s *GraphStore) Sync(ctx context.Context, edges []graph.Edge) error {
 
 	return tx.Commit(ctx)
 }
+
+// Current returns the active dependency edges used by the operations UI.
+func (s *GraphStore) Current(ctx context.Context) ([]graph.Edge, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT from_key, to_key, kind, weight, source
+		FROM graph_edges
+		WHERE valid_to IS NULL
+		ORDER BY from_key, to_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var edges []graph.Edge
+	for rows.Next() {
+		var fromKey, toKey string
+		var e graph.Edge
+		if err := rows.Scan(&fromKey, &toKey, &e.Kind, &e.Weight, &e.Source); err != nil {
+			return nil, err
+		}
+		if e.From, err = graph.ParseKey(fromKey); err != nil {
+			return nil, err
+		}
+		if e.To, err = graph.ParseKey(toKey); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
