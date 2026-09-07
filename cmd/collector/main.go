@@ -26,6 +26,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/collect"
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
+	"github.com/Halcyonic-01/Chronicle/internal/heal"
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
@@ -155,8 +156,10 @@ func main() {
 		Narrator: narrator,
 		MaxHops:  3,
 	}
+	healStore := heal.NewPostgresAuditStore(pool)
+	healer := heal.NewEngine(healStore)
 
-	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB)
+	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/replay", apiHandler.Replay)
 	mux.HandleFunc("/api/events", apiHandler.Events)
