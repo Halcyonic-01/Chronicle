@@ -2,6 +2,8 @@ package heal
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,14 +16,22 @@ func NewPostgresAuditStore(pool *pgxpool.Pool) *PostgresAuditStore {
 }
 
 func (s *PostgresAuditStore) RecordAction(ctx context.Context, a *Action) error {
-	_, err := s.pool.Exec(ctx, `
+	reasoning := a.Reasoning
+	if reasoning == nil {
+		reasoning = []string{}
+	}
+	reasoningJSON, err := json.Marshal(reasoning)
+	if err != nil {
+		return fmt.Errorf("marshal healing reasoning: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO heal_actions
 		(id, incident_id, rule, cause_type, namespace, target, confidence,
 		 reasoning, status, result, error, dry_run, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), $12, $13)
 		ON CONFLICT (incident_id) DO NOTHING`,
 		a.ID, a.IncidentID, a.Rule, a.CauseType, a.Namespace, a.Target,
-		a.Confidence, a.Reasoning, a.Status, a.Result, a.Error, a.DryRun, a.CreatedAt)
+		a.Confidence, reasoningJSON, a.Status, a.Result, a.Error, a.DryRun, a.CreatedAt)
 	return err
 }
 

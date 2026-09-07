@@ -82,3 +82,17 @@ func TestEngineIsIdempotentPerIncident(t *testing.T) {
 		t.Fatalf("duplicate incident produced an action: %+v", action)
 	}
 }
+
+func TestEmptyReasoningIsRepresentedAsAnEmptyList(t *testing.T) {
+	action := &Action{}
+	if action.Reasoning != nil {
+		t.Fatal("test setup expected nil reasoning")
+	}
+	reasoning := action.Reasoning
+	if reasoning == nil {
+		reasoning = []string{}
+	}
+	if reasoning == nil || len(reasoning) != 0 {
+		t.Fatalf("expected empty reasoning list, got %#v", reasoning)
+	}
+}
