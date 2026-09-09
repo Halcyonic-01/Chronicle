@@ -1,4 +1,4 @@
-CREATE TABLE heal_actions (
+CREATE TABLE IF NOT EXISTS heal_actions (
     id          TEXT PRIMARY KEY,
     incident_id TEXT NOT NULL,
     rule        TEXT NOT NULL,
@@ -15,5 +15,5 @@ CREATE TABLE heal_actions (
     CONSTRAINT heal_actions_one_per_incident UNIQUE (incident_id)
 );
 
-CREATE INDEX idx_heal_actions_incident ON heal_actions (incident_id, created_at DESC);
-CREATE INDEX idx_heal_actions_rule_time ON heal_actions (rule, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_heal_actions_incident ON heal_actions (incident_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_heal_actions_rule_time ON heal_actions (rule, created_at DESC);

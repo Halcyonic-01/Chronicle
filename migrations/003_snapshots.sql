@@ -1,4 +1,4 @@
-CREATE TABLE snapshots (
+CREATE TABLE IF NOT EXISTS snapshots (
     id        TEXT PRIMARY KEY,
     taken_at  TIMESTAMPTZ NOT NULL,
     -- zstd-compressed JSON. ~2 MB raw becomes ~150 KB.
@@ -6,7 +6,7 @@ CREATE TABLE snapshots (
     obj_count INT NOT NULL
 );
 
-CREATE INDEX idx_snapshots_time ON snapshots (taken_at DESC);
+CREATE INDEX IF NOT EXISTS idx_snapshots_time ON snapshots (taken_at DESC);
 
 -- Retention: a nightly job runs these to keep storage flat.
 -- Keep every snapshot for 7 days, hourly for 30, daily for a year.

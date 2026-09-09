@@ -40,6 +40,8 @@ helm repo update
 
 helm upgrade --install kafka bitnami/kafka \
     --namespace chronicle --create-namespace \
+    --set image.repository=bitnamilegacy/kafka \
+    --set image.tag=4.0.0-debian-12-r10 \
     --set controller.replicaCount=1 \
     --set broker.replicaCount=1 \
     --set listeners.client.protocol=PLAINTEXT

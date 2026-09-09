@@ -1,4 +1,6 @@
-.PHONY: setup teardown
+.PHONY: setup teardown migrate build-chronicle deploy-chronicle
+
+POSTGRES_URL ?= postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable
 
 setup:
 	@chmod +x scripts/setup.sh
@@ -15,3 +17,17 @@ deploy-victim:
 	@echo "Deploying victim application..."
 	@kubectl apply -f deploy/victim/
 
+migrate:
+	@for migration in migrations/*.sql; do \
+		echo "Applying $$migration"; \
+		psql "$(POSTGRES_URL)" -v ON_ERROR_STOP=1 -f "$$migration"; \
+	done
+
+build-chronicle:
+	@echo "Building Chronicle image..."
+	@docker build -t chronicle:latest -f Dockerfile .
+	@kind load docker-image chronicle:latest --name chronicle
+
+deploy-chronicle: build-chronicle
+	@chmod +x scripts/deploy-chronicle.sh
+	@./scripts/deploy-chronicle.sh

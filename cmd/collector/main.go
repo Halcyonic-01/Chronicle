@@ -19,6 +19,8 @@ import (
 	"k8s.io/client-go/rest"
 
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"net/http"
 
@@ -85,23 +87,15 @@ func main() {
 	}
 	defer pool.Close()
 
-	g.Go(func() error { return collect.NewK8sCollector(k8sClient, events).Run(gctx) })
-	g.Go(func() error {
-		return collect.NewGitHubCollector(ghClient, "Halcyonic-01", "Chronicle", events).Run(gctx)
-	})
-	g.Go(func() error { return collect.NewPromCollector(promClient, events).Run(gctx) })
-	g.Go(func() error { return collect.NewLokiCollector(events).Run(gctx) })
-	g.Go(func() error { return store.NewWriter(pool).Run(gctx, events) })
-
 	// Initialize Graph dependencies
 	inMemGraph := graph.New()
 	meshBuilder := graph.NewMeshBuilder(promClient)
 	graphStore := store.NewGraphStore(pool)
 
-	syncGraph := func() {
+	syncGraph := func(syncCtx context.Context) {
 		var allEdges []graph.Edge
-		if pods, err := k8sClient.CoreV1().Pods("").List(gctx, metav1.ListOptions{}); err == nil {
-			if svcs, err := k8sClient.CoreV1().Services("").List(gctx, metav1.ListOptions{}); err == nil {
+		if pods, err := k8sClient.CoreV1().Pods("").List(syncCtx, metav1.ListOptions{}); err == nil {
+			if svcs, err := k8sClient.CoreV1().Services("").List(syncCtx, metav1.ListOptions{}); err == nil {
 				allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
 				allEdges = append(allEdges, graph.BuildOwnerEdges(pods.Items)...)
 				knownSvcs := make(map[string]bool)
@@ -116,7 +110,7 @@ func main() {
 			slog.Warn("failed to fetch k8s resources for graph", "err", err)
 		}
 
-		if runtimeEdges, err := meshBuilder.RuntimeEdges(gctx); err == nil {
+		if runtimeEdges, err := meshBuilder.RuntimeEdges(syncCtx); err == nil {
 			allEdges = append(allEdges, runtimeEdges...)
 		}
 
@@ -132,18 +126,46 @@ func main() {
 			}
 
 			inMemGraph.SetEdges(deduped)
-			if err := graphStore.Sync(gctx, deduped); err != nil {
+			if err := graphStore.Sync(syncCtx, deduped); err != nil {
 				slog.Error("failed to sync graph to postgres", "err", err)
 			}
 		}
 	}
 
-	// Pre-warm the graph BEFORE starting the snapshotter
-	syncGraph()
-
 	// Phase 3: Snapshotter — takes a full cluster snapshot every 5 minutes.
 	snapshotter := replay.NewSnapshotter(k8sClient, promClient, pool, inMemGraph)
-	g.Go(func() error { return snapshotter.Run(gctx) })
+
+	// Collectors, graph sync, snapshots, and the event writer are singleton
+	// workloads. Only the pod holding the Kubernetes Lease runs them.
+	runLeaderWorkloads := func(leaderCtx context.Context) {
+		if err := func() error {
+			syncGraph(leaderCtx)
+			leaderGroup, leaderCtx := errgroup.WithContext(leaderCtx)
+			leaderGroup.Go(func() error { return collect.NewK8sCollector(k8sClient, events).Run(leaderCtx) })
+			leaderGroup.Go(func() error {
+				return collect.NewGitHubCollector(ghClient, "Halcyonic-01", "Chronicle", events).Run(leaderCtx)
+			})
+			leaderGroup.Go(func() error { return collect.NewPromCollector(promClient, events).Run(leaderCtx) })
+			leaderGroup.Go(func() error { return collect.NewLokiCollector(events).Run(leaderCtx) })
+			leaderGroup.Go(func() error { return store.NewWriter(pool).Run(leaderCtx, events) })
+			leaderGroup.Go(func() error { return snapshotter.Run(leaderCtx) })
+			leaderGroup.Go(func() error {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-leaderCtx.Done():
+						return leaderCtx.Err()
+					case <-ticker.C:
+						syncGraph(leaderCtx)
+					}
+				}
+			})
+			return leaderGroup.Wait()
+		}(); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("leader workloads stopped", "err", err)
+		}
+	}
 
 	// Phase 3/4: HTTP API server — serves the replay and RCA endpoints
 	replayer := replay.NewReplayer(pool)
@@ -182,21 +204,51 @@ func main() {
 		return nil
 	})
 
-	// Graph sync loop
+	identity, err := os.Hostname()
+	if err != nil || identity == "" {
+		identity = fmt.Sprintf("chronicle-%d", os.Getpid())
+	}
+	if podName := os.Getenv("POD_NAME"); podName != "" {
+		identity = podName
+	}
+	lockNamespace := valueOrEnv("LEADER_ELECTION_NAMESPACE", "chronicle")
+	lockName := valueOrEnv("LEADER_ELECTION_NAME", "chronicle-leader")
+	lock, err := resourcelock.New(
+		resourcelock.LeasesResourceLock,
+		lockNamespace,
+		lockName,
+		k8sClient.CoreV1(),
+		k8sClient.CoordinationV1(),
+		resourcelock.ResourceLockConfig{Identity: identity},
+	)
+	if err != nil {
+		slog.Error("failed to create leader election lock", "err", err)
+		os.Exit(1)
+	}
 	g.Go(func() error {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-gctx.Done():
-				return gctx.Err()
-			case <-ticker.C:
-				syncGraph()
-			}
-		}
+		slog.Info("waiting for Chronicle leader lease", "identity", identity, "namespace", lockNamespace, "name", lockName)
+		leaderelection.RunOrDie(gctx, leaderelection.LeaderElectionConfig{
+			Lock:            lock,
+			LeaseDuration:   15 * time.Second,
+			RenewDeadline:   10 * time.Second,
+			RetryPeriod:     2 * time.Second,
+			ReleaseOnCancel: true,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: func(leaderCtx context.Context) {
+					slog.Info("Chronicle became leader", "identity", identity)
+					runLeaderWorkloads(leaderCtx)
+				},
+				OnStoppedLeading: func() {
+					slog.Error("Chronicle lost leader lease", "identity", identity)
+					cancel()
+				},
+				OnNewLeader: func(newLeader string) {
+					slog.Info("Chronicle observed leader", "identity", newLeader)
+				},
+			},
+		})
+		return nil
 	})
-
-	slog.Info("Chronicle collectors started")
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("collector failed", "err", err)
@@ -218,4 +270,11 @@ func newK8sClient() (kubernetes.Interface, error) {
 		}
 	}
 	return kubernetes.NewForConfig(config)
+}
+
+func valueOrEnv(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: chronicle
+  namespace: chronicle
+spec:
+  selector:
+    app: chronicle
+  ports:
+    - name: http
+      port: 8181
+      targetPort: http
+  type: ClusterIP

@@ -1,4 +1,4 @@
-CREATE TABLE graph_edges (
+CREATE TABLE IF NOT EXISTS graph_edges (
     from_key    TEXT NOT NULL, -- "default/Service/redis"
     to_key      TEXT NOT NULL,
     kind        TEXT NOT NULL,
@@ -9,5 +9,5 @@ CREATE TABLE graph_edges (
     PRIMARY KEY (from_key, to_key, kind, valid_from)
 );
 
-CREATE INDEX idx_edges_from ON graph_edges (from_key) WHERE valid_to IS NULL;
-CREATE INDEX idx_edges_to   ON graph_edges (to_key) WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_from ON graph_edges (from_key) WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_to   ON graph_edges (to_key) WHERE valid_to IS NULL;

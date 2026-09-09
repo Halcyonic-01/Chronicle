@@ -1,4 +1,4 @@
-CREATE TABLE events (
+CREATE TABLE IF NOT EXISTS events (
     id                TEXT PRIMARY KEY,
     occurred_at       TIMESTAMPTZ NOT NULL,
     ingested_at       TIMESTAMPTZ NOT NULL,
@@ -16,9 +16,9 @@ CREATE TABLE events (
 
 -- The index that makes RCA fast. Every query is
 -- "events in this time window" so ingested_at leads.
-CREATE INDEX idx_events_time     ON events (ingested_at DESC);
-CREATE INDEX idx_events_entity   ON events (entity_kind, entity_name, ingested_at DESC);
-CREATE INDEX idx_events_corr     ON events (correlation_key);
-CREATE INDEX idx_events_severity ON events (severity, ingested_at DESC)
+CREATE INDEX IF NOT EXISTS idx_events_time     ON events (ingested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_entity   ON events (entity_kind, entity_name, ingested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_corr     ON events (correlation_key);
+CREATE INDEX IF NOT EXISTS idx_events_severity ON events (severity, ingested_at DESC)
                                  WHERE severity IN ('warning','critical');
-CREATE INDEX idx_events_payload  ON events USING GIN (payload);
+CREATE INDEX IF NOT EXISTS idx_events_payload  ON events USING GIN (payload);

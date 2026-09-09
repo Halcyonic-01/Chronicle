@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chronicle
+  namespace: chronicle
+  labels:
+    app: chronicle
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chronicle
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: chronicle
+    spec:
+      serviceAccountName: chronicle
+      priorityClassName: system-cluster-critical
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: chronicle
+      initContainers:
+        - name: migrate
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_URL
+              value: postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until pg_isready -d "$POSTGRES_URL"; do sleep 2; done
+              for migration in /migrations/*.sql; do
+                echo "Applying $migration"
+                psql "$POSTGRES_URL" -v ON_ERROR_STOP=1 -f "$migration"
+              done
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      containers:
+        - name: chronicle
+          image: chronicle:latest
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8181
+          env:
+            - name: POSTGRES_URL
+              value: postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
+            - name: PROMETHEUS_URL
+              value: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+            - name: LOKI_URL
+              value: http://loki.monitoring.svc.cluster.local:3100
+            - name: RCA_API_URL
+              value: https://api.groq.com/openai/v1/chat/completions
+            - name: RCA_MODEL
+              value: llama-3.1-8b-instant
+            - name: RCA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: RCA_API_KEY
+                  optional: true
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LEADER_ELECTION_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: LEADER_ELECTION_NAME
+              value: chronicle-leader
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+      volumes:
+        - name: migrations
+          configMap:
+            name: chronicle-migrations
