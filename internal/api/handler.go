@@ -18,17 +18,22 @@ import (
 )
 
 type Handler struct {
-	replayer *replay.Replayer
-	analyzer *rca.Analyzer
-	rcaDB    *rca.PostgresEventSource
-	healer   *heal.Engine
-	graph    *store.GraphStore
-	actions  heal.ActionStore
-	k8s      kubernetes.Interface
+	replayer  *replay.Replayer
+	analyzer  *rca.Analyzer
+	rcaDB     *rca.PostgresEventSource
+	healer    *heal.Engine
+	graph     *store.GraphStore
+	actions   heal.ActionStore
+	k8s       kubernetes.Interface
+	execution *heal.Controller
 }
 
-func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.PostgresEventSource, healer *heal.Engine, graphStore *store.GraphStore, actionStore heal.ActionStore, k8sClient kubernetes.Interface) *Handler {
-	return &Handler{replayer: replayer, analyzer: analyzer, rcaDB: rcaDB, healer: healer, graph: graphStore, actions: actionStore, k8s: k8sClient}
+func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.PostgresEventSource, healer *heal.Engine, graphStore *store.GraphStore, actionStore heal.ActionStore, k8sClient kubernetes.Interface, execution ...*heal.Controller) *Handler {
+	var controller *heal.Controller
+	if len(execution) > 0 {
+		controller = execution[0]
+	}
+	return &Handler{replayer: replayer, analyzer: analyzer, rcaDB: rcaDB, healer: healer, graph: graphStore, actions: actionStore, k8s: k8sClient, execution: controller}
 }
 
 type analyzeResponse struct {
@@ -280,11 +285,19 @@ func (h *Handler) HealingActions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"actions": actions})
 }
 
-// POST /api/heal/actions/{id}/approve or /deny. This changes review state only;
-// it never executes Kubernetes changes while actions are dry-run.
+// POST /api/heal/actions/{id}/approve or /deny. Approval is authenticated;
+// live execution additionally requires the controller's safety gates.
 func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"use POST"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if !heal.ApprovalAuthorized(r) {
+		http.Error(w, `{"error":"approval authentication required"}`, http.StatusUnauthorized)
+		return
+	}
 	if h.actions == nil {
 		http.Error(w, `{"error":"healing store unavailable"}`, http.StatusServiceUnavailable)
 		return
@@ -308,6 +321,9 @@ func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"action is no longer pending or was not found"}`, http.StatusConflict)
 		return
+	}
+	if approved := parts[4] == "approve"; approved && h.execution != nil && h.execution.Policy.LiveEnabled {
+		_, _ = h.execution.ExecuteApproved(r.Context(), action)
 	}
 	json.NewEncoder(w).Encode(action)
 }

@@ -251,8 +251,9 @@ func main() {
 	}
 	healStore := heal.NewPostgresAuditStore(pool)
 	healer := heal.NewEngine(healStore)
+	healController := heal.NewController(healStore, heal.NewKubernetesExecutor(k8sClient))
 
-	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer, graphStore, healStore, k8sClient)
+	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer, graphStore, healStore, k8sClient, healController)
 	mux := http.NewServeMux()
 	mux.Handle("/", chronicleweb.Handler())
 	mux.HandleFunc("/api/replay", apiHandler.Replay)

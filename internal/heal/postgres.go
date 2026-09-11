@@ -3,9 +3,11 @@ package heal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -14,6 +16,11 @@ type PostgresAuditStore struct{ pool *pgxpool.Pool }
 type ActionStore interface {
 	ListActions(context.Context, int) ([]Action, error)
 	DecideAction(context.Context, string, bool, string, string) (*Action, error)
+}
+
+type ExecutionStore interface {
+	ClaimExecution(context.Context, string, time.Time) (bool, error)
+	CompleteExecution(context.Context, string, string, string, string, string) error
 }
 
 func NewPostgresAuditStore(pool *pgxpool.Pool) *PostgresAuditStore {
@@ -48,7 +55,7 @@ func (s *PostgresAuditStore) ListActions(ctx context.Context, limit int) ([]Acti
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, incident_id, rule, cause_type, action_type, namespace, target, confidence, reasoning, status, result, COALESCE(error,''), COALESCE(approval,'not_required'), COALESCE(payload,'null'::jsonb), dry_run, created_at FROM heal_actions ORDER BY created_at DESC LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT id, incident_id, rule, cause_type, action_type, namespace, target, confidence, reasoning, status, result, COALESCE(error,''), COALESCE(approval,'not_required'), COALESCE(payload,'null'::jsonb), dry_run, created_at, COALESCE(decided_by,''), COALESCE(decision_reason,''), decided_at, started_at, finished_at, COALESCE(verification,''), attempts FROM heal_actions ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +64,7 @@ func (s *PostgresAuditStore) ListActions(ctx context.Context, limit int) ([]Acti
 	for rows.Next() {
 		var a Action
 		var reasoningJSON []byte
-		if err := rows.Scan(&a.ID, &a.IncidentID, &a.Rule, &a.CauseType, &a.ActionType, &a.Namespace, &a.Target, &a.Confidence, &reasoningJSON, &a.Status, &a.Result, &a.Error, &a.Approval, &a.Payload, &a.DryRun, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.IncidentID, &a.Rule, &a.CauseType, &a.ActionType, &a.Namespace, &a.Target, &a.Confidence, &reasoningJSON, &a.Status, &a.Result, &a.Error, &a.Approval, &a.Payload, &a.DryRun, &a.CreatedAt, &a.DecisionBy, &a.DecisionReason, &a.DecidedAt, &a.StartedAt, &a.FinishedAt, &a.Verification, &a.Attempts); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(reasoningJSON, &a.Reasoning); err != nil {
@@ -65,9 +72,6 @@ func (s *PostgresAuditStore) ListActions(ctx context.Context, limit int) ([]Acti
 		}
 		a.Reasoning = append([]string{}, a.Reasoning...)
 		a.Payload = append(json.RawMessage{}, a.Payload...)
-		a.DecisionBy = ""
-		a.DecisionReason = ""
-		a.DecidedAt = nil
 		actions = append(actions, a)
 	}
 	return actions, rows.Err()
@@ -78,7 +82,7 @@ func (s *PostgresAuditStore) DecideAction(ctx context.Context, id string, approv
 	status := StatusBlocked
 	result := "DENIED BY REVIEWER"
 	if approved {
-		approval, status, result = ApprovalApproved, StatusWouldRun, "APPROVED (dry-run; execution disabled)"
+		approval, status, result = ApprovalApproved, StatusWouldRun, "APPROVED (queued; live execution safety gates apply)"
 	}
 	var a Action
 	var reasoningJSON []byte
@@ -98,8 +102,25 @@ func (s *PostgresAuditStore) CountRuleSince(ctx context.Context, rule string, si
 	var count int
 	err := s.pool.QueryRow(ctx, `
 		SELECT count(*) FROM heal_actions
-		WHERE rule = $1 AND created_at >= $2 AND status = $3`, rule, since, StatusWouldRun).Scan(&count)
+		WHERE rule = $1 AND created_at >= $2 AND status NOT IN ('skipped','blocked')`, rule, since).Scan(&count)
 	return count, err
+}
+
+func (s *PostgresAuditStore) ClaimExecution(ctx context.Context, id string, started time.Time) (bool, error) {
+	var claimed bool
+	err := s.pool.QueryRow(ctx, `UPDATE heal_actions SET status=$2, dry_run=false, started_at=$3, attempts=attempts+1 WHERE id=$1 AND approval='approved' AND status IN ('would_run','approved') RETURNING true`, id, StatusExecuting, started).Scan(&claimed)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return claimed, nil
+}
+
+func (s *PostgresAuditStore) CompleteExecution(ctx context.Context, id, status, result, executionError, verification string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE heal_actions SET status=$2, result=$3, error=NULLIF($4,''), verification=$5, finished_at=now() WHERE id=$1`, id, status, result, executionError, verification)
+	return err
 }
 
 func (s *PostgresAuditStore) HasActionForIncident(ctx context.Context, incidentID string) (bool, error) {

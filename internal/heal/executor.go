@@ -3,8 +3,10 @@ package heal
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -60,6 +62,28 @@ func (e *KubernetesExecutor) restartPod(ctx context.Context, action *Action) (st
 		return "", err
 	}
 	return fmt.Sprintf("deleted pod %s/%s; Kubernetes should recreate it", action.Namespace, action.Target), nil
+}
+
+func (e *KubernetesExecutor) Verify(ctx context.Context, action *Action) (string, error) {
+	if action.ActionType != ActionRestartPod {
+		return "not applicable", nil
+	}
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := e.Client.CoreV1().Pods(action.Namespace).Get(ctx, action.Target, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return "pod deletion verified", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (e *KubernetesExecutor) bumpMemory(ctx context.Context, action *Action) (string, error) {

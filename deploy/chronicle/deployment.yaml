@@ -133,6 +133,32 @@ spec:
                   fieldPath: metadata.namespace
             - name: LEADER_ELECTION_NAME
               value: chronicle-leader
+            - name: HEAL_LIVE_ENABLED
+              value: "false"
+            - name: HEAL_KILL_SWITCH
+              value: "true"
+            - name: HEAL_APPROVAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: HEAL_APPROVAL_TOKEN
+                  optional: true
+            - name: HEAL_ALLOWED_NAMESPACES
+              value: default
+            - name: HEAL_ALLOWED_ACTIONS
+              value: restart_pod
+            - name: HEAL_ALLOWED_TARGETS
+              value: default/redis
+            - name: HEAL_ACTION_TIMEOUT
+              value: 30s
+            - name: HEAL_OBSERVATION_STARTED_AT
+              value: ""
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: SLACK_WEBHOOK_URL
+                  optional: true
           resources:
             requests:
               cpu: 250m

@@ -15,6 +15,9 @@ import (
 
 const (
 	StatusWouldRun      = "would_run"
+	StatusExecuting     = "executing"
+	StatusSucceeded     = "succeeded"
+	StatusFailed        = "failed"
 	StatusSkipped       = "skipped"
 	StatusBlocked       = "blocked"
 	ApprovalNotRequired = "not_required"
@@ -47,6 +50,10 @@ type Action struct {
 	DecisionBy     string          `json:"decision_by,omitempty"`
 	DecisionReason string          `json:"decision_reason,omitempty"`
 	DecidedAt      *time.Time      `json:"decided_at,omitempty"`
+	StartedAt      *time.Time      `json:"started_at,omitempty"`
+	FinishedAt     *time.Time      `json:"finished_at,omitempty"`
+	Verification   string          `json:"verification,omitempty"`
+	Attempts       int             `json:"attempts"`
 }
 
 type Rule struct {
@@ -59,7 +66,7 @@ type Rule struct {
 }
 
 var defaultRules = []Rule{
-	{Name: "restart-deadlocked-pod", CauseType: "became_unready", ActionType: ActionRestartPod, MinConfidence: 0.80, MaxPerHour: 3},
+	{Name: "restart-deadlocked-pod", CauseType: "became_unready", ActionType: ActionRestartPod, MinConfidence: 0.80, MaxPerHour: 3, RequireApprove: true},
 	{Name: "bump-memory-on-oom", CauseType: "oom_kill", ActionType: ActionBumpMemory, MinConfidence: 0.85, MaxPerHour: 2},
 	{Name: "rollback-bad-deploy", CauseType: "deploy", ActionType: ActionRollbackDeployment, MinConfidence: 0.90, MaxPerHour: 1, RequireApprove: true},
 }
