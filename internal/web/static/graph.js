@@ -54,8 +54,9 @@
         const fromCenter = { x: Number(from.dataset.x) + nodeWidth / 2, y: Number(from.dataset.y) + nodeHeight / 2 };
         const toCenter = { x: Number(to.dataset.x) + nodeWidth / 2, y: Number(to.dataset.y) + nodeHeight / 2 };
         const start = edgePoint(fromCenter, toCenter), end = edgePoint(toCenter, fromCenter);
+        const evidence = (state.graphEvidence||[]).some(x => keyOf(x.From)===keyOf(e.From) && keyOf(x.To)===keyOf(e.To) && x.Kind===e.Kind);
         const active = selected && (selected === keyOf(e.From) || selected === keyOf(e.To));
-        return `<line class="graph-edge ${active ? 'edge-selected' : ''}" x1="${start.x}" y1="${start.y}" x2="${end.x}" y2="${end.y}" marker-end="url(#arrow)"></line>`;
+        return `<line class="graph-edge ${evidence ? 'edge-evidence' : active ? 'edge-selected' : ''}" x1="${start.x}" y1="${start.y}" x2="${end.x}" y2="${end.y}" marker-end="url(#arrow)"></line>`;
       }).join('') + `<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#3b5164"></path></marker></defs>`;
     };
     const inspect = (key) => {

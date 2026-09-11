@@ -68,6 +68,36 @@ func (s *GraphStore) At(ctx context.Context, at time.Time) ([]graph.Edge, error)
 	return s.at(ctx, at)
 }
 
+func (s *GraphStore) UpstreamAt(ctx context.Context, at time.Time, start string, maxDepth int) (map[string]int, error) {
+	edges, err := s.At(ctx, at)
+	if err != nil {
+		return nil, err
+	}
+	g := graph.New()
+	g.SetEdges(edges)
+	return g.Upstream(start, maxDepth), nil
+}
+
+func (s *GraphStore) DownstreamAt(ctx context.Context, at time.Time, start string, maxDepth int) (map[string]int, error) {
+	edges, err := s.At(ctx, at)
+	if err != nil {
+		return nil, err
+	}
+	g := graph.New()
+	g.SetEdges(edges)
+	return g.Downstream(start, maxDepth), nil
+}
+
+func (s *GraphStore) ImpactAt(ctx context.Context, at time.Time, start string, maxDepth int) (map[string]int, error) {
+	edges, err := s.At(ctx, at)
+	if err != nil {
+		return nil, err
+	}
+	g := graph.New()
+	g.SetEdges(edges)
+	return g.Impact(start, maxDepth), nil
+}
+
 func (s *GraphStore) at(ctx context.Context, at time.Time) ([]graph.Edge, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT from_key, to_key, kind, weight, source

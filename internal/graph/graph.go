@@ -99,3 +99,61 @@ func (g *Graph) Upstream(start string, maxDepth int) map[string]int {
 	}
 	return seen
 }
+
+// Downstream returns nodes affected by a change at start, keyed by node key
+// and annotated with their shortest hop distance.
+func (g *Graph) Downstream(start string, maxDepth int) map[string]int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	seen := map[string]int{start: 0}
+	queue := []string{start}
+	for depth := 1; depth <= maxDepth; depth++ {
+		var next []string
+		for _, node := range queue {
+			for _, edge := range g.outgoing[node] {
+				if _, ok := seen[edge.To.Key()]; ok {
+					continue
+				}
+				seen[edge.To.Key()] = depth
+				next = append(next, edge.To.Key())
+			}
+		}
+		queue = next
+		if len(queue) == 0 {
+			break
+		}
+	}
+	return seen
+}
+
+// Impact walks both directions because some infrastructure relationships are
+// represented as Service -> Pod while the operational impact travels Pod ->
+// Service. Causality still uses Upstream; this method is only for blast radius.
+func (g *Graph) Impact(start string, maxDepth int) map[string]int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	seen := map[string]int{start: 0}
+	queue := []string{start}
+	for depth := 1; depth <= maxDepth; depth++ {
+		var next []string
+		for _, node := range queue {
+			for _, edge := range g.outgoing[node] {
+				if _, ok := seen[edge.To.Key()]; !ok {
+					seen[edge.To.Key()] = depth
+					next = append(next, edge.To.Key())
+				}
+			}
+			for _, edge := range g.incoming[node] {
+				if _, ok := seen[edge.From.Key()]; !ok {
+					seen[edge.From.Key()] = depth
+					next = append(next, edge.From.Key())
+				}
+			}
+		}
+		queue = next
+		if len(queue) == 0 {
+			break
+		}
+	}
+	return seen
+}

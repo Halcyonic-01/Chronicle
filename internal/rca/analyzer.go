@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/graph"
 )
 
 type EventSource interface {
@@ -18,22 +19,41 @@ type EventSource interface {
 type GraphSource interface {
 	UpstreamAt(ctx context.Context, t time.Time, start string, maxDepth int) (map[string]int, error)
 }
+type ImpactGraphSource interface {
+	GraphSource
+	DownstreamAt(ctx context.Context, t time.Time, start string, maxDepth int) (map[string]int, error)
+	ImpactAt(ctx context.Context, t time.Time, start string, maxDepth int) (map[string]int, error)
+}
+type HistoricalEdgeSource interface {
+	EdgesAt(ctx context.Context, t time.Time) ([]graph.Edge, error)
+}
 type Narrator interface {
 	Narrate(context.Context, *Result) (string, error)
 }
 
 type Candidate struct {
-	Event    event.Event `json:"event"`
-	Distance int         `json:"distance"`
-	Score    float64     `json:"score"`
-	Reasons  []string    `json:"reasons"`
+	Event            event.Event `json:"event"`
+	Distance         int         `json:"distance"`
+	Score            float64     `json:"score"`
+	Reasons          []string    `json:"reasons"`
+	AffectedServices int         `json:"affected_services"`
+	AffectedNodes    int         `json:"affected_nodes"`
+	BlastRadiusScore float64     `json:"blast_radius_score"`
+}
+type BlastRadius struct {
+	AffectedServices int      `json:"affected_services"`
+	AffectedNodes    int      `json:"affected_nodes"`
+	Score            float64  `json:"score"`
+	Services         []string `json:"services"`
 }
 type Result struct {
-	Symptom    event.Event `json:"symptom"`
-	Candidates []Candidate `json:"candidates"`
-	Confidence float64     `json:"confidence"`
-	Scanned    int         `json:"scanned"`
-	Narrative  string      `json:"narrative"`
+	Symptom     event.Event  `json:"symptom"`
+	Candidates  []Candidate  `json:"candidates"`
+	Confidence  float64      `json:"confidence"`
+	Scanned     int          `json:"scanned"`
+	Narrative   string       `json:"narrative"`
+	BlastRadius BlastRadius  `json:"blast_radius"`
+	Evidence    []graph.Edge `json:"evidence"`
 }
 type Analyzer struct {
 	Events   EventSource
@@ -78,6 +98,13 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		return nil, fmt.Errorf("load graph at symptom time: %w", err)
 	}
 
+	impact, _ := a.downstream(ctx, symptom.IngestedAt, key(symptom), hops)
+	result := &Result{Symptom: symptom, BlastRadius: summarizeImpact(impact), Scanned: len(raw)}
+	if edgeSource, ok := a.Graph.(HistoricalEdgeSource); ok {
+		if edges, edgeErr := edgeSource.EdgesAt(ctx, symptom.IngestedAt); edgeErr == nil {
+			result.Evidence = evidenceEdges(edges, upstream, key(symptom))
+		}
+	}
 	candidates := make([]Candidate, 0, len(raw))
 	for _, e := range raw {
 		if !e.IngestedAt.Before(symptom.IngestedAt) || e.ID == symptom.ID {
@@ -88,6 +115,9 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 			continue
 		}
 		c := Candidate{Event: e, Distance: distance}
+		candidateImpact, _ := a.downstream(ctx, symptom.IngestedAt, key(e), hops)
+		impact := summarizeImpact(candidateImpact)
+		c.AffectedServices, c.AffectedNodes, c.BlastRadiusScore = impact.AffectedServices, impact.AffectedNodes, impact.Score
 		score(&c, symptom)
 		candidates = append(candidates, c)
 	}
@@ -95,7 +125,8 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	if len(candidates) > 5 {
 		candidates = candidates[:5]
 	}
-	result := &Result{Symptom: symptom, Candidates: candidates, Confidence: confidence(candidates), Scanned: len(raw)}
+	result.Candidates = candidates
+	result.Confidence = confidence(candidates)
 	if a.Narrator != nil {
 		result.Narrative, err = a.Narrator.Narrate(ctx, result)
 		if err != nil {
@@ -105,6 +136,54 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		result.Narrative = FallbackNarrative(result)
 	}
 	return result, nil
+}
+
+func (a *Analyzer) downstream(ctx context.Context, at time.Time, start string, hops int) (map[string]int, error) {
+	if source, ok := a.Graph.(ImpactGraphSource); ok {
+		return source.ImpactAt(ctx, at, start, hops)
+	}
+	return map[string]int{start: 0}, nil
+}
+
+func summarizeImpact(nodes map[string]int) BlastRadius {
+	result := BlastRadius{Services: []string{}}
+	for node, distance := range nodes {
+		if distance == 0 {
+			continue
+		}
+		result.AffectedNodes++
+		parsed, err := graph.ParseKey(node)
+		if err != nil {
+			continue
+		}
+		if parsed.Kind == "Service" || parsed.Kind == "Deployment" || parsed.Kind == "StatefulSet" {
+			result.AffectedServices++
+			result.Services = append(result.Services, node)
+		}
+	}
+	result.Score = math.Min(1, float64(result.AffectedServices)*0.15+float64(result.AffectedNodes)*0.03)
+	sort.Strings(result.Services)
+	return result
+}
+
+func evidenceEdges(edges []graph.Edge, reachable map[string]int, symptom string) []graph.Edge {
+	reachable[symptom] = 0
+	result := make([]graph.Edge, 0)
+	seen := map[string]bool{}
+	for _, edge := range edges {
+		if _, from := reachable[edge.From.Key()]; !from {
+			continue
+		}
+		if _, to := reachable[edge.To.Key()]; !to {
+			continue
+		}
+		id := edge.From.Key() + "|" + edge.To.Key() + "|" + edge.Kind
+		if !seen[id] {
+			seen[id] = true
+			result = append(result, edge)
+		}
+	}
+	return result
 }
 
 func score(c *Candidate, symptom event.Event) {
@@ -120,6 +199,11 @@ func score(c *Candidate, symptom event.Event) {
 	df := 1.0 / (1.0 + float64(c.Distance)*0.4)
 	s *= df
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%d hops away (×%.2f)", c.Distance, df))
+	if c.AffectedServices > 0 {
+		impactFactor := 1 + math.Min(0.25, float64(c.AffectedServices)*0.05)
+		s *= impactFactor
+		c.Reasons = append(c.Reasons, fmt.Sprintf("%d affected service(s) (×%.2f)", c.AffectedServices, impactFactor))
+	}
 	c.Score = math.Min(s, 1.0)
 }
 func confidence(c []Candidate) float64 {
@@ -141,5 +225,9 @@ func FallbackNarrative(r *Result) string {
 	if r.Confidence >= 0.5 {
 		prefix = "The most likely cause is "
 	}
-	return fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, c.Event.IngestedAt.Format(time.RFC3339), c.Distance, r.Symptom.IngestedAt.Sub(c.Event.IngestedAt).Seconds(), r.Confidence, r.Scanned, len(r.Candidates))
+	impact := ""
+	if r.BlastRadius.AffectedServices > 0 {
+		impact = fmt.Sprintf(", affecting %d downstream service(s)", r.BlastRadius.AffectedServices)
+	}
+	return fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom%s), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, c.Event.IngestedAt.Format(time.RFC3339), c.Distance, r.Symptom.IngestedAt.Sub(c.Event.IngestedAt).Seconds(), impact, r.Confidence, r.Scanned, len(r.Candidates))
 }
