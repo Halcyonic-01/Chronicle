@@ -99,6 +99,11 @@ func (h *Handler) Replay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
+	if h.graph != nil {
+		if edges, graphErr := h.graph.At(r.Context(), t); graphErr == nil {
+			snap.Edges = edges
+		}
+	}
 
 	json.NewEncoder(w).Encode(snap)
 }

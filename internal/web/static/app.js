@@ -1,4 +1,5 @@
 const state = { page: location.hash.slice(1) || 'overview', events: [], eventError: '', loading: true, selectedEvent: null, replayAt: new Date().toISOString() };
+window.chronicleState = state;
 const navItems = [
   ['overview','Overview','⌂'],['timeline','Timeline','≡'],['replay','Replay','◷'],['graph','Dependency Graph','◇'],
   ['incidents','Incidents','!'],['rca','Root Cause','⌁'],['healing','Self-Healing','↺'],['events','Events','≡'],

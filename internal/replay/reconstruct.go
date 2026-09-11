@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
@@ -86,15 +87,15 @@ func applyEvent(s *Snapshot, e event.Event) {
 	obj, exists := s.Objects[key]
 
 	switch e.Type {
-	case "pod_created":
+	case "pod_created", "resource_created":
 		s.Objects[key] = ObjectState{
 			Kind: e.EntityKind, Name: e.EntityName,
 			Namespace: e.Namespace, Phase: "Pending",
 		}
-	case "pod_deleted":
+	case "pod_deleted", "resource_deleted":
 		delete(s.Objects, key)
 
-	case "container_restart", "oom_kill":
+	case "container_restart", "oom_kill", "crash_loop":
 		if !exists {
 			return
 		}
@@ -118,11 +119,23 @@ func applyEvent(s *Snapshot, e event.Event) {
 		obj.ReadyCount = 0
 		s.Objects[key] = obj
 
-	case "deploy":
+	case "k8s_event", "log_error", "application_unhealthy":
 		if !exists {
 			return
 		}
+		obj.Phase = "Degraded"
+		s.Objects[key] = obj
+
+	case "deploy":
+		if !exists {
+			obj = ObjectState{Kind: e.EntityKind, Name: e.EntityName, Namespace: e.Namespace}
+			exists = true
+		}
 		obj.Image = gjson.GetBytes(e.Payload, "new_image").String()
+		if obj.Image == "" {
+			obj.Image = gjson.GetBytes(e.Payload, "revision").String()
+		}
+		obj.Phase = "Running"
 		s.Objects[key] = obj
 
 	case "scale":
@@ -139,10 +152,18 @@ func applyEvent(s *Snapshot, e event.Event) {
 		obj.MemLimit = gjson.GetBytes(e.Payload, "new_mem_limit").Int()
 		s.Objects[key] = obj
 
-	case "error_spike", "latency_spike", "memory_pressure":
+	case "config_change", "terraform_run":
+		if exists {
+			obj.Phase = "Changed"
+			s.Objects[key] = obj
+		}
+
+	case "error_spike", "latency_spike", "memory_pressure", "oom_pressure":
 		// Metric events update the metric map, not object structure.
 		s.Metrics[e.Type+"{"+e.EntityName+"}"] =
 			gjson.GetBytes(e.Payload, "value").Float()
+	case "error_spike_resolved", "latency_spike_resolved", "memory_pressure_resolved":
+		delete(s.Metrics, strings.TrimSuffix(e.Type, "_resolved")+"{"+e.EntityName+"}")
 	}
 }
 
@@ -167,7 +188,7 @@ func (r *Replayer) VerifyDrift(ctx context.Context) error {
 	var real Snapshot
 	json.Unmarshal(raw, &real)
 
-	reconstructed, err := r.At(ctx, takenAt)
+	reconstructed, err := r.At(ctx, target)
 	if err != nil {
 		return err
 	}

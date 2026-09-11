@@ -139,6 +139,9 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 			}),
 		})
 	}
+	if !oldReady && newReady {
+		k.Emit(event.Event{Source: "k8s", EntityKind: "Pod", EntityName: new.Name, Namespace: new.Namespace, Type: "became_ready", Severity: "info", Title: fmt.Sprintf("%s started serving traffic", new.Name), Payload: mustJSON(map[string]any{"owner": ownerRef(new)})})
+	}
 }
 
 func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
@@ -177,6 +180,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "resource_change",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s resource limits changed", new.Name),
+			Payload:    mustJSON(map[string]any{"new_mem_limit": memoryLimit(new.Spec.Template.Spec.Containers[0]), "old_mem_limit": memoryLimit(old.Spec.Template.Spec.Containers[0])}),
 		})
 	}
 
@@ -189,8 +193,16 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "scale",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s scaled from %d to %d", new.Name, *old.Spec.Replicas, *new.Spec.Replicas),
+			Payload:    mustJSON(map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas}),
 		})
 	}
+}
+
+func memoryLimit(container corev1.Container) int64 {
+	if value, ok := container.Resources.Limits[corev1.ResourceMemory]; ok {
+		return value.Value()
+	}
+	return 0
 }
 
 // Helpers

@@ -48,6 +48,8 @@ func NewSnapshotter(client kubernetes.Interface, promClient api.Client, pool *pg
 func (s *Snapshotter) Run(ctx context.Context) error {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
+	maintenanceTicker := time.NewTicker(time.Hour)
+	defer maintenanceTicker.Stop()
 
 	// Take one immediately on startup
 	if _, err := s.Take(ctx); err != nil {
@@ -62,8 +64,36 @@ func (s *Snapshotter) Run(ctx context.Context) error {
 			if _, err := s.Take(ctx); err != nil {
 				fmt.Printf("snapshot failed: %v\n", err)
 			}
+		case <-maintenanceTicker.C:
+			if err := s.Prune(ctx, time.Now().UTC()); err != nil {
+				fmt.Printf("snapshot retention failed: %v\n", err)
+			}
+			replayer := NewReplayer(s.pool)
+			if err := replayer.VerifyDrift(ctx); err != nil {
+				fmt.Printf("snapshot drift verification failed: %v\n", err)
+			}
 		}
 	}
+}
+
+// Prune enforces the Phase 3 retention policy:
+// every snapshot for seven days, one per hour for thirty days, and one per
+// day for one year. Older snapshots are removed.
+func (s *Snapshotter) Prune(ctx context.Context, now time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM snapshots AS old
+		WHERE old.taken_at < $1 - interval '365 days'
+		   OR (old.taken_at < $1 - interval '30 days' AND NOT EXISTS (
+				SELECT 1 FROM snapshots AS newer
+				WHERE date_trunc('day', newer.taken_at) = date_trunc('day', old.taken_at)
+				  AND newer.taken_at > old.taken_at
+			))
+		   OR (old.taken_at < $1 - interval '7 days' AND NOT EXISTS (
+				SELECT 1 FROM snapshots AS newer
+				WHERE date_trunc('hour', newer.taken_at) = date_trunc('hour', old.taken_at)
+				  AND newer.taken_at > old.taken_at
+			))`, now)
+	return err
 }
 
 // Take captures a complete point-in-time snapshot of the cluster.
