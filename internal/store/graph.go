@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,11 +59,21 @@ func (s *GraphStore) Sync(ctx context.Context, edges []graph.Edge) error {
 
 // Current returns the active dependency edges used by the operations UI.
 func (s *GraphStore) Current(ctx context.Context) ([]graph.Edge, error) {
+	return s.at(ctx, time.Now().UTC())
+}
+
+// At returns the graph that was active at the requested instant using the
+// temporal validity interval, without reconstructing a Kubernetes snapshot.
+func (s *GraphStore) At(ctx context.Context, at time.Time) ([]graph.Edge, error) {
+	return s.at(ctx, at)
+}
+
+func (s *GraphStore) at(ctx context.Context, at time.Time) ([]graph.Edge, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT from_key, to_key, kind, weight, source
 		FROM graph_edges
-		WHERE valid_to IS NULL
-		ORDER BY from_key, to_key`)
+		WHERE valid_from <= $1 AND (valid_to IS NULL OR valid_to > $1)
+		ORDER BY from_key, to_key`, at)
 	if err != nil {
 		return nil, err
 	}

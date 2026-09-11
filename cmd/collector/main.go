@@ -114,27 +114,36 @@ func main() {
 
 	syncGraph := func(syncCtx context.Context) {
 		var allEdges []graph.Edge
-		if pods, err := k8sClient.CoreV1().Pods("").List(syncCtx, metav1.ListOptions{}); err == nil {
-			if svcs, err := k8sClient.CoreV1().Services("").List(syncCtx, metav1.ListOptions{}); err == nil {
-				allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
-				allEdges = append(allEdges, graph.BuildOwnerEdges(pods.Items)...)
-				knownSvcs := make(map[string]bool)
-				for _, s := range svcs.Items {
-					knownSvcs[s.Name] = true
-				}
-				for _, p := range pods.Items {
-					allEdges = append(allEdges, graph.InferCallEdges(p, knownSvcs)...)
-				}
+		graphReady := false
+		pods, podErr := k8sClient.CoreV1().Pods("").List(syncCtx, metav1.ListOptions{})
+		svcs, svcErr := k8sClient.CoreV1().Services("").List(syncCtx, metav1.ListOptions{})
+		if podErr == nil && svcErr == nil {
+			graphReady = true
+			allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
+			allEdges = append(allEdges, graph.BuildOwnerEdges(pods.Items)...)
+			allEdges = append(allEdges, graph.BuildReferenceEdges(pods.Items)...)
+			knownSvcs := make(map[string]bool)
+			for _, s := range svcs.Items {
+				knownSvcs[s.Namespace+"/"+s.Name] = true
+			}
+			for _, p := range pods.Items {
+				allEdges = append(allEdges, graph.InferCallEdges(p, knownSvcs)...)
 			}
 		} else {
-			slog.Warn("failed to fetch k8s resources for graph", "err", err)
+			slog.Warn("failed to fetch k8s resources for graph", "pod_err", podErr, "service_err", svcErr)
+		}
+		if ingresses, err := k8sClient.NetworkingV1().Ingresses("").List(syncCtx, metav1.ListOptions{}); err == nil {
+			allEdges = append(allEdges, graph.BuildIngressEdges(ingresses.Items)...)
+		} else {
+			graphReady = false
+			slog.Warn("failed to fetch ingresses for graph", "err", err)
 		}
 
 		if runtimeEdges, err := meshBuilder.RuntimeEdges(syncCtx); err == nil {
 			allEdges = append(allEdges, runtimeEdges...)
 		}
 
-		if len(allEdges) > 0 {
+		if graphReady {
 			deduped := make([]graph.Edge, 0, len(allEdges))
 			seen := make(map[string]bool)
 			for _, e := range allEdges {
@@ -236,7 +245,7 @@ func main() {
 	narrator := rca.NewOpenAICompatibleNarratorFromEnv()
 	analyzer := &rca.Analyzer{
 		Events:   rcaDB,
-		Graph:    &rca.ReplayerGraphSource{Replayer: replayer},
+		Graph:    &rca.ReplayerGraphSource{Replayer: replayer, Historical: graphStore},
 		Narrator: narrator,
 		MaxHops:  3,
 	}

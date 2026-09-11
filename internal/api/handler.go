@@ -155,6 +155,7 @@ type graphResponse struct {
 }
 
 // GET /api/graph returns the current dependency graph used by RCA.
+// Pass ?at=<RFC3339> to query the temporal graph at a historical instant.
 func (h *Handler) Graph(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
@@ -162,7 +163,20 @@ func (h *Handler) Graph(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"graph store unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
-	edges, err := h.graph.Current(r.Context())
+	var edges []graph.Edge
+	var err error
+	historical := false
+	if raw := r.URL.Query().Get("at"); raw != "" {
+		historical = true
+		at, parseErr := time.Parse(time.RFC3339, raw)
+		if parseErr != nil {
+			http.Error(w, `{"error":"invalid at timestamp, use RFC3339"}`, http.StatusBadRequest)
+			return
+		}
+		edges, err = h.graph.At(r.Context(), at)
+	} else {
+		edges, err = h.graph.Current(r.Context())
+	}
 	if err != nil {
 		http.Error(w, `{"error":"failed to load graph"}`, http.StatusInternalServerError)
 		return
@@ -174,7 +188,7 @@ func (h *Handler) Graph(w http.ResponseWriter, r *http.Request) {
 	}
 	// Include live resources even when they currently have no dependency edge.
 	// Otherwise isolated services silently disappear from the graph UI.
-	if h.k8s != nil {
+	if h.k8s != nil && !historical {
 		if items, err := h.k8s.CoreV1().Services("").List(r.Context(), metav1.ListOptions{}); err == nil {
 			for _, item := range items.Items {
 				n := graph.Node{Kind: "Service", Name: item.Name, Namespace: item.Namespace}
@@ -196,6 +210,36 @@ func (h *Handler) Graph(w http.ResponseWriter, r *http.Request) {
 		if items, err := h.k8s.AppsV1().StatefulSets("").List(r.Context(), metav1.ListOptions{}); err == nil {
 			for _, item := range items.Items {
 				n := graph.Node{Kind: "StatefulSet", Name: item.Name, Namespace: item.Namespace}
+				seen[n.Key()] = n
+			}
+		}
+		if items, err := h.k8s.CoreV1().ConfigMaps("").List(r.Context(), metav1.ListOptions{}); err == nil {
+			for _, item := range items.Items {
+				n := graph.Node{Kind: "ConfigMap", Name: item.Name, Namespace: item.Namespace}
+				seen[n.Key()] = n
+			}
+		}
+		if items, err := h.k8s.CoreV1().Secrets("").List(r.Context(), metav1.ListOptions{}); err == nil {
+			for _, item := range items.Items {
+				n := graph.Node{Kind: "Secret", Name: item.Name, Namespace: item.Namespace}
+				seen[n.Key()] = n
+			}
+		}
+		if items, err := h.k8s.CoreV1().PersistentVolumeClaims("").List(r.Context(), metav1.ListOptions{}); err == nil {
+			for _, item := range items.Items {
+				n := graph.Node{Kind: "PersistentVolumeClaim", Name: item.Name, Namespace: item.Namespace}
+				seen[n.Key()] = n
+			}
+		}
+		if items, err := h.k8s.CoreV1().Nodes().List(r.Context(), metav1.ListOptions{}); err == nil {
+			for _, item := range items.Items {
+				n := graph.Node{Kind: "Node", Name: item.Name}
+				seen[n.Key()] = n
+			}
+		}
+		if items, err := h.k8s.NetworkingV1().Ingresses("").List(r.Context(), metav1.ListOptions{}); err == nil {
+			for _, item := range items.Items {
+				n := graph.Node{Kind: "Ingress", Name: item.Name, Namespace: item.Namespace}
 				seen[n.Key()] = n
 			}
 		}
