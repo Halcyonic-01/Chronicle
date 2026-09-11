@@ -53,6 +53,11 @@ func main() {
 
 	// Init GitHub client
 	ghClient := github.NewClient(nil)
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		ghClient = github.NewTokenClient(ctx, token)
+	}
+	githubOwner := valueOrEnv("GITHUB_OWNER", "Halcyonic-01")
+	githubRepo := valueOrEnv("GITHUB_REPO", "Chronicle")
 
 	inCluster := os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 
@@ -86,6 +91,21 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	var eventBus *store.KafkaBus
+	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
+		eventBus = store.NewKafkaBus(brokers, valueOrEnv("KAFKA_TOPIC", "chronicle.events"), valueOrEnv("KAFKA_GROUP", "chronicle-writer"))
+		defer eventBus.Close()
+	}
+	var recentCache *store.RecentCache
+	if address := os.Getenv("REDIS_ADDR"); address != "" {
+		recentCache = store.NewRecentCache(address, os.Getenv("REDIS_PASSWORD"), 0)
+		defer recentCache.Close()
+	}
+	collectorEvents := events
+	if eventBus != nil {
+		collectorEvents = make(chan event.Event, 10_000)
+	}
 
 	// Initialize Graph dependencies
 	inMemGraph := graph.New()
@@ -141,13 +161,54 @@ func main() {
 		if err := func() error {
 			syncGraph(leaderCtx)
 			leaderGroup, leaderCtx := errgroup.WithContext(leaderCtx)
-			leaderGroup.Go(func() error { return collect.NewK8sCollector(k8sClient, events).Run(leaderCtx) })
+			leaderGroup.Go(func() error { return collect.NewK8sCollector(k8sClient, collectorEvents).Run(leaderCtx) })
 			leaderGroup.Go(func() error {
-				return collect.NewGitHubCollector(ghClient, "Halcyonic-01", "Chronicle", events).Run(leaderCtx)
+				return collect.NewGitHubCollector(ghClient, githubOwner, githubRepo, collectorEvents).Run(leaderCtx)
 			})
-			leaderGroup.Go(func() error { return collect.NewPromCollector(promClient, events).Run(leaderCtx) })
-			leaderGroup.Go(func() error { return collect.NewLokiCollector(events).Run(leaderCtx) })
-			leaderGroup.Go(func() error { return store.NewWriter(pool).Run(leaderCtx, events) })
+			leaderGroup.Go(func() error { return collect.NewPromCollector(promClient, collectorEvents).Run(leaderCtx) })
+			leaderGroup.Go(func() error { return collect.NewLokiCollector(collectorEvents).Run(leaderCtx) })
+			if argocd := collect.NewArgoCollectorFromEnv(collectorEvents); argocd != nil {
+				leaderGroup.Go(func() error { return argocd.Run(leaderCtx) })
+			}
+			if terraform := collect.NewTerraformCollectorFromEnv(collectorEvents); terraform != nil {
+				leaderGroup.Go(func() error { return terraform.Run(leaderCtx) })
+			}
+			if eventBus != nil {
+				leaderGroup.Go(func() error {
+					for {
+						select {
+						case <-leaderCtx.Done():
+							return leaderCtx.Err()
+						case e := <-collectorEvents:
+							if err := eventBus.Publish(leaderCtx, e); err != nil {
+								slog.Warn("Kafka publish failed; retrying", "err", err)
+								select {
+								case <-leaderCtx.Done():
+									return leaderCtx.Err()
+								case <-time.After(2 * time.Second):
+								}
+							}
+						}
+					}
+				})
+				leaderGroup.Go(func() error {
+					for {
+						if err := eventBus.Consume(leaderCtx, events); err != nil {
+							if errors.Is(err, context.Canceled) {
+								return err
+							}
+							slog.Warn("Kafka consume failed; retrying", "err", err)
+							select {
+							case <-leaderCtx.Done():
+								return leaderCtx.Err()
+							case <-time.After(2 * time.Second):
+							}
+							continue
+						}
+					}
+				})
+			}
+			leaderGroup.Go(func() error { return store.NewWriter(pool, recentCache).Run(leaderCtx, events) })
 			leaderGroup.Go(func() error { return snapshotter.Run(leaderCtx) })
 			leaderGroup.Go(func() error {
 				ticker := time.NewTicker(30 * time.Second)

@@ -51,6 +51,9 @@ helm upgrade --install postgres bitnami/postgresql \
     --set auth.postgresPassword=postgres \
     --set primary.persistence.enabled=false
 
+# Redis is the low-latency recent-event cache used by the live dashboard.
+kubectl apply -f deploy/chronicle/redis.yaml
+
 
 
 # 5. Install Linkerd Service Mesh

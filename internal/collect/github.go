@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -30,7 +31,13 @@ func NewGitHubCollector(client *github.Client, owner, repo string, out chan<- ev
 }
 
 func (g *GitHubCollector) Run(ctx context.Context) error {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := 30 * time.Second
+	if raw := os.Getenv("GITHUB_POLL_INTERVAL"); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			interval = parsed
+		}
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -42,7 +49,7 @@ func (g *GitHubCollector) Run(ctx context.Context) error {
 				Since: g.lastSeen,
 			})
 			if err != nil {
-				// log.Warn("github poll failed", "err", err)
+				// GitHub is an optional source; transient failures must not stop K8s ingestion.
 				continue // transient error
 			}
 

@@ -12,11 +12,16 @@ import (
 )
 
 type Writer struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	cache *RecentCache
 }
 
-func NewWriter(pool *pgxpool.Pool) *Writer {
-	return &Writer{pool: pool}
+func NewWriter(pool *pgxpool.Pool, caches ...*RecentCache) *Writer {
+	var cache *RecentCache
+	if len(caches) > 0 {
+		cache = caches[0]
+	}
+	return &Writer{pool: pool, cache: cache}
 }
 
 func (w *Writer) Run(ctx context.Context, in <-chan event.Event) error {
@@ -44,11 +49,16 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event) error {
 
 		if err != nil {
 			slog.Error("batch insert failed", "n", len(buf), "err", err)
-			// In a real app with Kafka, we'd nack or rely on Kafka offset retry
+			return
 		}
 
-		// Also push to Redis for the live dashboard in a real app
-		// w.cacheRecent(ctx, buf)
+		if w.cache != nil {
+			for _, e := range buf {
+				if err := w.cache.Add(ctx, e); err != nil {
+					slog.Warn("failed to update recent event cache", "err", err)
+				}
+			}
+		}
 
 		buf = buf[:0] // reset buffer
 	}

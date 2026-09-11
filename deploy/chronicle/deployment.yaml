@@ -75,6 +75,54 @@ spec:
                   name: chronicle-config
                   key: RCA_API_KEY
                   optional: true
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: GITHUB_TOKEN
+                  optional: true
+            - name: GITHUB_OWNER
+              value: "Halcyonic-01"
+            - name: GITHUB_REPO
+              value: "Chronicle"
+            - name: KAFKA_BROKERS
+              value: "kafka.chronicle.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC
+              value: "chronicle.events"
+            - name: KAFKA_GROUP
+              value: "chronicle-writer"
+            - name: REDIS_ADDR
+              value: "redis.chronicle.svc.cluster.local:6379"
+            - name: ARGOCD_URL
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: ARGOCD_URL
+                  optional: true
+            - name: ARGOCD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: ARGOCD_TOKEN
+                  optional: true
+            - name: TERRAFORM_URL
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: TERRAFORM_URL
+                  optional: true
+            - name: TERRAFORM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: TERRAFORM_TOKEN
+                  optional: true
+            - name: TERRAFORM_ORG
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: TERRAFORM_ORG
+                  optional: true
             - name: POD_NAME
               valueFrom:
                 fieldRef:
