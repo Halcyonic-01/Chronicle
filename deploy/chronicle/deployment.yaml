@@ -58,7 +58,13 @@ spec:
           ports:
             - name: http
               containerPort: 8181
+          volumeMounts:
+            - name: ui
+              mountPath: /ui
+              readOnly: true
           env:
+            - name: CHRONICLE_UI_DIR
+              value: /ui
             - name: POSTGRES_URL
               value: postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
             - name: PROMETHEUS_URL
@@ -161,11 +167,11 @@ spec:
                   optional: true
           resources:
             requests:
-              cpu: 250m
-              memory: 512Mi
+              cpu: "250m"
+              memory: "512Mi"
             limits:
-              cpu: 1
-              memory: 1Gi
+              cpu: "1"
+              memory: "1Gi"
           readinessProbe:
             httpGet:
               path: /
@@ -182,3 +188,6 @@ spec:
         - name: migrations
           configMap:
             name: chronicle-migrations
+        - name: ui
+          configMap:
+            name: chronicle-ui

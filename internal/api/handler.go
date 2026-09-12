@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -148,20 +150,134 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items, err := h.rcaDB.RecentEvents(r.Context(), from, to, limit)
+	offset := 0
+	if value := r.URL.Query().Get("offset"); value != "" {
+		if _, err := fmt.Sscanf(value, "%d", &offset); err != nil || offset < 0 {
+			http.Error(w, `{"error":"invalid offset"}`, http.StatusBadRequest)
+			return
+		}
+	}
+	items, err := h.rcaDB.RecentEvents(r.Context(), from, to, limit, offset)
 	if err != nil {
 		http.Error(w, `{"error":"failed to load events"}`, http.StatusInternalServerError)
+		return
+	}
+	total, err := h.rcaDB.CountEvents(r.Context(), from, to)
+	if err != nil {
+		http.Error(w, `{"error":"failed to count events"}`, http.StatusInternalServerError)
 		return
 	}
 	if items == nil {
 		items = []event.Event{}
 	}
-	json.NewEncoder(w).Encode(map[string]any{"events": items, "from": from, "to": to})
+	json.NewEncoder(w).Encode(map[string]any{"events": items, "total": total, "offset": offset, "from": from, "to": to})
 }
 
 type graphResponse struct {
 	Nodes []graph.Node `json:"nodes"`
 	Edges []graph.Edge `json:"edges"`
+}
+
+type postureResource struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	Ready     int32  `json:"ready"`
+	Desired   int32  `json:"desired"`
+	Restarts  int32  `json:"restarts"`
+}
+
+type postureResponse struct {
+	Resources []postureResource `json:"resources"`
+	Summary   struct {
+		Total    int `json:"total"`
+		Healthy  int `json:"healthy"`
+		Warning  int `json:"warning"`
+		Critical int `json:"critical"`
+	} `json:"summary"`
+}
+
+// Posture returns live Kubernetes health, deliberately separate from the
+// historical event stream. A resource is healthy only when its current
+// Kubernetes status says it is ready.
+func (h *Handler) Posture(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	if h.k8s == nil {
+		http.Error(w, `{"error":"kubernetes client unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	result := postureResponse{Resources: []postureResource{}}
+	if pods, err := h.k8s.CoreV1().Pods("").List(r.Context(), metav1.ListOptions{}); err == nil {
+		for _, pod := range pods.Items {
+			ready := false
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+					ready = true
+					break
+				}
+			}
+			var restarts int32
+			for _, status := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+				restarts += status.RestartCount
+			}
+			status := "healthy"
+			message := string(pod.Status.Phase)
+			if pod.Status.Phase == corev1.PodFailed {
+				status = "critical"
+				message = "Pod failed"
+			} else if pod.Status.Phase == corev1.PodPending || !ready {
+				status = "warning"
+				if !ready {
+					message = "Pod is not ready"
+				}
+			}
+			result.Resources = append(result.Resources, postureResource{Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, Status: status, Message: message, Ready: boolInt32(ready), Desired: 1, Restarts: restarts})
+		}
+	}
+	if deployments, err := h.k8s.AppsV1().Deployments("").List(r.Context(), metav1.ListOptions{}); err == nil {
+		for _, deployment := range deployments.Items {
+			desired := int32(1)
+			if deployment.Spec.Replicas != nil {
+				desired = *deployment.Spec.Replicas
+			}
+			status := "healthy"
+			message := fmt.Sprintf("%d/%d replicas ready", deployment.Status.ReadyReplicas, desired)
+			if deployment.Status.ReadyReplicas < desired {
+				status = "warning"
+			}
+			result.Resources = append(result.Resources, postureResource{Kind: "Deployment", Namespace: deployment.Namespace, Name: deployment.Name, Status: status, Message: message, Ready: deployment.Status.ReadyReplicas, Desired: desired})
+		}
+	}
+	sort.Slice(result.Resources, func(i, j int) bool {
+		rank := map[string]int{"critical": 0, "warning": 1, "healthy": 2}
+		if rank[result.Resources[i].Status] != rank[result.Resources[j].Status] {
+			return rank[result.Resources[i].Status] < rank[result.Resources[j].Status]
+		}
+		return result.Resources[i].Namespace+"/"+result.Resources[i].Name < result.Resources[j].Namespace+"/"+result.Resources[j].Name
+	})
+	for _, resource := range result.Resources {
+		result.Summary.Total++
+		switch resource.Status {
+		case "critical":
+			result.Summary.Critical++
+		case "warning":
+			result.Summary.Warning++
+		default:
+			result.Summary.Healthy++
+		}
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func boolInt32(value bool) int32 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // GET /api/graph returns the current dependency graph used by RCA.

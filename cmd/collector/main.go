@@ -258,6 +258,7 @@ func main() {
 	mux.Handle("/", chronicleweb.Handler())
 	mux.HandleFunc("/api/replay", apiHandler.Replay)
 	mux.HandleFunc("/api/events", apiHandler.Events)
+	mux.HandleFunc("/api/posture", apiHandler.Posture)
 	mux.HandleFunc("/api/analyze", apiHandler.Analyze)
 	mux.HandleFunc("/api/graph", apiHandler.Graph)
 	mux.HandleFunc("/api/heal/actions", apiHandler.HealingActions)

@@ -1,4 +1,4 @@
-.PHONY: setup teardown migrate build-chronicle deploy-chronicle test-phase4 test-phase5-kind
+.PHONY: setup teardown migrate build-chronicle deploy-chronicle deploy-ui test-phase4 test-phase5-kind
 
 POSTGRES_URL ?= postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable
 
@@ -31,6 +31,10 @@ build-chronicle:
 deploy-chronicle: build-chronicle
 	@chmod +x scripts/deploy-chronicle.sh
 	@./scripts/deploy-chronicle.sh
+
+deploy-ui:
+	@chmod +x scripts/deploy-ui.sh
+	@./scripts/deploy-ui.sh
 
 test-phase4:
 	@chmod +x scripts/test-phase4-redis.sh
