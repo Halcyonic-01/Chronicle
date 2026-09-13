@@ -24,15 +24,17 @@ type Snapshot struct {
 
 // ObjectState is a minimal, JSON-serializable summary of any K8s object.
 type ObjectState struct {
-	Kind       string            `json:"kind"`
-	Name       string            `json:"name"`
-	Namespace  string            `json:"namespace"`
-	Image      string            `json:"image,omitempty"`
-	Replicas   int32             `json:"replicas,omitempty"`
-	ReadyCount int32             `json:"ready_count"`
-	Phase      string            `json:"phase"` // Running | Pending | Failed
-	Restarts   int32             `json:"restarts"`
-	Labels     map[string]string `json:"labels,omitempty"`
+	Kind          string            `json:"kind"`
+	Name          string            `json:"name"`
+	Namespace     string            `json:"namespace"`
+	Image         string            `json:"image,omitempty"`
+	Replicas      int32             `json:"replicas,omitempty"`
+	ReadyCount    int32             `json:"ready_count"`
+	Phase         string            `json:"phase"` // Running | Pending | Failed
+	StatusReason  string            `json:"status_reason,omitempty"`
+	StatusMessage string            `json:"status_message,omitempty"`
+	Restarts      int32             `json:"restarts"`
+	Labels        map[string]string `json:"labels,omitempty"`
 	// Resource limits — explain OOM kills days later.
 	MemLimit int64 `json:"mem_limit,omitempty"`
 	CPULimit int64 `json:"cpu_limit,omitempty"`
@@ -48,11 +50,41 @@ func podToState(p v1.Pod) ObjectState {
 	var readyCount int32
 	var image string
 	var memLimit, cpuLimit int64
+	statusReason := p.Status.Reason
+	statusMessage := p.Status.Message
 
 	for _, cs := range p.Status.ContainerStatuses {
 		restarts += cs.RestartCount
 		if cs.Ready {
 			readyCount++
+		}
+		if statusReason == "" && cs.State.Waiting != nil {
+			statusReason = cs.State.Waiting.Reason
+			statusMessage = cs.State.Waiting.Message
+		}
+		if statusReason == "" && cs.State.Terminated != nil {
+			statusReason = cs.State.Terminated.Reason
+			statusMessage = cs.State.Terminated.Message
+		}
+	}
+	if statusReason == "" || statusMessage == "" {
+		for _, condition := range p.Status.Conditions {
+			if condition.Status != v1.ConditionTrue && condition.Reason != "" {
+				if statusReason == "" {
+					statusReason = condition.Reason
+				}
+				if statusMessage == "" {
+					statusMessage = condition.Message
+				}
+				break
+			}
+		}
+	}
+	ready := false
+	for _, condition := range p.Status.Conditions {
+		if condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue {
+			ready = true
+			break
 		}
 	}
 	if len(p.Spec.Containers) > 0 {
@@ -71,18 +103,32 @@ func podToState(p v1.Pod) ObjectState {
 		fmt.Sprintf("%v", p.Spec),
 	)))[:16]
 
+	phase := string(p.Status.Phase)
+	switch {
+	case p.Status.Phase == v1.PodFailed:
+		phase = "Failed"
+	case p.Status.Phase == v1.PodSucceeded:
+		phase = "Completed"
+	case !ready:
+		phase = "Pending"
+	case p.Status.Phase == v1.PodRunning:
+		phase = "Running"
+	}
+
 	return ObjectState{
-		Kind:       "Pod",
-		Name:       p.Name,
-		Namespace:  p.Namespace,
-		Image:      image,
-		ReadyCount: readyCount,
-		Phase:      string(p.Status.Phase),
-		Restarts:   restarts,
-		Labels:     p.Labels,
-		MemLimit:   memLimit,
-		CPULimit:   cpuLimit,
-		SpecHash:   specHash,
+		Kind:          "Pod",
+		Name:          p.Name,
+		Namespace:     p.Namespace,
+		Image:         image,
+		ReadyCount:    readyCount,
+		Phase:         phase,
+		StatusReason:  statusReason,
+		StatusMessage: statusMessage,
+		Restarts:      restarts,
+		Labels:        p.Labels,
+		MemLimit:      memLimit,
+		CPULimit:      cpuLimit,
+		SpecHash:      specHash,
 	}
 }
 

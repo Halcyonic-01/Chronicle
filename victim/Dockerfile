@@ -10,6 +10,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /out/frontend ./victim/frontend
 RUN CGO_ENABLED=0 go build -o /out/api ./victim/api
 RUN CGO_ENABLED=0 go build -o /out/worker ./victim/worker
+RUN go clean -cache
 
 FROM gcr.io/distroless/static-debian12
 COPY --from=builder /out/frontend /frontend

@@ -106,6 +106,7 @@ func main() {
 	if eventBus != nil {
 		collectorEvents = make(chan event.Event, 10_000)
 	}
+	eventAcknowledgements := make(chan string, 10_000)
 
 	// Initialize Graph dependencies
 	inMemGraph := graph.New()
@@ -189,8 +190,12 @@ func main() {
 						case <-leaderCtx.Done():
 							return leaderCtx.Err()
 						case e := <-collectorEvents:
-							if err := eventBus.Publish(leaderCtx, e); err != nil {
-								slog.Warn("Kafka publish failed; retrying", "err", err)
+							for {
+								if err := eventBus.Publish(leaderCtx, e); err == nil {
+									break
+								} else {
+									slog.Warn("Kafka publish failed; retrying", "err", err)
+								}
 								select {
 								case <-leaderCtx.Done():
 									return leaderCtx.Err()
@@ -202,7 +207,7 @@ func main() {
 				})
 				leaderGroup.Go(func() error {
 					for {
-						if err := eventBus.Consume(leaderCtx, events); err != nil {
+						if err := eventBus.Consume(leaderCtx, events, eventAcknowledgements); err != nil {
 							if errors.Is(err, context.Canceled) {
 								return err
 							}
@@ -217,7 +222,11 @@ func main() {
 					}
 				})
 			}
-			leaderGroup.Go(func() error { return store.NewWriter(pool, recentCache).Run(leaderCtx, events) })
+			writerAcks := (chan<- string)(nil)
+			if eventBus != nil {
+				writerAcks = eventAcknowledgements
+			}
+			leaderGroup.Go(func() error { return store.NewWriter(pool, recentCache).Run(leaderCtx, events, writerAcks) })
 			leaderGroup.Go(func() error { return snapshotter.Run(leaderCtx) })
 			leaderGroup.Go(func() error {
 				ticker := time.NewTicker(30 * time.Second)

@@ -1,4 +1,4 @@
-const state = { page: location.hash.slice(1) || 'overview', events: [], totalEvents: 0, eventError: '', loading: true, postureLoading: true, postureError: '', posture: {resources: [], summary: {total: 0, healthy: 0, warning: 0, critical: 0}}, filterSeverity: '', selectedEvent: null, replayAt: new Date().toISOString(), graph: {nodes: [], edges: []}, actions: [] };
+const state = { page: location.hash.slice(1) || 'overview', events: [], totalEvents: 0, eventError: '', loading: true, postureLoading: true, postureError: '', posture: {resources: [], summary: {total: 0, healthy: 0, warning: 0, critical: 0}}, filterSeverity: '', selectedEvent: null, replayAt: new Date().toISOString(), replayPosition: 60, replayLive: false, graph: {nodes: [], edges: []}, actions: [] };
 window.chronicleState = state;
 const navItems = [
   ['overview','Overview','⌂'],['timeline','Timeline','≡'],['replay','Replay','◷'],['graph','Dependency Graph','◇'],
@@ -40,13 +40,28 @@ function events(){ return pageHeading('PHASE 1 / EVENT COLLECTION','Event explor
 function services(){ const groups=[...new Map(state.events.map(e=>[`${e.namespace}/${e.entity_name}`,e])).values()]; return pageHeading('INVENTORY / SERVICES','Services','A service-oriented view of entities represented in the event store.')+`<section class="panel"><div class="panel-head"><span class="panel-title">Observed services</span><span class="panel-meta">${groups.length} SERVICES</span></div>${groups.length?eventTable(groups):empty('No services observed','Services will appear after collectors send infrastructure events.')}</section>`; }
 function settings(){ return pageHeading('SYSTEM / SETTINGS','Settings','Review Chronicle configuration and safety boundaries.')+`<section class="panel settings-list"><div class="setting"><div><h3>Environment</h3><p>Deployment target used by this console.</p></div><code>local / kind</code></div><div class="setting"><div><h3>Collectors</h3><p>Kubernetes · GitHub · Prometheus · Loki</p></div><span class="status healthy">CONFIGURED</span></div><div class="setting"><div><h3>Global healing mode</h3><p>Actions are planned and audited, never executed automatically.</p></div><code>DRY RUN</code></div><div class="setting"><div><h3>Automatic healing</h3><p>Live executor, approvals and post-action verification are not enabled.</p></div><span class="status pending">DISABLED</span></div><div class="setting"><div><h3>Refresh interval</h3><p>Event data is refreshed when navigating or pressing refresh.</p></div><code>MANUAL</code></div></section>`; }
 
-function payloadText(e){ try { const value=typeof e.payload==='string'?JSON.parse(e.payload):e.payload; return JSON.stringify(value||{},null,2); } catch (_) { return String(e.payload||''); } }
+function payloadText(e){ try { const value=typeof e.payload==='string'?JSON.parse(e.payload):e.payload; if(value==null||value===''||(typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===0))return 'No structured payload was recorded for this event.'; return JSON.stringify(value,null,2); } catch (_) { return String(e.payload||''); } }
 function eventInspector(){ const e=state.events.find(x=>x.id===state.selectedEvent); if(!e)return ''; return `<div class="event-inspector-backdrop" id="event-inspector" role="presentation"><section class="event-inspector" role="dialog" aria-modal="true" aria-labelledby="event-inspector-title"><div class="event-inspector-head"><div><div class="eyebrow">EVENT INSPECTOR · ${esc(e.source||'system')}</div><h2 id="event-inspector-title">${esc(e.title||e.type)}</h2><div class="event-inspector-sub">${severity(e.severity)} <span>${esc(e.namespace||'—')}/${esc(e.entity_kind||'resource')}/${esc(e.entity_name||'—')}</span></div></div><button class="icon-button" id="close-event" aria-label="Close event inspector">×</button></div><div class="event-inspector-grid"><div><span>Event type</span><strong>${esc(e.type||'event')}</strong></div><div><span>Source</span><strong>${esc(e.source||'system')}</strong></div><div><span>Occurred</span><strong>${fmtTime(e.occurred_at,true)}</strong></div><div><span>Ingested</span><strong>${fmtTime(e.ingested_at,true)}</strong></div></div><div class="event-inspector-section"><h3>Event payload</h3><pre>${esc(payloadText(e))}</pre></div><div class="event-inspector-links">${e.trace_id?`<span>Trace <code>${esc(e.trace_id)}</code></span>`:''}${e.correlation_key?`<span>Correlation <code>${esc(e.correlation_key)}</code></span>`:''}</div></section></div>`; }
 function openEvent(id){ if(state.events.some(e=>e.id===id)){state.selectedEvent=id;render();} }
 function closeEvent(){state.selectedEvent=null;render();}
+if(!window.__chronicleEventClickHandler){
+  document.addEventListener('click', event=>{
+    const row=event.target.closest?.('.event-row, #events-table [data-event]');
+    if(!row || row.closest('#event-inspector') || row.classList.contains('replay-event'))return;
+    const id=row.dataset.event;
+    if(state.events.some(e=>e.id===id)){event.preventDefault();openEvent(id);}
+  });
+  document.addEventListener('keydown', event=>{
+    const row=event.target.closest?.('.event-row, #events-table [data-event]');
+    if(!row || row.classList.contains('replay-event') || (event.key!=='Enter'&&event.key!==' '))return;
+    const id=row.dataset.event;
+    if(state.events.some(e=>e.id===id)){event.preventDefault();openEvent(id);}
+  });
+  window.__chronicleEventClickHandler=true;
+}
 function render(){ renderNav(); const views={overview,timeline,replay,graph,incidents,rca,healing,events,services,settings}; $('#page-label').textContent=(navItems.find(x=>x[0]===state.page)||navItems[0])[1]; $('#app').innerHTML=(views[state.page]||overview)()+eventInspector(); bindView(); }
 function bindView(){ const search=$('#event-search'); const source=$('#source-filter'); const sev=$('#severity-filter'); if(search){const apply=()=>{const q=search.value.toLowerCase(); const filtered=state.events.filter(e=>(!q||JSON.stringify(e).toLowerCase().includes(q))&&(!source||!source.value||e.source===source.value)&&(!sev||!sev.value||e.severity===sev.value)); const target=$('#events-table')||$('#timeline-list'); if(target)target.innerHTML=target.id==='events-table'?eventTable(filtered):eventRows(filtered);}; [search,source,sev].filter(Boolean).forEach(x=>x.addEventListener('input',apply)); }
- document.querySelectorAll('[data-analyze]').forEach(b=>b.onclick=()=>analyze(b.dataset.analyze)); document.querySelectorAll('[data-event]').forEach(row=>row.onclick=()=>{const e=state.events.find(x=>x.id===row.dataset.event); if(e) showToast(`${e.type} · ${e.entity_name}`);});
+ document.querySelectorAll('[data-analyze]').forEach(b=>b.onclick=()=>analyze(b.dataset.analyze));
  if($('#replay-range')) $('#replay-range').oninput=(e)=>{const d=new Date(Date.now()-(60-Number(e.target.value))*60000);state.replayAt=d.toISOString(); render(); loadReplay();}; if($('#replay-now')) $('#replay-now').onclick=()=>{state.replayAt=new Date().toISOString();render();};
 }
 async function loadReplay(){const box=$('#replay-result');if(!box)return;box.innerHTML=empty('Loading historical state','The replay engine is reconstructing this point in time…');try{const r=await fetch(`/api/replay?t=${encodeURIComponent(state.replayAt)}`);const data=await r.json();if(!r.ok)throw new Error(data.error||'Replay unavailable');const objects=Object.values(data.objects||{}).slice(0,8);box.innerHTML=objects.length?`<div class="object-card">${objects.map(o=>`<div class="setting"><div><h3>${esc(o.name)}</h3><p>${esc(o.namespace)} · ${esc(o.kind)}</p></div><span class="status ${o.phase==='Running'?'healthy':'pending'}">${esc(o.phase||'UNKNOWN')}</span></div>`).join('')}</div>`:empty('No objects in snapshot','No reconstructed objects were returned for this timestamp.');}catch(err){box.innerHTML=empty('Replay unavailable',err.message);}}
@@ -82,7 +97,7 @@ function bindView(){
   document.querySelectorAll('[data-severity-filter]').forEach(button=>button.onclick=()=>{state.filterSeverity=button.dataset.severityFilter||'';const menu=$('#severity-filter-menu');if(menu)menu.removeAttribute('open');const label=menu?.querySelector('summary');if(label)label.firstChild.textContent=state.filterSeverity?state.filterSeverity.toUpperCase():'ALL SEVERITIES';applyEventFilters();});
   if($('#load-more-events'))$('#load-more-events').onclick=loadMoreEvents;
   if(search&&state.filterSeverity)applyEventFilters();
-  document.querySelectorAll('[data-analyze]').forEach(b=>b.onclick=()=>analyze(b.dataset.analyze)); document.querySelectorAll('[data-event]').forEach(row=>row.onclick=()=>{const e=state.events.find(x=>x.id===row.dataset.event);if(e)showToast(`${e.type} · ${e.entity_name}`);});
+  document.querySelectorAll('[data-analyze]').forEach(b=>b.onclick=()=>analyze(b.dataset.analyze));
   document.querySelectorAll('[data-approve]').forEach(b=>b.onclick=()=>decide(b.dataset.approve,true)); document.querySelectorAll('[data-deny]').forEach(b=>b.onclick=()=>decide(b.dataset.deny,false));
   if($('#replay-range'))$('#replay-range').oninput=(e)=>{state.replayAt=new Date(Date.now()-(60-Number(e.target.value))*60000).toISOString();render();loadReplay()};
   if($('#replay-now'))$('#replay-now').onclick=()=>{state.replayAt=new Date().toISOString();render()};
@@ -103,7 +118,6 @@ function bindView(){
   if($('#load-more-events'))$('#load-more-events').onclick=loadMoreEvents;
   if(search&&state.filterSeverity)applyEventFilters();
   document.querySelectorAll('[data-analyze]').forEach(b=>b.onclick=()=>analyze(b.dataset.analyze));
-  document.querySelectorAll('[data-event]').forEach(row=>{row.onclick=()=>openEvent(row.dataset.event);row.onkeydown=(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openEvent(row.dataset.event);}};});
   document.querySelectorAll('[data-approve]').forEach(b=>b.onclick=()=>decide(b.dataset.approve,true));
   document.querySelectorAll('[data-deny]').forEach(b=>b.onclick=()=>decide(b.dataset.deny,false));
   const slider=$('#replay-range');

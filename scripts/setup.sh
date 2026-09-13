@@ -46,7 +46,33 @@ helm upgrade --install kafka bitnami/kafka \
     --set broker.replicaCount=1 \
     --set offsetsTopicReplicationFactor=1 \
     --set transactionStateLogReplicationFactor=1 \
+    --set-string broker.extraEnvVars[0].name=KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR \
+    --set-string broker.extraEnvVars[0].value=1 \
+    --set-string broker.extraEnvVars[1].name=KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR \
+    --set-string broker.extraEnvVars[1].value=1 \
     --set listeners.client.protocol=PLAINTEXT
+
+# Kafka's internal consumer-offset topic is required before Chronicle's
+# group-based writer can consume events. Provision both topics explicitly so a
+# newly recreated kind cluster is ready without manual kubectl commands.
+kubectl wait --namespace chronicle --for=condition=ready pod/kafka-broker-0 --timeout=180s
+kubectl exec --namespace chronicle kafka-broker-0 -- \
+    kafka-topics.sh \
+    --create \
+    --if-not-exists \
+    --topic chronicle.events \
+    --bootstrap-server kafka:9092 \
+    --partitions 1 \
+    --replication-factor 1
+kubectl exec --namespace chronicle kafka-broker-0 -- \
+    kafka-topics.sh \
+    --create \
+    --if-not-exists \
+    --topic __consumer_offsets \
+    --bootstrap-server kafka:9092 \
+    --partitions 50 \
+    --replication-factor 1 \
+    --config cleanup.policy=compact
 
 helm upgrade --install postgres bitnami/postgresql \
     --namespace chronicle \
@@ -65,8 +91,14 @@ if ! command -v linkerd &> /dev/null; then
     export PATH=$PATH:$HOME/.linkerd2/bin
 fi
 kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml
-linkerd install --crds | kubectl apply -f -
-linkerd install | kubectl apply -f -
+if kubectl get configmap/linkerd-config --namespace linkerd >/dev/null 2>&1; then
+    echo "Linkerd control plane already exists; upgrading it idempotently..."
+    linkerd upgrade --crds | kubectl apply -f -
+    linkerd upgrade | kubectl apply -f -
+else
+    linkerd install --crds | kubectl apply -f -
+    linkerd install | kubectl apply -f -
+fi
 kubectl annotate namespace default linkerd.io/inject=enabled --overwrite
 
 echo "Setup complete! Dashboard and Prometheus will be available shortly on:"

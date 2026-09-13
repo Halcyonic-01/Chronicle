@@ -1,0 +1,6 @@
+.git
+.github
+.codex
+.vscode
+.DS_Store
+*.log

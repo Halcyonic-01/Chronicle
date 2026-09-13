@@ -93,9 +93,15 @@ func (a *ArgoCollector) poll(ctx context.Context) error {
 		}
 		healthKey := name + "/health"
 		health := app.Status.Health.Status
-		if health != "" && health != "Healthy" && a.seen[healthKey] != health {
+		if health != "" && a.seen[healthKey] != health {
 			a.seen[healthKey] = health
-			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: valueOr(app.Metadata.Namespace, "argocd"), Type: "application_unhealthy", Severity: "warning", Title: fmt.Sprintf("%s health is %s", name, health), Payload: mustJSON(map[string]any{"health": health})})
+			typeName := "application_unhealthy"
+			severity := "warning"
+			if health == "Healthy" {
+				typeName = "application_healthy"
+				severity = "info"
+			}
+			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: valueOr(app.Metadata.Namespace, "argocd"), Type: typeName, Severity: severity, Title: fmt.Sprintf("%s health is %s", name, health), Payload: mustJSON(map[string]any{"health": health})})
 		}
 	}
 	return nil

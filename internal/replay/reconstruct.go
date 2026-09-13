@@ -58,7 +58,7 @@ func (r *Replayer) At(ctx context.Context, t time.Time) (*Snapshot, error) {
 		       type, severity, title, payload
 		FROM events
 		WHERE ingested_at > $1 AND ingested_at <= $2
-		ORDER BY ingested_at ASC`, takenAt, t)
+		ORDER BY ingested_at ASC, id ASC`, takenAt, t)
 	if err != nil {
 		return nil, err
 	}
@@ -101,29 +101,82 @@ func applyEvent(s *Snapshot, e event.Event) {
 		}
 		obj.Restarts++
 		obj.ReadyCount = 0
-		obj.Phase = "Restarting"
+		obj.Phase = "Pending"
+		obj.StatusReason = e.Type
+		obj.StatusMessage = e.Title
+		if e.Type == "oom_kill" || e.Type == "crash_loop" {
+			obj.Phase = "Failed"
+		}
 		s.Objects[key] = obj
 
 	case "became_ready":
 		if !exists {
 			return
 		}
-		obj.ReadyCount = 1
-		obj.Phase = "Running"
+		ready := int32(gjson.GetBytes(e.Payload, "ready_count").Int())
+		if ready == 0 {
+			ready = 1
+		}
+		obj.ReadyCount = ready
+		if obj.Kind == "Deployment" && obj.Replicas > ready {
+			obj.Phase = "Pending"
+		} else {
+			obj.Phase = "Running"
+		}
+		obj.StatusReason = ""
+		obj.StatusMessage = ""
 		s.Objects[key] = obj
 
 	case "became_unready":
 		if !exists {
 			return
 		}
-		obj.ReadyCount = 0
+		obj.ReadyCount = int32(gjson.GetBytes(e.Payload, "ready_count").Int())
+		obj.Phase = "Pending"
+		obj.StatusReason = e.Type
+		obj.StatusMessage = e.Title
 		s.Objects[key] = obj
 
-	case "k8s_event", "log_error", "application_unhealthy":
+	case "resource_status":
 		if !exists {
 			return
 		}
+		obj.ReadyCount = int32(gjson.GetBytes(e.Payload, "ready_count").Int())
+		phase := gjson.GetBytes(e.Payload, "phase").String()
+		if phase != "" {
+			obj.Phase = phase
+		}
+		obj.StatusReason = gjson.GetBytes(e.Payload, "reason").String()
+		obj.StatusMessage = gjson.GetBytes(e.Payload, "message").String()
+		s.Objects[key] = obj
+
+	case "k8s_event", "log_error":
+		if !exists {
+			return
+		}
+		// A warning log or Kubernetes warning is evidence, not proof that the
+		// resource is unhealthy. Preserve the reconstructed health phase and
+		// retain the signal as explanatory status text.
+		obj.StatusReason = e.Type
+		obj.StatusMessage = e.Title
+		s.Objects[key] = obj
+
+	case "application_unhealthy":
+		if !exists {
+			obj = ObjectState{Kind: e.EntityKind, Name: e.EntityName, Namespace: e.Namespace}
+		}
 		obj.Phase = "Degraded"
+		obj.StatusReason = e.Type
+		obj.StatusMessage = e.Title
+		s.Objects[key] = obj
+
+	case "application_healthy":
+		if !exists {
+			obj = ObjectState{Kind: e.EntityKind, Name: e.EntityName, Namespace: e.Namespace}
+		}
+		obj.Phase = "Running"
+		obj.StatusReason = ""
+		obj.StatusMessage = ""
 		s.Objects[key] = obj
 
 	case "deploy":
@@ -135,7 +188,9 @@ func applyEvent(s *Snapshot, e event.Event) {
 		if obj.Image == "" {
 			obj.Image = gjson.GetBytes(e.Payload, "revision").String()
 		}
-		obj.Phase = "Running"
+		obj.Phase = "Changed"
+		obj.StatusReason = e.Type
+		obj.StatusMessage = e.Title
 		s.Objects[key] = obj
 
 	case "scale":
@@ -143,6 +198,9 @@ func applyEvent(s *Snapshot, e event.Event) {
 			return
 		}
 		obj.Replicas = int32(gjson.GetBytes(e.Payload, "new_replicas").Int())
+		if obj.Replicas > obj.ReadyCount {
+			obj.Phase = "Pending"
+		}
 		s.Objects[key] = obj
 
 	case "resource_change":
@@ -150,6 +208,9 @@ func applyEvent(s *Snapshot, e event.Event) {
 			return
 		}
 		obj.MemLimit = gjson.GetBytes(e.Payload, "new_mem_limit").Int()
+		obj.Phase = "Changed"
+		obj.StatusReason = e.Type
+		obj.StatusMessage = e.Title
 		s.Objects[key] = obj
 
 	case "config_change", "terraform_run":

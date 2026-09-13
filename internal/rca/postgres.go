@@ -14,7 +14,7 @@ func NewPostgresEventSource(pool *pgxpool.Pool) *PostgresEventSource {
 	return &PostgresEventSource{pool: pool}
 }
 func (s *PostgresEventSource) EventsBetween(ctx context.Context, from, to time.Time) ([]event.Event, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, occurred_at, ingested_at, source, namespace, entity_kind, entity_name, type, severity, title, payload, trace_id, correlation_key FROM events WHERE ingested_at >= $1 AND ingested_at < $2 ORDER BY ingested_at ASC`, from, to)
+	rows, err := s.pool.Query(ctx, `SELECT id, occurred_at, ingested_at, source, namespace, entity_kind, entity_name, type, severity, title, payload, trace_id, correlation_key FROM events WHERE ingested_at >= $1 AND ingested_at < $2 ORDER BY ingested_at ASC, id ASC`, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (s *PostgresEventSource) RecentEvents(ctx context.Context, from, to time.Ti
 		       entity_name, type, severity, title, payload, trace_id, correlation_key
 		FROM events
 		WHERE ingested_at >= $1 AND ingested_at <= $2
-		ORDER BY ingested_at DESC
+		ORDER BY ingested_at DESC, id DESC
 		LIMIT $3 OFFSET $4`, from, to, limit, offset)
 	if err != nil {
 		return nil, err

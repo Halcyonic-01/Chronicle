@@ -42,9 +42,13 @@ func (b *KafkaBus) Publish(ctx context.Context, e event.Event) error {
 	return b.writer.WriteMessages(ctx, kafka.Message{Key: key, Value: payload})
 }
 
-func (b *KafkaBus) Consume(ctx context.Context, out chan<- event.Event) error {
+// Consume delivers one event at a time and commits its Kafka offset only after
+// the caller acknowledges that the event was persisted. This keeps Kafka's
+// at-least-once delivery from becoming data loss when PostgreSQL is down or a
+// batch is rejected.
+func (b *KafkaBus) Consume(ctx context.Context, out chan<- event.Event, acknowledgements <-chan string) error {
 	for {
-		message, err := b.reader.ReadMessage(ctx)
+		message, err := b.reader.FetchMessage(ctx)
 		if err != nil {
 			return err
 		}
@@ -54,6 +58,25 @@ func (b *KafkaBus) Consume(ctx context.Context, out chan<- event.Event) error {
 		}
 		select {
 		case out <- e:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		if acknowledgements == nil {
+			if err := b.reader.CommitMessages(ctx, message); err != nil {
+				return fmt.Errorf("committing Kafka message: %w", err)
+			}
+			continue
+		}
+
+		select {
+		case acknowledgedID := <-acknowledgements:
+			if acknowledgedID != e.ID {
+				return fmt.Errorf("Kafka acknowledgement out of order: got %q, want %q", acknowledgedID, e.ID)
+			}
+			if err := b.reader.CommitMessages(ctx, message); err != nil {
+				return fmt.Errorf("committing Kafka message: %w", err)
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}

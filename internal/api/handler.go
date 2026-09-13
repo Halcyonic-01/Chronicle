@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -106,6 +107,11 @@ func (h *Handler) Replay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
+	// Only an explicit current-time request may overlay live Kubernetes health.
+	// Slider and historical requests remain pure event-store reconstruction.
+	if h.k8s != nil && r.URL.Query().Get("live") == "1" && isCurrentReplayTime(t) {
+		h.overlayLiveReplayState(r.Context(), snap)
+	}
 	if h.graph != nil {
 		if edges, graphErr := h.graph.At(r.Context(), t); graphErr == nil {
 			snap.Edges = edges
@@ -113,6 +119,83 @@ func (h *Handler) Replay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(snap)
+}
+
+func isCurrentReplayTime(t time.Time) bool {
+	age := time.Since(t)
+	return age >= -time.Minute && age <= 2*time.Minute
+}
+
+// overlayLiveReplayState replaces the health fields for Pods and Deployments
+// with their current Kubernetes status. The historical snapshot remains the
+// source for all other fields and for all non-current replay points.
+func (h *Handler) overlayLiveReplayState(ctx context.Context, snap *replay.Snapshot) {
+	if snap == nil || h.k8s == nil {
+		return
+	}
+
+	if pods, err := h.k8s.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); err == nil {
+		for _, pod := range pods.Items {
+			key := fmt.Sprintf("%s/Pod/%s", pod.Namespace, pod.Name)
+			obj, ok := snap.Objects[key]
+			if !ok {
+				continue
+			}
+
+			ready := false
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+					ready = true
+					break
+				}
+			}
+			var restarts int32
+			for _, status := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+				restarts += status.RestartCount
+			}
+
+			obj.ReadyCount = boolInt32(ready)
+			obj.Restarts = restarts
+			obj.StatusReason = pod.Status.Reason
+			obj.StatusMessage = pod.Status.Message
+			switch {
+			case pod.Status.Phase == corev1.PodFailed:
+				obj.Phase = "Failed"
+			case ready:
+				obj.Phase = "Running"
+			default:
+				obj.Phase = "Pending"
+			}
+			snap.Objects[key] = obj
+		}
+	}
+
+	if deployments, err := h.k8s.AppsV1().Deployments("").List(ctx, metav1.ListOptions{}); err == nil {
+		for _, deployment := range deployments.Items {
+			key := fmt.Sprintf("%s/Deployment/%s", deployment.Namespace, deployment.Name)
+			obj, ok := snap.Objects[key]
+			if !ok {
+				continue
+			}
+
+			desired := int32(1)
+			if deployment.Spec.Replicas != nil {
+				desired = *deployment.Spec.Replicas
+			}
+			obj.Replicas = desired
+			obj.ReadyCount = deployment.Status.ReadyReplicas
+			if deployment.Status.ReadyReplicas >= desired {
+				obj.Phase = "Running"
+				obj.StatusReason = ""
+				obj.StatusMessage = ""
+			} else {
+				obj.Phase = "Pending"
+				obj.StatusReason = "NotReady"
+				obj.StatusMessage = fmt.Sprintf("%d/%d replicas ready", deployment.Status.ReadyReplicas, desired)
+			}
+			snap.Objects[key] = obj
+		}
+	}
 }
 
 // GET /api/events?from=2026-09-02T09:30:00Z&to=2026-09-02T09:40:00Z

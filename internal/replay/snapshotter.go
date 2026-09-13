@@ -160,6 +160,63 @@ func (s *Snapshotter) Take(ctx context.Context) (*Snapshot, error) {
 		return nil
 	})
 
+	// Fetch referenced configuration and storage objects so replay can explain
+	// graph edges instead of rendering edge-only nodes as unknown.
+	g.Go(func() error {
+		configMaps, err := s.client.CoreV1().ConfigMaps("").List(gctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, configMap := range configMaps.Items {
+			key := fmt.Sprintf("%s/ConfigMap/%s", configMap.Namespace, configMap.Name)
+			snap.Objects[key] = ObjectState{
+				Kind: "ConfigMap", Name: configMap.Name, Namespace: configMap.Namespace,
+				Labels: configMap.Labels, Phase: "Present",
+			}
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		secrets, err := s.client.CoreV1().Secrets("").List(gctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, secret := range secrets.Items {
+			key := fmt.Sprintf("%s/Secret/%s", secret.Namespace, secret.Name)
+			snap.Objects[key] = ObjectState{
+				Kind: "Secret", Name: secret.Name, Namespace: secret.Namespace,
+				Labels: secret.Labels, Phase: "Present",
+			}
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		claims, err := s.client.CoreV1().PersistentVolumeClaims("").List(gctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, claim := range claims.Items {
+			key := fmt.Sprintf("%s/PersistentVolumeClaim/%s", claim.Namespace, claim.Name)
+			phase := string(claim.Status.Phase)
+			if phase == "" {
+				phase = "Present"
+			}
+			snap.Objects[key] = ObjectState{
+				Kind: "PersistentVolumeClaim", Name: claim.Name, Namespace: claim.Namespace,
+				Labels: claim.Labels, Phase: phase,
+			}
+		}
+		return nil
+	})
+
 	// Fetch Nodes
 	g.Go(func() error {
 		nodes, err := s.client.CoreV1().Nodes().List(gctx, metav1.ListOptions{})
@@ -226,15 +283,24 @@ func deploymentToState(d appsv1.Deployment) ObjectState {
 	if d.Spec.Replicas != nil {
 		replicas = *d.Spec.Replicas
 	}
+	phase := "Running"
+	statusReason := ""
+	statusMessage := fmt.Sprintf("%d/%d replicas ready", ready, replicas)
+	if ready < replicas {
+		phase = "Pending"
+		statusReason = "NotReady"
+	}
 	return ObjectState{
-		Kind:       "Deployment",
-		Name:       d.Name,
-		Namespace:  d.Namespace,
-		Image:      image,
-		Replicas:   replicas,
-		ReadyCount: ready,
-		Phase:      "Running",
-		Labels:     d.Labels,
+		Kind:          "Deployment",
+		Name:          d.Name,
+		Namespace:     d.Namespace,
+		Image:         image,
+		Replicas:      replicas,
+		ReadyCount:    ready,
+		Phase:         phase,
+		StatusReason:  statusReason,
+		StatusMessage: statusMessage,
+		Labels:        d.Labels,
 	}
 }
 

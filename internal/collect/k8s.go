@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -32,34 +33,91 @@ func NewK8sCollector(client kubernetes.Interface, out chan<- event.Event) *K8sCo
 func (k *K8sCollector) Run(ctx context.Context) error {
 	// Resync every 30s: a safety net in case we miss a watch event.
 	factory := informers.NewSharedInformerFactory(k.client, 30*time.Second)
+	var informersReady atomic.Bool
 
 	// --- Source 1: Kubernetes Events (the "why did this pod die" source) ---
 	evInformer := factory.Core().V1().Events().Informer()
 	_, _ = evInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
+			if !informersReady.Load() {
+				return
+			}
 			ev := obj.(*corev1.Event)
 			k.fromK8sEvent(ev)
+		},
+		UpdateFunc: func(old, new interface{}) {
+			if !informersReady.Load() {
+				return
+			}
+			previous, okPrevious := old.(*corev1.Event)
+			current, okCurrent := new.(*corev1.Event)
+			if okPrevious && okCurrent && current.Count > previous.Count {
+				k.fromK8sEvent(current)
+			}
 		},
 	})
 
 	// --- Source 2: Pod lifecycle (restarts, OOM kills, crash loops) ---
 	podInformer := factory.Core().V1().Pods().Informer()
 	_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if !informersReady.Load() {
+				return
+			}
+			if pod, ok := obj.(*corev1.Pod); ok {
+				k.emitResourceEvent("Pod", pod.Namespace, pod.Name, "resource_created", "info", fmt.Sprintf("%s created", pod.Name), podLifecyclePayload(pod))
+			}
+		},
 		UpdateFunc: func(old, new interface{}) {
-			k.diffPods(old.(*corev1.Pod), new.(*corev1.Pod))
+			oldPod, okOld := old.(*corev1.Pod)
+			newPod, okNew := new.(*corev1.Pod)
+			if okOld && okNew {
+				k.diffPods(oldPod, newPod)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			if !informersReady.Load() {
+				return
+			}
+			if pod, ok := deletedPod(obj); ok {
+				k.emitResourceEvent("Pod", pod.Namespace, pod.Name, "resource_deleted", "info", fmt.Sprintf("%s deleted", pod.Name), podLifecyclePayload(pod))
+			}
 		},
 	})
 
 	// --- Source 3: Deployments (image changes, replica scaling) ---
 	deployInformer := factory.Apps().V1().Deployments().Informer()
 	_, _ = deployInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if !informersReady.Load() {
+				return
+			}
+			if deployment, ok := obj.(*appsv1.Deployment); ok {
+				k.emitResourceEvent("Deployment", deployment.Namespace, deployment.Name, "resource_created", "info", fmt.Sprintf("%s created", deployment.Name), deploymentLifecyclePayload(deployment))
+			}
+		},
 		UpdateFunc: func(old, new interface{}) {
-			k.diffDeployments(old.(*appsv1.Deployment), new.(*appsv1.Deployment))
+			oldDeployment, okOld := old.(*appsv1.Deployment)
+			newDeployment, okNew := new.(*appsv1.Deployment)
+			if okOld && okNew {
+				k.diffDeployments(oldDeployment, newDeployment)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			if !informersReady.Load() {
+				return
+			}
+			if deployment, ok := deletedDeployment(obj); ok {
+				k.emitResourceEvent("Deployment", deployment.Namespace, deployment.Name, "resource_deleted", "info", fmt.Sprintf("%s deleted", deployment.Name), deploymentLifecyclePayload(deployment))
+			}
 		},
 	})
 
 	factory.Start(ctx.Done())
-	factory.WaitForCacheSync(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done()) {
+		return ctx.Err()
+	}
+	informersReady.Store(true)
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -78,7 +136,21 @@ func (k *K8sCollector) fromK8sEvent(ev *corev1.Event) {
 		Type:       "k8s_event",
 		Severity:   "warning",
 		Title:      fmt.Sprintf("%s: %s", ev.Reason, ev.Message),
-		Payload:    mustJSON(map[string]any{"reason": ev.Reason, "message": ev.Message, "count": ev.Count}),
+		Payload: mustJSON(map[string]any{
+			"reason":               ev.Reason,
+			"message":              ev.Message,
+			"count":                ev.Count,
+			"action":               ev.Action,
+			"event_type":           ev.Type,
+			"reporting_controller": ev.ReportingController,
+			"source_component":     ev.Source.Component,
+			"involved_object_kind": ev.InvolvedObject.Kind,
+			"involved_object_name": ev.InvolvedObject.Name,
+			"involved_object_uid":  string(ev.InvolvedObject.UID),
+			"first_timestamp":      ev.FirstTimestamp,
+			"last_timestamp":       ev.LastTimestamp,
+			"event_time":           ev.EventTime,
+		}),
 	}
 	k.Emit(e)
 }
@@ -124,6 +196,15 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 	// --- Readiness flipped ---
 	oldReady := isPodReady(old)
 	newReady := isPodReady(new)
+	if old.Status.Phase != new.Status.Phase || oldReady != newReady {
+		k.emitResourceEvent("Pod", new.Namespace, new.Name, "resource_status", podStatusSeverity(new),
+			fmt.Sprintf("%s status is %s", new.Name, podReplayPhase(new)), map[string]any{
+				"phase":       podReplayPhase(new),
+				"ready_count": podReadyCount(new),
+				"reason":      new.Status.Reason,
+				"message":     new.Status.Message,
+			})
+	}
 
 	if oldReady && !newReady {
 		k.Emit(event.Event{
@@ -135,16 +216,26 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 			Severity:   "warning",
 			Title:      fmt.Sprintf("%s stopped serving traffic", new.Name),
 			Payload: mustJSON(map[string]any{
-				"owner": ownerRef(new),
+				"owner":       ownerRef(new),
+				"ready_count": podReadyCount(new),
 			}),
 		})
 	}
 	if !oldReady && newReady {
-		k.Emit(event.Event{Source: "k8s", EntityKind: "Pod", EntityName: new.Name, Namespace: new.Namespace, Type: "became_ready", Severity: "info", Title: fmt.Sprintf("%s started serving traffic", new.Name), Payload: mustJSON(map[string]any{"owner": ownerRef(new)})})
+		k.Emit(event.Event{Source: "k8s", EntityKind: "Pod", EntityName: new.Name, Namespace: new.Namespace, Type: "became_ready", Severity: "info", Title: fmt.Sprintf("%s started serving traffic", new.Name), Payload: mustJSON(map[string]any{"owner": ownerRef(new), "ready_count": podReadyCount(new)})})
 	}
 }
 
 func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
+	if old.Status.ReadyReplicas != new.Status.ReadyReplicas || old.Status.AvailableReplicas != new.Status.AvailableReplicas {
+		k.emitResourceEvent("Deployment", new.Namespace, new.Name, "resource_status", deploymentStatusSeverity(new),
+			fmt.Sprintf("%s status is %d/%d replicas ready", new.Name, new.Status.ReadyReplicas, deploymentReplicas(new)), map[string]any{
+				"phase":       deploymentReplayPhase(new),
+				"ready_count": new.Status.ReadyReplicas,
+				"reason":      deploymentStatusReason(new),
+				"message":     fmt.Sprintf("%d/%d replicas ready", new.Status.ReadyReplicas, deploymentReplicas(new)),
+			})
+	}
 	if len(old.Spec.Template.Spec.Containers) == 0 || len(new.Spec.Template.Spec.Containers) == 0 {
 		return
 	}
@@ -196,6 +287,142 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Payload:    mustJSON(map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas}),
 		})
 	}
+}
+
+func (k *K8sCollector) emitResourceEvent(kind, namespace, name, eventType, severity, title string, payload map[string]any) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	k.Emit(event.Event{
+		Source:     "k8s",
+		Namespace:  namespace,
+		EntityKind: kind,
+		EntityName: name,
+		Type:       eventType,
+		Severity:   severity,
+		Title:      title,
+		Payload:    mustJSON(payload),
+	})
+}
+
+func deletedPod(obj interface{}) (*corev1.Pod, bool) {
+	switch value := obj.(type) {
+	case *corev1.Pod:
+		return value, true
+	case cache.DeletedFinalStateUnknown:
+		pod, ok := value.Obj.(*corev1.Pod)
+		return pod, ok
+	case *cache.DeletedFinalStateUnknown:
+		pod, ok := value.Obj.(*corev1.Pod)
+		return pod, ok
+	default:
+		return nil, false
+	}
+}
+
+func deletedDeployment(obj interface{}) (*appsv1.Deployment, bool) {
+	switch value := obj.(type) {
+	case *appsv1.Deployment:
+		return value, true
+	case cache.DeletedFinalStateUnknown:
+		deployment, ok := value.Obj.(*appsv1.Deployment)
+		return deployment, ok
+	case *cache.DeletedFinalStateUnknown:
+		deployment, ok := value.Obj.(*appsv1.Deployment)
+		return deployment, ok
+	default:
+		return nil, false
+	}
+}
+
+func podReadyCount(p *corev1.Pod) int32 {
+	var ready int32
+	for _, status := range append(p.Status.InitContainerStatuses, p.Status.ContainerStatuses...) {
+		if status.Ready {
+			ready++
+		}
+	}
+	return ready
+}
+
+func podReplayPhase(p *corev1.Pod) string {
+	switch {
+	case p.Status.Phase == corev1.PodFailed:
+		return "Failed"
+	case p.Status.Phase == corev1.PodSucceeded:
+		return "Completed"
+	case !isPodReady(p):
+		return "Pending"
+	default:
+		return "Running"
+	}
+}
+
+func podStatusSeverity(p *corev1.Pod) string {
+	if p.Status.Phase == corev1.PodFailed {
+		return "critical"
+	}
+	if !isPodReady(p) {
+		return "warning"
+	}
+	return "info"
+}
+
+func deploymentReplicas(d *appsv1.Deployment) int32 {
+	if d.Spec.Replicas == nil {
+		return 1
+	}
+	return *d.Spec.Replicas
+}
+
+func deploymentReplayPhase(d *appsv1.Deployment) string {
+	if d.Status.ReadyReplicas >= deploymentReplicas(d) {
+		return "Running"
+	}
+	return "Pending"
+}
+
+func deploymentStatusSeverity(d *appsv1.Deployment) string {
+	if d.Status.ReadyReplicas < deploymentReplicas(d) {
+		return "warning"
+	}
+	return "info"
+}
+
+func deploymentStatusReason(d *appsv1.Deployment) string {
+	if d.Status.ReadyReplicas < deploymentReplicas(d) {
+		return "NotReady"
+	}
+	return ""
+}
+
+func podLifecyclePayload(pod *corev1.Pod) map[string]any {
+	return map[string]any{
+		"phase":       podReplayPhase(pod),
+		"ready_count": podReadyCount(pod),
+		"restarts":    podRestartCount(pod),
+		"owner":       ownerRef(pod),
+		"reason":      pod.Status.Reason,
+		"message":     pod.Status.Message,
+	}
+}
+
+func deploymentLifecyclePayload(deployment *appsv1.Deployment) map[string]any {
+	return map[string]any{
+		"phase":       deploymentReplayPhase(deployment),
+		"ready_count": deployment.Status.ReadyReplicas,
+		"replicas":    deploymentReplicas(deployment),
+		"reason":      deploymentStatusReason(deployment),
+		"message":     fmt.Sprintf("%d/%d replicas ready", deployment.Status.ReadyReplicas, deploymentReplicas(deployment)),
+	}
+}
+
+func podRestartCount(pod *corev1.Pod) int32 {
+	var restarts int32
+	for _, status := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+		restarts += status.RestartCount
+	}
+	return restarts
 }
 
 func memoryLimit(container corev1.Container) int64 {
