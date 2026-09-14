@@ -110,3 +110,14 @@ body { font-size: 13px; letter-spacing: 0; background: var(--bg); }
   .event-title-line p { white-space: normal; }
   .event-meta { flex-wrap: wrap; }
 }
+
+.incident-list-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 17px; border-bottom: 1px solid var(--line2); }
+.incident-item { display: block; width: 100%; text-align: left; background: transparent; color: inherit; font: inherit; }
+.incident-item h3 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; line-height: 1.35; }
+.incident-item-meta { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+.incident-count { display: inline-flex; align-items: center; padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--dim); font: 10px var(--mono); white-space: nowrap; }
+.detail-head-copy { min-width: 0; flex: 1; }
+.detail-head h2 { max-width: 900px; overflow-wrap: anywhere; line-height: 1.25; }
+.detail-status { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.incident-evidence { padding: 0; max-height: 390px; overflow: auto; }
+@media (max-width: 900px) { .incident-layout { gap: 12px; } .incident-list { max-height: 360px; } .detail { padding: 17px; } }

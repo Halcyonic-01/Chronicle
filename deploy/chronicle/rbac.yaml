@@ -9,8 +9,11 @@ kind: ClusterRole
 metadata:
   name: chronicle
 rules:
+# Chronicle never reads Secret contents. Secrets appear in the dependency graph
+# only through the pod specs that reference them, so cluster-wide read access to
+# every Secret in the cluster is deliberately NOT granted here.
 - apiGroups: ["", "apps", "networking.k8s.io"]
-  resources: ["pods", "events", "services", "nodes", "configmaps", "secrets", "persistentvolumeclaims", "deployments", "ingresses"]
+  resources: ["pods", "events", "services", "nodes", "configmaps", "persistentvolumeclaims", "deployments", "ingresses"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["pods"]

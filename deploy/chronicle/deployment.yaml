@@ -165,6 +165,17 @@ spec:
                   name: chronicle-config
                   key: SLACK_WEBHOOK_URL
                   optional: true
+            # Unset means the API is open to anything that can reach this
+            # ClusterIP Service. Set it whenever Chronicle is exposed further.
+            - name: CHRONICLE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: CHRONICLE_API_TOKEN
+                  optional: true
+            # Empty means no CORS header at all; the console is same-origin.
+            - name: CHRONICLE_ALLOWED_ORIGIN
+              value: ""
           resources:
             requests:
               cpu: "250m"

@@ -93,17 +93,38 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	if hops <= 0 {
 		hops = 4
 	}
-	upstream, err := a.Graph.UpstreamAt(ctx, symptom.IngestedAt, key(symptom), hops)
-	if err != nil {
+
+	// The graph at the symptom instant is loaded once and walked in memory.
+	// Querying it per candidate turns one analysis into N+2 full graph loads.
+	var (
+		local *graph.Graph
+		edges []graph.Edge
+	)
+	if edgeSource, ok := a.Graph.(HistoricalEdgeSource); ok {
+		if loaded, edgeErr := edgeSource.EdgesAt(ctx, symptom.IngestedAt); edgeErr == nil {
+			edges = loaded
+			local = graph.New()
+			local.SetEdges(loaded)
+		}
+	}
+
+	var upstream map[string]int
+	if local != nil {
+		upstream = local.Upstream(key(symptom), hops)
+	} else if upstream, err = a.Graph.UpstreamAt(ctx, symptom.IngestedAt, key(symptom), hops); err != nil {
 		return nil, fmt.Errorf("load graph at symptom time: %w", err)
 	}
 
-	impact, _ := a.downstream(ctx, symptom.IngestedAt, key(symptom), hops)
-	result := &Result{Symptom: symptom, BlastRadius: summarizeImpact(impact), Scanned: len(raw)}
-	if edgeSource, ok := a.Graph.(HistoricalEdgeSource); ok {
-		if edges, edgeErr := edgeSource.EdgesAt(ctx, symptom.IngestedAt); edgeErr == nil {
-			result.Evidence = evidenceEdges(edges, upstream, key(symptom))
+	impactOf := func(start string) map[string]int {
+		if local != nil {
+			return local.Impact(start, hops)
 		}
+		return a.remoteImpact(ctx, symptom.IngestedAt, start, hops)
+	}
+
+	result := &Result{Symptom: symptom, BlastRadius: summarizeImpact(impactOf(key(symptom))), Scanned: len(raw)}
+	if edges != nil {
+		result.Evidence = evidenceEdges(edges, upstream, key(symptom))
 	}
 	candidates := make([]Candidate, 0, len(raw))
 	for _, e := range raw {
@@ -115,8 +136,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 			continue
 		}
 		c := Candidate{Event: e, Distance: distance}
-		candidateImpact, _ := a.downstream(ctx, symptom.IngestedAt, key(e), hops)
-		impact := summarizeImpact(candidateImpact)
+		impact := summarizeImpact(impactOf(key(e)))
 		c.AffectedServices, c.AffectedNodes, c.BlastRadiusScore = impact.AffectedServices, impact.AffectedNodes, impact.Score
 		score(&c, symptom)
 		candidates = append(candidates, c)
@@ -138,11 +158,16 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	return result, nil
 }
 
-func (a *Analyzer) downstream(ctx context.Context, at time.Time, start string, hops int) (map[string]int, error) {
+// remoteImpact is the fallback for graph sources that cannot hand over their
+// edge set. It is one query per call, so it is only reached when the analyzer
+// could not load the graph once up front.
+func (a *Analyzer) remoteImpact(ctx context.Context, at time.Time, start string, hops int) map[string]int {
 	if source, ok := a.Graph.(ImpactGraphSource); ok {
-		return source.ImpactAt(ctx, at, start, hops)
+		if nodes, err := source.ImpactAt(ctx, at, start, hops); err == nil {
+			return nodes
+		}
 	}
-	return map[string]int{start: 0}, nil
+	return map[string]int{start: 0}
 }
 
 func summarizeImpact(nodes map[string]int) BlastRadius {

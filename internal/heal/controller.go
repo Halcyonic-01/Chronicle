@@ -131,12 +131,19 @@ func (p Policy) Allows(a *Action) error {
 	return nil
 }
 
+// ApprovalAuthorized checks the reviewer's approval token. It is read from
+// X-Chronicle-Heal-Token first, because Authorization may already carry the
+// separate API token; a bearer token there is still accepted so existing
+// scripts keep working.
 func ApprovalAuthorized(r *http.Request) bool {
 	want := os.Getenv("HEAL_APPROVAL_TOKEN")
 	if want == "" {
 		return false
 	}
-	have := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	have := r.Header.Get("X-Chronicle-Heal-Token")
+	if have == "" {
+		have = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
 	return subtle.ConstantTimeCompare([]byte(have), []byte(want)) == 1
 }
 

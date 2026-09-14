@@ -17,12 +17,18 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 )
 
+// seenRetention bounds how long a log line's fingerprint is remembered for
+// deduplication. Each poll only looks back 30 seconds, so a few minutes of
+// memory is ample — and without an upper bound this map grows for the lifetime
+// of the process, once per distinct log line.
+const seenRetention = 5 * time.Minute
+
 type LokiCollector struct {
 	BaseCollector
 	client  *http.Client
 	baseURL string
 	query   string
-	seen    map[string]struct{}
+	seen    map[string]time.Time
 }
 
 func NewLokiCollector(out chan<- event.Event) *LokiCollector {
@@ -31,7 +37,17 @@ func NewLokiCollector(out chan<- event.Event) *LokiCollector {
 		client:        &http.Client{Timeout: 10 * time.Second},
 		baseURL:       strings.TrimRight(valueOr(os.Getenv("LOKI_URL"), "http://localhost:3100"), "/"),
 		query:         valueOr(os.Getenv("LOKI_QUERY"), `{namespace=~".+"}`),
-		seen:          make(map[string]struct{}),
+		seen:          make(map[string]time.Time),
+	}
+}
+
+// forgetStaleFingerprints keeps the dedupe set proportional to recent log
+// volume rather than to total uptime.
+func (l *LokiCollector) forgetStaleFingerprints(now time.Time) {
+	for id, at := range l.seen {
+		if now.Sub(at) > seenRetention {
+			delete(l.seen, id)
+		}
 	}
 }
 
@@ -65,6 +81,7 @@ type lokiResponse struct {
 func (l *LokiCollector) poll(ctx context.Context) error {
 	end := time.Now()
 	start := end.Add(-30 * time.Second)
+	l.forgetStaleFingerprints(end)
 	u, err := url.Parse(l.baseURL + "/loki/api/v1/query_range")
 	if err != nil {
 		return err
@@ -113,7 +130,7 @@ func (l *LokiCollector) emitLog(labels map[string]string, timestamp, line string
 	if _, ok := l.seen[id]; ok {
 		return
 	}
-	l.seen[id] = struct{}{}
+	l.seen[id] = time.Now()
 	nanos, err := strconv.ParseInt(timestamp, 10, 64)
 	occurred := time.Unix(0, nanos).UTC()
 	if err != nil {

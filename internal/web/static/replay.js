@@ -128,7 +128,7 @@
     try {
       const from=new Date(new Date(state.replayAt).getTime()-24*60*60*1000).toISOString();
       const live=state.replayLive?'&live=1':'';
-      const [response,eventResponse]=await Promise.all([fetch(`/api/replay?t=${encodeURIComponent(state.replayAt)}${live}`,{signal:controller.signal}),fetch(`/api/events?from=${encodeURIComponent(from)}&to=${encodeURIComponent(state.replayAt)}&limit=30`,{signal:controller.signal})]);
+      const [response,eventResponse]=await Promise.all([api(`/api/replay?t=${encodeURIComponent(state.replayAt)}${live}`,{signal:controller.signal}),api(`/api/events?from=${encodeURIComponent(from)}&to=${encodeURIComponent(state.replayAt)}&limit=30`,{signal:controller.signal})]);
       const data=await response.json(); if(!response.ok)throw new Error(data.error||'Replay unavailable');
       const eventData=eventResponse.ok?await eventResponse.json():{events:[]};
       if(requestID!==state.replayRequestID)return;

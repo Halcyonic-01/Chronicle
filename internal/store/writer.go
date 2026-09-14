@@ -34,13 +34,13 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event, acknowledgement
 		acknowledge = acknowledgements[0]
 	}
 
-	flush := func() {
+	flush := func(flushCtx context.Context) {
 		if len(buf) == 0 {
 			return
 		}
 
 		batch := uniqueEvents(buf)
-		err := insertEvents(ctx, w.pool, batch)
+		err := insertEvents(flushCtx, w.pool, batch)
 
 		if err != nil {
 			slog.Error("batch insert failed", "n", len(buf), "unique", len(batch), "err", err)
@@ -50,17 +50,15 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event, acknowledgement
 			for _, e := range buf {
 				select {
 				case acknowledge <- e.ID:
-				case <-ctx.Done():
+				case <-flushCtx.Done():
 					return
 				}
 			}
 		}
 
 		if w.cache != nil {
-			for _, e := range batch {
-				if err := w.cache.Add(ctx, e); err != nil {
-					slog.Warn("failed to update recent event cache", "err", err)
-				}
+			if err := w.cache.Add(flushCtx, batch...); err != nil {
+				slog.Warn("failed to update recent event cache", "err", err)
 			}
 		}
 
@@ -72,12 +70,16 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event, acknowledgement
 		case e := <-in:
 			buf = append(buf, e)
 			if len(buf) >= 500 {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		case <-ctx.Done():
-			flush() // don't lose the tail on shutdown
+			// Don't lose the tail on shutdown. ctx is already cancelled here,
+			// so the final write needs its own short-lived context.
+			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			flush(shutdownCtx)
+			cancel()
 			return ctx.Err()
 		}
 	}

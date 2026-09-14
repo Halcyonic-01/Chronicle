@@ -156,11 +156,18 @@ func (k *K8sCollector) fromK8sEvent(ev *corev1.Event) {
 }
 
 func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
-	for i, cs := range new.Status.ContainerStatuses {
-		if i >= len(old.Status.ContainerStatuses) {
+	// Kubernetes does not guarantee a stable order for container statuses
+	// across updates, so restarts must be attributed by container name.
+	previous := make(map[string]corev1.ContainerStatus, len(old.Status.ContainerStatuses))
+	for _, status := range old.Status.ContainerStatuses {
+		previous[status.Name] = status
+	}
+
+	for _, cs := range new.Status.ContainerStatuses {
+		oldCS, known := previous[cs.Name]
+		if !known {
 			continue
 		}
-		oldCS := old.Status.ContainerStatuses[i]
 
 		// --- A restart happened ---
 		if cs.RestartCount > oldCS.RestartCount {
@@ -472,10 +479,30 @@ func shortTag(img string) string {
 	return img
 }
 
+// extractSHA returns the commit SHA an image tag encodes, if it plausibly
+// encodes one. CorrelationKey groups every event sharing a SHA prefix, so
+// returning an ordinary tag like "v1.2.3-alpine12" would silently correlate
+// unrelated deployments.
 func extractSHA(img string) string {
 	parts := strings.Split(img, ":")
-	if len(parts) > 1 {
-		return parts[len(parts)-1] // Assuming tag is the SHA
+	if len(parts) < 2 {
+		return ""
 	}
-	return ""
+	tag := parts[len(parts)-1]
+	if digest := strings.TrimPrefix(tag, "sha256-"); digest != tag {
+		tag = digest
+	}
+	if !isHex(tag) || len(tag) < 12 {
+		return ""
+	}
+	return tag
+}
+
+func isHex(value string) bool {
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return value != ""
 }

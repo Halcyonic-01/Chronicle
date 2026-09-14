@@ -3,12 +3,10 @@ package replay
 import (
 	"crypto/sha256"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // Snapshot is a complete picture of the cluster at one instant.
@@ -41,8 +39,6 @@ type ObjectState struct {
 	// Hash of the object spec — detect config drift without storing the whole spec.
 	SpecHash string `json:"spec_hash"`
 }
-
-var _ = sync.Mutex{} // just to keep import
 
 // podToState converts a live Pod object into our compact ObjectState.
 func podToState(p v1.Pod) ObjectState {
@@ -129,19 +125,5 @@ func podToState(p v1.Pod) ObjectState {
 		MemLimit:      memLimit,
 		CPULimit:      cpuLimit,
 		SpecHash:      specHash,
-	}
-}
-
-// deployToState converts a Deployment into our ObjectState.
-func deployToState(d interface{ GetName() string }, name, ns string, replicas, ready int32, image string) ObjectState {
-	_ = resource.Quantity{} // keep import
-	return ObjectState{
-		Kind:       "Deployment",
-		Name:       name,
-		Namespace:  ns,
-		Image:      image,
-		Replicas:   replicas,
-		ReadyCount: ready,
-		Phase:      "Running",
 	}
 }

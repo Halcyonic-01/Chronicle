@@ -240,6 +240,23 @@ func main() {
 					}
 				}
 			})
+			// Closed edge versions are kept for the same year the snapshot
+			// retention policy covers, so historical graph queries and replay
+			// stay answerable over the same period.
+			leaderGroup.Go(func() error {
+				ticker := time.NewTicker(time.Hour)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-leaderCtx.Done():
+						return leaderCtx.Err()
+					case <-ticker.C:
+						if err := graphStore.Prune(leaderCtx, time.Now().UTC().AddDate(-1, 0, 0)); err != nil {
+							slog.Error("failed to prune graph edge history", "err", err)
+						}
+					}
+				}
+			})
 			return leaderGroup.Wait()
 		}(); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("leader workloads stopped", "err", err)
@@ -262,16 +279,23 @@ func main() {
 	healer := heal.NewEngine(healStore)
 	healController := heal.NewController(healStore, heal.NewKubernetesExecutor(k8sClient))
 
-	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer, graphStore, healStore, k8sClient, healController)
+	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer, graphStore, healStore, k8sClient, healController).
+		WithRecentCache(recentCache)
+
+	// The API surface is gated as one unit so a new endpoint cannot be added
+	// outside the authentication check by accident.
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/api/replay", apiHandler.Replay)
+	apiMux.HandleFunc("/api/events", apiHandler.Events)
+	apiMux.HandleFunc("/api/posture", apiHandler.Posture)
+	apiMux.HandleFunc("/api/analyze", apiHandler.Analyze)
+	apiMux.HandleFunc("/api/graph", apiHandler.Graph)
+	apiMux.HandleFunc("/api/heal/actions", apiHandler.HealingActions)
+	apiMux.HandleFunc("/api/heal/actions/", apiHandler.DecideHealingAction)
+
 	mux := http.NewServeMux()
 	mux.Handle("/", chronicleweb.Handler())
-	mux.HandleFunc("/api/replay", apiHandler.Replay)
-	mux.HandleFunc("/api/events", apiHandler.Events)
-	mux.HandleFunc("/api/posture", apiHandler.Posture)
-	mux.HandleFunc("/api/analyze", apiHandler.Analyze)
-	mux.HandleFunc("/api/graph", apiHandler.Graph)
-	mux.HandleFunc("/api/heal/actions", apiHandler.HealingActions)
-	mux.HandleFunc("/api/heal/actions/", apiHandler.DecideHealingAction)
+	mux.Handle("/api/", chronicleapi.RequireAPIToken(apiMux))
 	g.Go(func() error {
 		slog.Info("Chronicle API listening", "addr", ":8181")
 		srv := &http.Server{Addr: ":8181", Handler: mux}
@@ -308,7 +332,7 @@ func main() {
 	}
 	g.Go(func() error {
 		slog.Info("waiting for Chronicle leader lease", "identity", identity, "namespace", lockNamespace, "name", lockName)
-		leaderelection.RunOrDie(gctx, leaderelection.LeaderElectionConfig{
+		config := leaderelection.LeaderElectionConfig{
 			Lock:            lock,
 			LeaseDuration:   15 * time.Second,
 			RenewDeadline:   10 * time.Second,
@@ -320,15 +344,29 @@ func main() {
 					runLeaderWorkloads(leaderCtx)
 				},
 				OnStoppedLeading: func() {
-					slog.Error("Chronicle lost leader lease", "identity", identity)
-					cancel()
+					// Losing the lease must not take the pod down with it: this
+					// replica still serves the API and console, and a transient
+					// renewal failure should only cost it the singleton
+					// workloads until it wins the lease back.
+					slog.Warn("Chronicle lost leader lease", "identity", identity)
 				},
 				OnNewLeader: func(newLeader string) {
 					slog.Info("Chronicle observed leader", "identity", newLeader)
 				},
 			},
-		})
-		return nil
+		}
+		for {
+			leaderelection.RunOrDie(gctx, config)
+			if gctx.Err() != nil {
+				return gctx.Err()
+			}
+			slog.Info("re-entering Chronicle leader election", "identity", identity)
+			select {
+			case <-gctx.Done():
+				return gctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+		}
 	})
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {

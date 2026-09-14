@@ -180,23 +180,6 @@ func (s *Snapshotter) Take(ctx context.Context) (*Snapshot, error) {
 	})
 
 	g.Go(func() error {
-		secrets, err := s.client.CoreV1().Secrets("").List(gctx, metav1.ListOptions{})
-		if err != nil {
-			return err
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		for _, secret := range secrets.Items {
-			key := fmt.Sprintf("%s/Secret/%s", secret.Namespace, secret.Name)
-			snap.Objects[key] = ObjectState{
-				Kind: "Secret", Name: secret.Name, Namespace: secret.Namespace,
-				Labels: secret.Labels, Phase: "Present",
-			}
-		}
-		return nil
-	})
-
-	g.Go(func() error {
 		claims, err := s.client.CoreV1().PersistentVolumeClaims("").List(gctx, metav1.ListOptions{})
 		if err != nil {
 			return err
@@ -267,7 +250,32 @@ func (s *Snapshotter) Take(ctx context.Context) (*Snapshot, error) {
 	}
 
 	snap.Edges = s.graph.CurrentEdges()
+	addReferencedObjects(snap)
 	return snap, s.store(ctx, snap)
+}
+
+// addReferencedObjects gives every graph endpoint a state entry so replay can
+// label the node instead of rendering it as unknown. Secrets reach the graph
+// through the pod specs that reference them, which is why Chronicle does not
+// need — and no longer requests — cluster-wide read access to Secret contents.
+func addReferencedObjects(snap *Snapshot) {
+	for _, edge := range snap.Edges {
+		for _, node := range []graph.Node{edge.From, edge.To} {
+			namespace := node.Namespace
+			if node.Kind == "Node" && namespace == "" {
+				// Cluster-scoped objects are snapshotted under "cluster/".
+				namespace = "cluster"
+			}
+			key := fmt.Sprintf("%s/%s/%s", namespace, node.Kind, node.Name)
+			if _, known := snap.Objects[key]; known {
+				continue
+			}
+			snap.Objects[key] = ObjectState{
+				Kind: node.Kind, Name: node.Name, Namespace: namespace,
+				Phase: "Referenced",
+			}
+		}
+	}
 }
 
 func deploymentToState(d appsv1.Deployment) ObjectState {

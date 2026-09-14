@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/graph"
 )
 
 type fakeEvents []event.Event
@@ -45,5 +46,65 @@ func TestAnalyzeRejectsSameTimestamp(t *testing.T) {
 	}
 	if len(got.Candidates) != 0 {
 		t.Fatalf("same-timestamp event was causal: %+v", got.Candidates)
+	}
+}
+
+// countingGraph exposes its edge set, which is the path the analyzer takes in
+// production: load the graph once, then walk it in memory.
+type countingGraph struct {
+	edges     []graph.Edge
+	edgeLoads int
+	walks     int
+}
+
+func (c *countingGraph) EdgesAt(context.Context, time.Time) ([]graph.Edge, error) {
+	c.edgeLoads++
+	return c.edges, nil
+}
+func (c *countingGraph) UpstreamAt(context.Context, time.Time, string, int) (map[string]int, error) {
+	c.walks++
+	return nil, nil
+}
+func (c *countingGraph) DownstreamAt(context.Context, time.Time, string, int) (map[string]int, error) {
+	c.walks++
+	return nil, nil
+}
+func (c *countingGraph) ImpactAt(context.Context, time.Time, string, int) (map[string]int, error) {
+	c.walks++
+	return nil, nil
+}
+
+func TestAnalyzeLoadsTheGraphOnceRegardlessOfCandidateCount(t *testing.T) {
+	now := time.Now().UTC()
+	node := func(name string) graph.Node {
+		return graph.Node{Kind: "Service", Name: name, Namespace: "default"}
+	}
+	source := &countingGraph{edges: []graph.Edge{
+		{From: node("redis"), To: node("api"), Kind: "calls", Weight: 1, Source: "static"},
+		{From: node("worker"), To: node("api"), Kind: "calls", Weight: 1, Source: "static"},
+		{From: node("db"), To: node("worker"), Kind: "calls", Weight: 1, Source: "static"},
+	}}
+	symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	upstream := []event.Event{
+		{ID: "1", IngestedAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "redis", Type: "container_restart"},
+		{ID: "2", IngestedAt: now.Add(-40 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "worker", Type: "deploy"},
+		{ID: "3", IngestedAt: now.Add(-50 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "db", Type: "scale"},
+	}
+
+	got, err := (&Analyzer{Events: fakeEvents(upstream), Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 3 {
+		t.Fatalf("expected every upstream event to be a candidate, got %d", len(got.Candidates))
+	}
+	if source.edgeLoads != 1 {
+		t.Fatalf("the graph must be loaded once per analysis, not per candidate: %d loads", source.edgeLoads)
+	}
+	if source.walks != 0 {
+		t.Fatalf("per-candidate graph queries should be replaced by in-memory walks: %d queries", source.walks)
+	}
+	if len(got.Evidence) == 0 {
+		t.Fatal("the loaded edge set should still produce evidence edges")
 	}
 }

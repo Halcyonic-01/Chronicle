@@ -56,16 +56,24 @@ helm upgrade --install kafka bitnami/kafka \
 # group-based writer can consume events. Provision both topics explicitly so a
 # newly recreated kind cluster is ready without manual kubectl commands.
 kubectl wait --namespace chronicle --for=condition=ready pod/kafka-broker-0 --timeout=180s
-kubectl exec --namespace chronicle kafka-broker-0 -- \
-    kafka-topics.sh \
+
+# The broker pod has a deliberately small memory limit for kind. Running
+# kafka-topics.sh with its default JVM heap in that same pod can OOM-kill the
+# container (exit 137), so keep the short-lived admin client bounded.
+kafka_topics() {
+    kubectl exec --namespace chronicle kafka-broker-0 -- \
+        env KAFKA_HEAP_OPTS='-Xms32m -Xmx128m' kafka-topics.sh "$@"
+}
+
+echo "Provisioning Kafka topics..."
+kafka_topics \
     --create \
     --if-not-exists \
     --topic chronicle.events \
     --bootstrap-server kafka:9092 \
     --partitions 1 \
     --replication-factor 1
-kubectl exec --namespace chronicle kafka-broker-0 -- \
-    kafka-topics.sh \
+kafka_topics \
     --create \
     --if-not-exists \
     --topic __consumer_offsets \

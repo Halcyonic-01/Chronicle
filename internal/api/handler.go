@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -29,6 +32,7 @@ type Handler struct {
 	actions   heal.ActionStore
 	k8s       kubernetes.Interface
 	execution *heal.Controller
+	recent    *store.RecentCache
 }
 
 func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.PostgresEventSource, healer *heal.Engine, graphStore *store.GraphStore, actionStore heal.ActionStore, k8sClient kubernetes.Interface, execution ...*heal.Controller) *Handler {
@@ -39,6 +43,68 @@ func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.Po
 	return &Handler{replayer: replayer, analyzer: analyzer, rcaDB: rcaDB, healer: healer, graph: graphStore, actions: actionStore, k8s: k8sClient, execution: controller}
 }
 
+// WithRecentCache serves the console's default event view from Redis instead of
+// paging the events table on every poll. It is optional: without it, and
+// whenever the cache cannot satisfy a request, the handler reads PostgreSQL.
+func (h *Handler) WithRecentCache(cache *store.RecentCache) *Handler {
+	h.recent = cache
+	return h
+}
+
+// cachedEvents returns the requested page from Redis, or nil when the cache
+// cannot answer it: a paged or narrowed request, a cache miss, or a window
+// deeper than the cache retains.
+func (h *Handler) cachedEvents(ctx context.Context, from, to time.Time, limit, offset int) []event.Event {
+	if h.recent == nil || offset != 0 || limit > h.recent.Limit() {
+		return nil
+	}
+	events, err := h.recent.Recent(ctx, from, to, limit)
+	if err != nil {
+		slog.Warn("recent event cache unavailable; falling back to PostgreSQL", "err", err)
+		return nil
+	}
+	// Fewer events than asked for may mean the cache is merely cold, so it is
+	// only authoritative once it has filled the page.
+	if len(events) < limit {
+		return nil
+	}
+	return events
+}
+
+// allowedOrigin is read once at startup. Chronicle's console is served from
+// the same origin as the API, so the default is to send no CORS header at all
+// rather than the wildcard that previously let any page on any origin read
+// every incident, event and healing decision.
+var allowedOrigin = os.Getenv("CHRONICLE_ALLOWED_ORIGIN")
+
+func writeJSONHeaders(w http.ResponseWriter) {
+	if allowedOrigin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		w.Header().Set("Vary", "Origin")
+	}
+	w.Header().Set("Content-Type", "application/json")
+}
+
+// RequireAPIToken guards the API when CHRONICLE_API_TOKEN is set. Chronicle's
+// Service is ClusterIP and the token is unset by default, which keeps local
+// development and the test scripts working; set it whenever the API is reachable
+// beyond the cluster.
+func RequireAPIToken(next http.Handler) http.Handler {
+	token := os.Getenv("CHRONICLE_API_TOKEN")
+	if token == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
+			writeJSONHeaders(w)
+			http.Error(w, `{"error":"API authentication required"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 type analyzeResponse struct {
 	*rca.Result
 	Action *heal.Action `json:"action,omitempty"`
@@ -46,8 +112,7 @@ type analyzeResponse struct {
 
 // POST /api/analyze?event_id=123
 func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Content-Type", "application/json")
+	writeJSONHeaders(w)
 
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"use POST"}`, http.StatusMethodNotAllowed)
@@ -87,8 +152,7 @@ func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
 // GET /api/replay?t=2026-09-02T09:33:47Z
 // Returns the exact cluster state at the given timestamp.
 func (h *Handler) Replay(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Content-Type", "application/json")
+	writeJSONHeaders(w)
 
 	ts := r.URL.Query().Get("t")
 	if ts == "" {
@@ -201,8 +265,7 @@ func (h *Handler) overlayLiveReplayState(ctx context.Context, snap *replay.Snaps
 // GET /api/events?from=2026-09-02T09:30:00Z&to=2026-09-02T09:40:00Z
 // Returns all events in the time window for the timeline view.
 func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Content-Type", "application/json")
+	writeJSONHeaders(w)
 
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"use GET"}`, http.StatusMethodNotAllowed)
@@ -240,10 +303,14 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items, err := h.rcaDB.RecentEvents(r.Context(), from, to, limit, offset)
-	if err != nil {
-		http.Error(w, `{"error":"failed to load events"}`, http.StatusInternalServerError)
-		return
+	items := h.cachedEvents(r.Context(), from, to, limit, offset)
+	if items == nil {
+		loaded, err := h.rcaDB.RecentEvents(r.Context(), from, to, limit, offset)
+		if err != nil {
+			http.Error(w, `{"error":"failed to load events"}`, http.StatusInternalServerError)
+			return
+		}
+		items = loaded
 	}
 	total, err := h.rcaDB.CountEvents(r.Context(), from, to)
 	if err != nil {
@@ -286,8 +353,7 @@ type postureResponse struct {
 // historical event stream. A resource is healthy only when its current
 // Kubernetes status says it is ready.
 func (h *Handler) Posture(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Content-Type", "application/json")
+	writeJSONHeaders(w)
 	if h.k8s == nil {
 		http.Error(w, `{"error":"kubernetes client unavailable"}`, http.StatusServiceUnavailable)
 		return
@@ -366,8 +432,7 @@ func boolInt32(value bool) int32 {
 // GET /api/graph returns the current dependency graph used by RCA.
 // Pass ?at=<RFC3339> to query the temporal graph at a historical instant.
 func (h *Handler) Graph(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Content-Type", "application/json")
+	writeJSONHeaders(w)
 	if h.graph == nil {
 		http.Error(w, `{"error":"graph store unavailable"}`, http.StatusServiceUnavailable)
 		return
@@ -428,12 +493,6 @@ func (h *Handler) Graph(w http.ResponseWriter, r *http.Request) {
 				seen[n.Key()] = n
 			}
 		}
-		if items, err := h.k8s.CoreV1().Secrets("").List(r.Context(), metav1.ListOptions{}); err == nil {
-			for _, item := range items.Items {
-				n := graph.Node{Kind: "Secret", Name: item.Name, Namespace: item.Namespace}
-				seen[n.Key()] = n
-			}
-		}
 		if items, err := h.k8s.CoreV1().PersistentVolumeClaims("").List(r.Context(), metav1.ListOptions{}); err == nil {
 			for _, item := range items.Items {
 				n := graph.Node{Kind: "PersistentVolumeClaim", Name: item.Name, Namespace: item.Namespace}
@@ -467,8 +526,7 @@ func (h *Handler) Graph(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HealingActions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Content-Type", "application/json")
+	writeJSONHeaders(w)
 	if h.actions == nil {
 		http.Error(w, `{"error":"healing store unavailable"}`, http.StatusServiceUnavailable)
 		return
@@ -487,8 +545,7 @@ func (h *Handler) HealingActions(w http.ResponseWriter, r *http.Request) {
 // POST /api/heal/actions/{id}/approve or /deny. Approval is authenticated;
 // live execution additionally requires the controller's safety gates.
 func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Content-Type", "application/json")
+	writeJSONHeaders(w)
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"use POST"}`, http.StatusMethodNotAllowed)
 		return
