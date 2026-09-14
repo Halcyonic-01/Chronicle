@@ -167,3 +167,64 @@ func TestBlastRadiusFactorKeepsDiscriminatingAtScale(t *testing.T) {
 		t.Fatalf("the factor must stay under its ceiling, got %.4f", large)
 	}
 }
+
+func deployEvent(id string, at time.Time, from, to string) event.Event {
+	return event.Event{
+		ID: id, IngestedAt: at, Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "deploy",
+		Payload: []byte(`{"old_image":"` + from + `","new_image":"` + to + `"}`),
+	}
+}
+
+// Fixing an outage puts a change into the causal window like any other, and
+// recency alone ranks the fix above the break it was fixing.
+func TestRevertingChangesAreIdentified(t *testing.T) {
+	now := time.Now().UTC()
+	broke := deployEvent("broke", now.Add(-90*time.Second), "latest", "nonexistent")
+	fixed := deployEvent("fixed", now.Add(-5*time.Second), "nonexistent", "latest")
+	unrelated := deployEvent("unrelated", now.Add(-60*time.Second), "v1", "v2")
+
+	reverts := revertingChanges([]event.Event{broke, unrelated, fixed})
+	if reverts["fixed"] != "broke" {
+		t.Fatalf("the restore should be recognised as undoing the break, got %#v", reverts)
+	}
+	if _, marked := reverts["broke"]; marked {
+		t.Error("the break undoes nothing that came before it")
+	}
+	if _, marked := reverts["unrelated"]; marked {
+		t.Error("a forward change to a different image is not a revert")
+	}
+}
+
+// The regression that prompted this: restoring an image at the moment the pod
+// finally reported Failed outscored the deploy that broke it a minute earlier.
+func TestTheFixDoesNotOutrankTheBreak(t *testing.T) {
+	now := time.Now().UTC()
+	symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "worker-1", Type: "resource_status"}
+	node := func(kind, name string) graph.Node { return graph.Node{Kind: kind, Name: name, Namespace: "default"} }
+	source := &countingGraph{edges: []graph.Edge{
+		{From: node("Deployment", "worker"), To: node("Pod", "worker-1"), Kind: "owns", Weight: 1, Source: "static"},
+	}}
+	window := []event.Event{
+		deployEvent("broke", now.Add(-47*time.Second), "latest", "nonexistent"),
+		deployEvent("fixed", now.Add(-1*time.Second), "nonexistent", "latest"),
+	}
+
+	got, err := (&Analyzer{Events: fakeEvents(window), Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 2 {
+		t.Fatalf("both deploys should be graph-reachable candidates, got %d", len(got.Candidates))
+	}
+	if got.Candidates[0].Event.ID != "broke" {
+		t.Fatalf("the break must rank above the fix, got %q first (scores: %.3f vs %.3f)",
+			got.Candidates[0].Event.ID, got.Candidates[0].Score, got.Candidates[1].Score)
+	}
+	if got.Candidates[1].Reverts != "broke" {
+		t.Errorf("the fix should be annotated with what it undid, got %q", got.Candidates[1].Reverts)
+	}
+	// Demoted, not hidden: a rollback to a bad older version is a real cause.
+	if got.Candidates[1].Score <= 0 {
+		t.Error("a remediation stays rankable rather than being excluded")
+	}
+}
