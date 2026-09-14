@@ -2,6 +2,7 @@ package rca
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -106,5 +107,35 @@ func TestAnalyzeLoadsTheGraphOnceRegardlessOfCandidateCount(t *testing.T) {
 	}
 	if len(got.Evidence) == 0 {
 		t.Fatal("the loaded edge set should still produce evidence edges")
+	}
+}
+
+func TestScoreFactorsExplainTheScoreTheyProduce(t *testing.T) {
+	now := time.Now().UTC()
+	symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	candidate := Candidate{
+		Event:            event.Event{ID: "c", IngestedAt: now.Add(-60 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "redis", Type: "deploy"},
+		Distance:         2,
+		AffectedServices: 3,
+	}
+	score(&candidate, symptom)
+
+	if len(candidate.Factors) != 4 {
+		t.Fatalf("expected a factor per scoring step, got %d: %+v", len(candidate.Factors), candidate.Factors)
+	}
+	if !candidate.Factors[0].Base {
+		t.Fatal("the first factor is the base weight, not a multiplier")
+	}
+	// The derivation shown in the UI must actually reproduce the score.
+	product := 1.0
+	for _, f := range candidate.Factors {
+		product *= f.Multiplier
+	}
+	if math.Abs(product-candidate.Score) > 1e-9 {
+		t.Fatalf("factors multiply to %.6f but the score is %.6f", product, candidate.Score)
+	}
+	// Reasons stay in sync because the heal audit trail stores them.
+	if len(candidate.Reasons) != len(candidate.Factors) {
+		t.Fatalf("every factor should still have a sentence: %d reasons, %d factors", len(candidate.Reasons), len(candidate.Factors))
 	}
 }

@@ -68,6 +68,7 @@ Kubernetes connections, which fall back to in-cluster and local-kind defaults.
 | `RCA_API_KEY`, `RCA_API_URL`, `RCA_MODEL` | Narrator, any OpenAI-compatible Chat Completions endpoint. Without a key, RCA uses the deterministic narrative. |
 | `KAFKA_BROKERS`, `KAFKA_TOPIC`, `KAFKA_GROUP` | Durable buffer between collectors and the writer. Unset writes straight to PostgreSQL. |
 | `REDIS_ADDR`, `REDIS_PASSWORD` | Recent-event cache backing the console's default view. |
+| `LOKI_URL`, `LOKI_QUERY` | Log source and its LogQL selector. Defaults to every namespace; scope it (e.g. `{namespace="default"}`) or control-plane chatter drowns out application errors. |
 | `GITHUB_TOKEN`, `ARGOCD_*`, `TERRAFORM_*` | Optional collectors; each is skipped when its URL or token is unset. |
 | `CHRONICLE_API_TOKEN` | When set, every `/api/*` request must present `Authorization: Bearer <token>`. |
 | `CHRONICLE_ALLOWED_ORIGIN` | CORS origin. Empty (the default) sends no CORS header; the console is same-origin. |

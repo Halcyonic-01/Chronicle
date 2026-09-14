@@ -86,10 +86,32 @@
 .cand .num { text-align: right; }
 .bar { display: inline-block; width: 54px; height: 3px; background: var(--line); position: relative; vertical-align: middle; margin-right: 6px; }
 .bar i { position: absolute; inset: 0 auto 0 0; background: var(--blue); }
-.why { list-style: none; margin: 5px 0 0; padding: 0; }
-.why li { font: 10px var(--mono); color: var(--dim); padding: 1px 0; }
-.why li::before { content: "· "; }
-.note { font: 11px/1.65 var(--sans); color: var(--muted); }
+/* Score derivation. This is the product's central claim — that the ranking is
+   explainable — so it gets real size, alignment and contrast rather than a
+   footnote-sized bullet list inside a table cell. */
+.deriv { margin-top: 14px; border: 1px solid var(--line); }
+.deriv-h { display: flex; align-items: center; gap: 8px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--line); font: 10px var(--sans); font-weight: 600; letter-spacing: .11em; text-transform: uppercase; color: var(--muted); }
+.deriv-h span { margin-left: auto; font: 10px var(--mono); letter-spacing: .04em; color: var(--dim); text-transform: none; font-weight: 400; }
+.deriv table { width: 100%; border-collapse: collapse; }
+.deriv td { padding: 8px 11px; border-bottom: 1px solid var(--line2); font: 12px var(--mono); vertical-align: middle; }
+.deriv tr:last-child td { border-bottom: 0; }
+.deriv .lbl { color: var(--muted); white-space: nowrap; width: 1%; }
+.deriv .det { color: var(--text); }
+.deriv .mul { text-align: right; white-space: nowrap; width: 1%; font-variant-numeric: tabular-nums; color: var(--text); }
+.deriv .mul.down { color: var(--amber); }
+.deriv .mul.up { color: var(--green); }
+.deriv .mul.flat, .deriv .mul.base { color: var(--muted); }
+/* Bar with a tick at the "no effect" position, so below/above 1.00 reads at a glance. */
+.deriv .meter { display: inline-block; position: relative; width: 84px; height: 4px; background: var(--line2); margin-right: 10px; vertical-align: middle; }
+.deriv .meter i { position: absolute; inset: 0 auto 0 0; background: currentColor; opacity: .75; }
+.deriv .meter::after { content: ""; position: absolute; left: 66.6%; top: -2px; bottom: -2px; width: 1px; background: var(--line); }
+.deriv tr.total td { background: #141d27; border-top: 1px solid var(--line); font-size: 13px; color: var(--text); }
+.deriv tr.total .det { color: var(--dim); font-size: 11px; }
+.deriv-fallback { padding: 9px 11px; font: 12px/1.7 var(--mono); color: var(--muted); }
+
+.narr { margin-top: 14px; border-left: 2px solid var(--line); padding-left: 12px; }
+.narr-l { display: block; font: 10px var(--sans); font-weight: 600; letter-spacing: .11em; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
+.note { font: 12px/1.7 var(--sans); color: var(--muted); margin: 0; max-width: 92ch; overflow-wrap: anywhere; }
 .warnline { font: 11px var(--mono); color: var(--amber); }
 
 .occ { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -173,3 +195,58 @@
 /* Specification tables: the note column absorbs slack, the label and value
    columns stay on one line so short values do not wrap to three rows. */
 .dt.spec td:nth-child(1), .dt.spec td:nth-child(2) { white-space: nowrap; }
+
+/* --- causal path -------------------------------------------------------
+   The hop count in the ranking table is abstract; this renders the same
+   number as the actual route the dependency graph says the cause took. */
+.path { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.hop { display: inline-flex; flex-direction: column; gap: 2px; border: 1px solid var(--line); padding: 6px 10px; background: var(--panel); min-width: 0; }
+.hop b { font: 11px var(--mono); font-weight: 500; color: var(--text); }
+.hop small { font: 9.5px var(--mono); color: var(--dim); }
+.hop.cause { border-color: var(--blue); }
+.hop.cause b { color: var(--blue); }
+.hop.sym { border-color: var(--red); }
+.hop.sym b { color: var(--red); }
+.hop.self { border-color: var(--amber); }
+.hop.self b { color: var(--amber); }
+.link { font: 9.5px var(--mono); color: var(--dim); letter-spacing: .05em; white-space: nowrap; }
+.link::before { content: "──"; margin-right: 5px; color: var(--line); }
+.link::after { content: "─▶"; margin-left: 5px; color: var(--line); }
+.path-note { font: 10px var(--mono); color: var(--dim); }
+
+/* --- evidence graph ---------------------------------------------------- */
+.ev-wrap { overflow-x: auto; padding: 4px 16px 10px; }
+.ev-edge { fill: none; stroke: var(--line); stroke-width: 1.2; }
+.ev-edge.on { stroke: var(--blue); stroke-width: 1.6; }
+.ev-head { fill: var(--line); }
+.ev-kind { font: 9px var(--mono); fill: var(--dim); }
+.ev-node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.ev-node .ev-name { font: 11px var(--mono); fill: var(--text); }
+.ev-node .ev-meta { font: 9px var(--mono); fill: var(--dim); }
+.ev-node.sym rect { stroke: var(--red); fill: #1c1113; }
+.ev-node.sym .ev-name { fill: var(--red); }
+.ev-node.cause rect { stroke: var(--blue); fill: #111a26; }
+.ev-node.cause .ev-name { fill: var(--blue); }
+.ev-key { display: flex; align-items: center; gap: 6px; padding: 0 16px 11px; font: 10px var(--mono); color: var(--dim); flex-wrap: wrap; }
+.ev-key .sw { width: 9px; height: 9px; border: 1px solid var(--line); background: var(--panel); display: inline-block; }
+.ev-key .sw.sym { border-color: var(--red); background: #1c1113; }
+.ev-key .sw.cause { border-color: var(--blue); background: #111a26; }
+.ev-key .sw { margin-left: 8px; }
+.ev-key .sw:first-child { margin-left: 0; }
+.ev-key .ev-count { margin-left: auto; }
+
+/* --- blast radius ------------------------------------------------------
+   The affected services were only ever a count; they are the answer to
+   "who does this take down with it", so they are listed by kind. */
+.blast { display: flex; flex-direction: column; gap: 11px; }
+.blast-k { font: 9.5px var(--sans); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); margin-bottom: 6px; display: flex; gap: 7px; align-items: center; }
+.blast-k span { font: 10px var(--mono); letter-spacing: 0; color: var(--muted); border: 1px solid var(--line); padding: 0 4px; text-transform: none; font-weight: 400; }
+.blast-items { display: flex; flex-wrap: wrap; gap: 5px; }
+.blast-item { display: inline-flex; align-items: baseline; gap: 6px; border: 1px solid var(--line2); background: var(--panel); padding: 4px 8px; min-width: 0; }
+.blast-item b { font: 11px var(--mono); font-weight: 500; color: var(--text); }
+.blast-item small { font: 9.5px var(--mono); color: var(--dim); }
+
+/* Candidate rows select which candidate the derivation, path and graph describe. */
+.cand tbody tr { cursor: pointer; }
+.cand tbody tr:hover td { background: var(--panel2); }
+.cand tr.top:hover td { background: #16212d; }

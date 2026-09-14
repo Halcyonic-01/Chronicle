@@ -203,12 +203,12 @@
       : result && result.error
         ? `<div class="none warnline">${esc(result.error)}</div>`
         : result
-          ? rcaBody(result)
+          ? rcaBody(result, Math.min(focusIndex(g), (result.candidates || []).length - 1))
           : `<div class="none">Not analyzed. <kbd>R</kbd> ranks graph-reachable causes in the window before this signal.</div>`;
     return `<section class="sec"><div class="sec-h"><b>Root cause</b><span>${result && result.scanned !== undefined ? `${result.scanned} EVENTS SCANNED` : 'POST /api/analyze'}</span></div>${body}</section>`;
   }
 
-  function rcaBody(r) {
+  function rcaBody(r, focus) {
     const confidence = Number(r.confidence || 0);
     const pct = Math.round(confidence * 100);
     if (!r.candidates || !r.candidates.length) {
@@ -217,11 +217,10 @@
     }
     const rows = r.candidates.map((c, i) => {
       const gap = Math.round((ts(r.symptom.ingested_at) - ts(c.event.ingested_at)));
-      return `<tr class="${i === 0 ? 'top' : ''}">
+      return `<tr class="${i === focus ? 'top' : ''}" data-cand="${i}">
         <td class="num">${i + 1}</td>
         <td><span class="bar"><i style="width:${Math.round((c.score || 0) * 100)}%"></i></span>${(c.score || 0).toFixed(3)}</td>
-        <td>${esc(c.event.type)}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div>
-          ${i === 0 && c.reasons ? `<ul class="why">${c.reasons.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</td>
+        <td>${esc(c.event.type)}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div></td>
         <td class="num">${Math.round(gap / 1000)}s</td>
         <td class="num">${c.distance}</td>
         <td class="num">${c.affected_services || 0}</td>
@@ -233,9 +232,184 @@
         <span class="conf-t"><i style="width:${pct}%"></i></span>
         <span class="conf-l">${confidence < 0.5 ? 'INCONCLUSIVE' : 'CONFIDENCE'} · BLAST RADIUS ${r.blast_radius ? r.blast_radius.affected_services : 0} SVC / ${r.blast_radius ? r.blast_radius.affected_nodes : 0} NODES</span>
       </div>
-      <table class="cand"><thead><tr><th>#</th><th>Score</th><th>Cause · target · why</th><th class="num">Gap</th><th class="num">Hops</th><th class="num">Svc</th></tr></thead><tbody>${rows}</tbody></table>
-      ${r.narrative ? `<p class="note" style="margin-top:11px">${esc(r.narrative)}</p>` : ''}
+      <table class="cand"><thead><tr><th>#</th><th>Score</th><th>Cause · target</th><th class="num">Gap</th><th class="num">Hops</th><th class="num">Svc</th></tr></thead><tbody>${rows}</tbody></table>
+      ${derivation(r.candidates[focus] || r.candidates[0])}
+      ${r.narrative ? `<div class="narr"><span class="narr-l">Narrative</span><p class="note">${esc(r.narrative)}</p></div>` : ''}
     </div>`;
+  }
+
+  // The score is a product of one base weight and three multipliers. Showing it
+  // as an aligned derivation makes it obvious which factor moved the number —
+  // a sentence per step cannot do that.
+  function derivation(top) {
+    if (!top) return '';
+    const factors = top.factors || [];
+    if (!factors.length) {
+      return top.reasons && top.reasons.length
+        ? `<div class="deriv"><div class="deriv-h">Score derivation</div><div class="deriv-fallback">${top.reasons.map(x => `<div>${esc(x)}</div>`).join('')}</div></div>`
+        : '';
+    }
+    // 1.5 is the widest multiplier the scoring can produce, so the tick at
+    // two thirds marks "no effect" on every row.
+    const scale = m => Math.max(0, Math.min(100, (m / 1.5) * 100));
+    const rows = factors.map(f => {
+      const direction = f.base ? 'base' : (f.multiplier > 1.001 ? 'up' : (f.multiplier < 0.999 ? 'down' : 'flat'));
+      return `<tr>
+        <td class="lbl">${esc(f.label)}</td>
+        <td class="det">${esc(f.detail)}</td>
+        <td class="mul ${direction}"><span class="meter"><i style="width:${scale(f.multiplier)}%"></i></span>${f.base ? '' : '×'}${Number(f.multiplier).toFixed(2)}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="deriv">
+      <div class="deriv-h">Score derivation<span>TOP CANDIDATE · ${esc(top.event.type)}</span></div>
+      <table><tbody>${rows}
+        <tr class="total"><td class="lbl">Score</td><td class="det">base × each factor</td><td class="mul">${Number(top.score || 0).toFixed(3)}</td></tr>
+      </tbody></table>
+    </div>`;
+  }
+
+  /* --- impact: who is affected, and how the cause reaches them ----------- */
+
+  const nodeKey = n => `${n?.Namespace ?? n?.namespace ?? ''}/${n?.Kind ?? n?.kind ?? ''}/${n?.Name ?? n?.name ?? ''}`;
+  const shortName = (name, max = 22) => name.length > max ? name.slice(0, max - 1) + '\u2026' : name;
+  const parseKey = k => { const parts = String(k).split('/'); return {namespace: parts[0] || '', kind: parts[1] || '', name: parts.slice(2).join('/') || ''}; };
+  const focusIndex = g => Number((state.opsCandidateBy || {})[g.id] || 0);
+
+  // Upstream hop distance from the symptom, over the evidence subgraph.
+  // Anything the walk never reaches sits downstream of the symptom.
+  function layersFrom(edges, symptomKey) {
+    const incoming = new Map();
+    edges.forEach(e => { const to = nodeKey(e.To), from = nodeKey(e.From); if (!incoming.has(to)) incoming.set(to, []); incoming.get(to).push(from); });
+    const layer = new Map([[symptomKey, 0]]);
+    let frontier = [symptomKey];
+    for (let depth = 1; depth <= 6 && frontier.length; depth++) {
+      const next = [];
+      frontier.forEach(node => (incoming.get(node) || []).forEach(from => { if (!layer.has(from)) { layer.set(from, depth); next.push(from); } }));
+      frontier = next;
+    }
+    return layer;
+  }
+
+  // Shortest chain of edges from the cause to the symptom, so the hop count in
+  // the ranking table can be read as an actual route.
+  function pathBetween(edges, fromKey, toKey) {
+    if (fromKey === toKey) return [];
+    const outgoing = new Map();
+    edges.forEach(e => { const from = nodeKey(e.From); if (!outgoing.has(from)) outgoing.set(from, []); outgoing.get(from).push(e); });
+    const queue = [[fromKey, []]];
+    const seen = new Set([fromKey]);
+    while (queue.length) {
+      const [node, trail] = queue.shift();
+      for (const edge of outgoing.get(node) || []) {
+        const next = nodeKey(edge.To);
+        if (seen.has(next)) continue;
+        const extended = trail.concat([edge]);
+        if (next === toKey) return extended;
+        seen.add(next);
+        queue.push([next, extended]);
+      }
+    }
+    return null;
+  }
+
+  function causalPath(result, candidate) {
+    const symptomKey = nodeKey({Namespace: result.symptom.namespace, Kind: result.symptom.entity_kind, Name: result.symptom.entity_name});
+    const causeKey = nodeKey({Namespace: candidate.event.namespace, Kind: candidate.event.entity_kind, Name: candidate.event.entity_name});
+    if (causeKey === symptomKey) {
+      const self = parseKey(causeKey);
+      return `<div class="path"><span class="hop self"><b>${esc(shortName(self.name, 30))}</b><small>${esc(self.kind)}</small></span><span class="path-note">cause and symptom are the same resource \u2014 no hop between them</span></div>`;
+    }
+    const route = pathBetween(result.evidence || [], causeKey, symptomKey);
+    const start = parseKey(causeKey);
+    if (!route || !route.length) {
+      const end = parseKey(symptomKey);
+      return `<div class="path"><span class="hop cause"><b>${esc(shortName(start.name, 28))}</b><small>${esc(start.kind)}</small></span><span class="link">${candidate.distance} hop(s)</span><span class="hop sym"><b>${esc(shortName(end.name, 28))}</b><small>${esc(end.kind)}</small></span><span class="path-note">exact route is outside the retained evidence</span></div>`;
+    }
+    return `<div class="path">
+      <span class="hop cause"><b>${esc(shortName(start.name, 28))}</b><small>${esc(start.kind)}</small></span>
+      ${route.map(edge => { const to = parseKey(nodeKey(edge.To)); const last = nodeKey(edge.To) === symptomKey;
+        return `<span class="link">${esc(edge.Kind)}</span><span class="hop ${last ? 'sym' : ''}"><b>${esc(shortName(to.name, 28))}</b><small>${esc(to.kind)}</small></span>`; }).join('')}
+    </div>`;
+  }
+
+  // A small layered picture of the retained evidence: upstream on the left,
+  // the symptom in its own column, anything downstream on the right.
+  function evidenceGraph(result, candidate) {
+    const edges = result.evidence || [];
+    if (!edges.length) return `<div class="none">No dependency edges were retained for this analysis.</div>`;
+    const symptomKey = nodeKey({Namespace: result.symptom.namespace, Kind: result.symptom.entity_kind, Name: result.symptom.entity_name});
+    const causeKey = candidate ? nodeKey({Namespace: candidate.event.namespace, Kind: candidate.event.entity_kind, Name: candidate.event.entity_name}) : '';
+    const layer = layersFrom(edges, symptomKey);
+
+    const nodes = new Map();
+    edges.forEach(e => [e.From, e.To].forEach(n => { const k = nodeKey(n); if (!nodes.has(k)) nodes.set(k, {key: k, ...parseKey(k)}); }));
+    if (!nodes.has(symptomKey)) nodes.set(symptomKey, {key: symptomKey, ...parseKey(symptomKey)});
+
+    const columns = [...new Set([...nodes.keys()].map(k => layer.has(k) ? layer.get(k) : -1))].sort((a, b) => b - a);
+    const order = new Map(columns.map((c, i) => [c, i]));
+    const W = 172, H = 40, GAPX = 74, GAPY = 12, PAD = 12;
+    const counters = new Map();
+    const placed = new Map();
+    [...nodes.values()].sort((a, b) => a.key.localeCompare(b.key)).forEach(n => {
+      const column = layer.has(n.key) ? layer.get(n.key) : -1;
+      const row = counters.get(column) || 0;
+      counters.set(column, row + 1);
+      placed.set(n.key, Object.assign({}, n, {x: PAD + order.get(column) * (W + GAPX), y: PAD + row * (H + GAPY)}));
+    });
+    const width = PAD * 2 + columns.length * W + Math.max(0, columns.length - 1) * GAPX;
+    const height = PAD * 2 + Math.max(...counters.values(), 1) * (H + GAPY);
+    const showLabels = edges.length <= 14;
+
+    const lines = edges.map(e => {
+      const a = placed.get(nodeKey(e.From)), b = placed.get(nodeKey(e.To));
+      if (!a || !b) return '';
+      const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
+      const midX = (x1 + x2) / 2;
+      const onPath = nodeKey(e.From) === causeKey || nodeKey(e.To) === symptomKey;
+      return `<path d="M${x1} ${y1} C${midX} ${y1} ${midX} ${y2} ${x2} ${y2}" class="ev-edge${onPath ? ' on' : ''}" marker-end="url(#ev-arrow)"/>` +
+        (showLabels ? `<text class="ev-kind" x="${midX}" y="${(y1 + y2) / 2 - 4}" text-anchor="middle">${esc(e.Kind)}</text>` : '');
+    }).join('');
+
+    const boxes = [...placed.values()].map(n => {
+      const role = n.key === symptomKey ? 'sym' : (n.key === causeKey ? 'cause' : '');
+      return `<g class="ev-node ${role}" transform="translate(${n.x},${n.y})">
+        <rect width="${W}" height="${H}" rx="2"/>
+        <text class="ev-name" x="9" y="17">${esc(shortName(n.name, 24))}</text>
+        <text class="ev-meta" x="9" y="30">${esc(n.kind)} \u00b7 ${esc(n.namespace || 'cluster')}</text>
+      </g>`;
+    }).join('');
+
+    return `<div class="ev-wrap"><svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+      <defs><marker id="ev-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 z" class="ev-head"/></marker></defs>
+      ${lines}${boxes}
+    </svg></div>
+    <div class="ev-key"><span class="sw sym"></span><span>symptom</span><span class="sw cause"></span><span>selected cause</span><span class="sw"></span><span>dependency</span><span class="ev-count">${edges.length} edge(s) \u00b7 ${placed.size} node(s)${showLabels ? '' : ' \u00b7 labels hidden'}</span></div>`;
+  }
+
+  function blastRadius(result) {
+    const radius = result.blast_radius || {};
+    const services = radius.services || [];
+    if (!services.length) return `<div class="none">Nothing downstream of this resource is reachable in the graph.</div>`;
+    const byKind = new Map();
+    services.forEach(key => { const parsed = parseKey(key); if (!byKind.has(parsed.kind)) byKind.set(parsed.kind, []); byKind.get(parsed.kind).push(parsed); });
+    return `<div class="blast">${[...byKind.entries()].map(([kind, items]) => `
+      <div class="blast-group"><div class="blast-k">${esc(kind)}<span>${items.length}</span></div>
+      <div class="blast-items">${items.map(i => `<span class="blast-item"><b>${esc(i.name)}</b><small>${esc(i.namespace)}</small></span>`).join('')}</div></div>`).join('')}
+    </div>`;
+  }
+
+  function impactSections(g) {
+    const result = (state.opsRCA || {})[g.id];
+    if (!result || result === 'loading' || result.error || !result.candidates || !result.candidates.length) return '';
+    const candidate = result.candidates[Math.min(focusIndex(g), result.candidates.length - 1)];
+    const radius = result.blast_radius || {};
+    return `<section class="sec"><div class="sec-h"><b>Causal path</b><span>SELECTED CANDIDATE \u2192 SYMPTOM</span></div>
+        <div class="sec-body">${causalPath(result, candidate)}</div>
+        ${evidenceGraph(result, candidate)}
+      </section>
+      <section class="sec"><div class="sec-h"><b>Blast radius</b><span>${radius.affected_services || 0} SERVICES \u00b7 ${radius.affected_nodes || 0} NODES REACHABLE</span></div>
+        <div class="sec-body">${blastRadius(result)}</div>
+      </section>`;
   }
 
   function detail(g) {
@@ -254,6 +428,7 @@
       ${keyValues(g)}
       ${raw && raw !== short ? `<section class="sec"><div class="sec-h"><b>Raw record</b><span>${esc(e.source.toUpperCase())} · ${esc(e.id)}</span></div><pre class="raw">${esc(raw)}</pre></section>` : ''}
       ${rootCause(g)}
+      ${impactSections(g)}
       ${remediation(g)}
       ${occurrences(g)}`;
   }
@@ -329,6 +504,20 @@
       state.opsSelected = button.dataset.sig;
       window.render();
     });
+    document.querySelectorAll('[data-cand]').forEach(row => row.onclick = () => {
+      const active = selected(group(signals()));
+      if (!active) return;
+      state.opsCandidateBy = state.opsCandidateBy || {};
+      state.opsCandidateBy[active.id] = Number(row.dataset.cand);
+      window.render();
+    });
+    const evidence = el('.ev-wrap');
+    if (evidence && evidence.scrollWidth > evidence.clientWidth) {
+      const symptom = evidence.querySelector('.ev-node.sym');
+      evidence.scrollLeft = symptom
+        ? Math.max(0, symptom.getBoundingClientRect().left - evidence.getBoundingClientRect().left + evidence.scrollLeft - 24)
+        : evidence.scrollWidth;
+    }
     const run = el('[data-rca]');
     if (run) run.onclick = () => analyze(run.dataset.rca);
   }

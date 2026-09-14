@@ -31,11 +31,21 @@ type Narrator interface {
 	Narrate(context.Context, *Result) (string, error)
 }
 
+// Factor is one step of a candidate's score, kept as data so the derivation
+// can be rendered as a table rather than read out of a sentence.
+type Factor struct {
+	Label      string  `json:"label"`
+	Detail     string  `json:"detail"`
+	Multiplier float64 `json:"multiplier"`
+	Base       bool    `json:"base,omitempty"`
+}
+
 type Candidate struct {
 	Event            event.Event `json:"event"`
 	Distance         int         `json:"distance"`
 	Score            float64     `json:"score"`
 	Reasons          []string    `json:"reasons"`
+	Factors          []Factor    `json:"factors"`
 	AffectedServices int         `json:"affected_services"`
 	AffectedNodes    int         `json:"affected_nodes"`
 	BlastRadiusScore float64     `json:"blast_radius_score"`
@@ -211,23 +221,34 @@ func evidenceEdges(edges []graph.Edge, reachable map[string]int, symptom string)
 	return result
 }
 
+// score multiplies a base weight for the event type by three dampening or
+// amplifying factors. Each step is recorded twice: Reasons keeps the sentence
+// form the heal audit trail stores, and Factors keeps the same step as data so
+// a caller can lay the derivation out as a table instead of parsing prose.
 func score(c *Candidate, symptom event.Event) {
 	s := typeWeight[c.Event.Type]
 	if s == 0 {
 		s = 0.20
 	}
 	c.Reasons = append(c.Reasons, fmt.Sprintf("event type %q (base %.2f)", c.Event.Type, s))
+	c.Factors = append(c.Factors, Factor{Label: "Event type", Detail: c.Event.Type, Multiplier: s, Base: true})
+
 	gap := symptom.IngestedAt.Sub(c.Event.IngestedAt).Seconds()
 	tf := math.Exp(-gap / 300.0)
 	s *= tf
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%.0fs before symptom (×%.2f)", gap, tf))
+	c.Factors = append(c.Factors, Factor{Label: "Time distance", Detail: fmt.Sprintf("%.0fs before the symptom", gap), Multiplier: tf})
+
 	df := 1.0 / (1.0 + float64(c.Distance)*0.4)
 	s *= df
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%d hops away (×%.2f)", c.Distance, df))
+	c.Factors = append(c.Factors, Factor{Label: "Graph distance", Detail: fmt.Sprintf("%d hop(s) upstream", c.Distance), Multiplier: df})
+
 	if c.AffectedServices > 0 {
 		impactFactor := 1 + math.Min(0.25, float64(c.AffectedServices)*0.05)
 		s *= impactFactor
 		c.Reasons = append(c.Reasons, fmt.Sprintf("%d affected service(s) (×%.2f)", c.AffectedServices, impactFactor))
+		c.Factors = append(c.Factors, Factor{Label: "Blast radius", Detail: fmt.Sprintf("%d service(s) affected", c.AffectedServices), Multiplier: impactFactor})
 	}
 	c.Score = math.Min(s, 1.0)
 }

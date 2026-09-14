@@ -71,6 +71,11 @@ spec:
               value: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
             - name: LOKI_URL
               value: http://loki.monitoring.svc.cluster.local:3100
+            # Scoped to the application namespace. The default, {namespace=~".+"},
+            # scrapes every namespace, and control-plane chatter then drowns out
+            # real application errors and gives RCA nothing useful to rank.
+            - name: LOKI_QUERY
+              value: '{namespace="default"}'
             - name: RCA_API_URL
               value: https://api.groq.com/openai/v1/chat/completions
             - name: RCA_MODEL
