@@ -1,0 +1,175 @@
+/* Incidents: a dense operator surface. Full-bleed, hairline rules instead of
+   cards, monospace for anything an operator would copy or grep for. */
+.content.bleed { max-width: none; padding: 0; }
+
+.ops { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: calc(100vh - 61px); font-size: 12px; }
+
+/* --- command bar ------------------------------------------------------- */
+.ops-bar { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--line2); background: var(--panel); }
+.ops-find { flex: 0 1 260px; min-width: 120px; background: var(--bg); border: 1px solid var(--line); color: var(--text); font: 11px var(--mono); padding: 4px 8px; }
+.ops-find:focus { outline: none; border-color: var(--blue); }
+.ops-find::placeholder { color: var(--dim); }
+.seg { display: flex; border: 1px solid var(--line); }
+.seg button { background: transparent; border: 0; border-right: 1px solid var(--line); color: var(--dim); font: 10px var(--mono); padding: 4px 9px; cursor: pointer; letter-spacing: .04em; }
+.seg button:last-child { border-right: 0; }
+.seg button:hover { color: var(--text); }
+.seg button[aria-pressed="true"] { background: var(--panel2); color: var(--text); }
+.seg button.crit[aria-pressed="true"] { color: var(--red); }
+.seg button.warn[aria-pressed="true"] { color: var(--amber); }
+
+/* The time axis this page was missing: signal volume across the window. */
+.hist { display: flex; align-items: flex-end; gap: 1px; height: 24px; flex: 1 1 auto; min-width: 60px; border-bottom: 1px solid var(--line); padding-bottom: 1px; }
+.hist i { flex: 1 1 0; min-width: 1px; min-height: 2px; background: var(--line2); }
+.hist i.w { background: #5d708a; }
+.hist i.c { background: var(--red); }
+.ops-span { font: 10px var(--mono); color: var(--dim); white-space: nowrap; letter-spacing: .04em; }
+
+/* --- two-pane body ----------------------------------------------------- */
+.ops-body { display: grid; grid-template-columns: minmax(290px, 360px) minmax(0, 1fr); min-height: 0; }
+.ops-list { border-right: 1px solid var(--line2); overflow: auto; min-height: 0; }
+.ops-detail { overflow: auto; min-height: 0; }
+
+/* --- signal rows ------------------------------------------------------- */
+.sig { position: relative; display: block; width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line2); padding: 7px 10px 7px 15px; color: inherit; font: inherit; cursor: pointer; }
+.sig::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--amber); }
+.sig.crit::before { background: var(--red); }
+.sig:hover { background: var(--panel2); }
+.sig.on { background: #16202b; }
+.sig.on::before { width: 3px; }
+.sig-top { display: flex; align-items: baseline; gap: 8px; }
+.sig-type { font: 11px var(--mono); color: var(--text); letter-spacing: .02em; }
+.sig-n { margin-left: auto; font: 10px var(--mono); color: var(--dim); border: 1px solid var(--line); padding: 0 4px; }
+.sig-msg { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
+.sig-meta { display: flex; gap: 9px; font: 10px var(--mono); color: var(--dim); margin-top: 4px; }
+.sig-meta b { font-weight: 400; color: var(--muted); }
+
+/* --- detail ------------------------------------------------------------ */
+.det-head { display: flex; align-items: flex-start; gap: 16px; padding: 13px 16px; border-bottom: 1px solid var(--line2); }
+.det-id { flex: 1 1 auto; min-width: 0; }
+.det-type { font: 13px var(--mono); color: var(--text); letter-spacing: .01em; }
+.det-target { font: 11px/1.5 var(--mono); color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.det-act { display: flex; gap: 6px; flex-shrink: 0; }
+
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 1px; background: var(--line2); border-bottom: 1px solid var(--line2); margin: 0; }
+.kv > div { background: var(--bg); padding: 6px 10px; min-width: 0; }
+.kv dt { font: 9.5px var(--sans); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.kv dd { margin: 3px 0 0; font: 11px var(--mono); color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+
+.sec { border-bottom: 1px solid var(--line2); }
+.sec-h { display: flex; align-items: center; gap: 8px; padding: 7px 16px; background: var(--panel); border-bottom: 1px solid var(--line2); }
+.sec-h b { font: 10px var(--sans); font-weight: 600; letter-spacing: .11em; text-transform: uppercase; color: var(--muted); }
+.sec-h span { margin-left: auto; font: 10px var(--mono); color: var(--dim); letter-spacing: .04em; }
+.sec-body { padding: 11px 16px; }
+
+/* The raw line stays raw — it is evidence, not a headline. */
+.raw { margin: 0; padding: 11px 16px; font: 11px/1.6 var(--mono); color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; background: var(--panel2); }
+
+.k { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(--line); color: var(--text); padding: 5px 10px; cursor: pointer; white-space: nowrap; }
+.k:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+.k:disabled { opacity: .5; cursor: default; }
+.k.pri { background: var(--blue); border-color: var(--blue); color: #08111c; font-weight: 600; }
+.k.pri:hover:not(:disabled) { color: #08111c; filter: brightness(1.08); }
+.k.no:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+
+/* --- root cause -------------------------------------------------------- */
+.conf { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
+.conf-n { font: 17px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.conf-t { flex: 1; height: 4px; background: var(--line); position: relative; }
+.conf-t i { position: absolute; inset: 0 auto 0 0; background: var(--blue); }
+.conf.low .conf-t i { background: var(--amber); }
+.conf-l { font: 10px var(--mono); color: var(--dim); letter-spacing: .04em; }
+
+.cand { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+.cand th { font: 9.5px var(--sans); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.cand td { padding: 6px 8px; border-bottom: 1px solid var(--line2); vertical-align: top; font-variant-numeric: tabular-nums; }
+.cand tr.top td { background: #141d27; }
+.cand .num { text-align: right; }
+.bar { display: inline-block; width: 54px; height: 3px; background: var(--line); position: relative; vertical-align: middle; margin-right: 6px; }
+.bar i { position: absolute; inset: 0 auto 0 0; background: var(--blue); }
+.why { list-style: none; margin: 5px 0 0; padding: 0; }
+.why li { font: 10px var(--mono); color: var(--dim); padding: 1px 0; }
+.why li::before { content: "· "; }
+.note { font: 11px/1.65 var(--sans); color: var(--muted); }
+.warnline { font: 11px var(--mono); color: var(--amber); }
+
+.occ { display: flex; flex-wrap: wrap; gap: 4px; }
+.occ span { font: 10px var(--mono); color: var(--dim); border: 1px solid var(--line2); padding: 2px 6px; }
+.occ span.crit { color: var(--red); border-color: #3a2630; }
+
+.none { font: 11px var(--mono); color: var(--dim); padding: 14px 16px; }
+
+/* --- status bar -------------------------------------------------------- */
+.ops-foot { display: flex; align-items: center; gap: 16px; height: 27px; padding: 0 12px; border-top: 1px solid var(--line2); background: var(--panel); font: 10px var(--mono); color: var(--dim); overflow: hidden; }
+.ops-foot span { white-space: nowrap; }
+.ops-foot kbd { font: 10px var(--mono); border: 1px solid var(--line); padding: 0 4px; color: var(--muted); margin-right: 3px; }
+
+@media (max-width: 900px) {
+  .ops { height: auto; }
+  .ops-body { grid-template-columns: 1fr; }
+  .ops-list { border-right: 0; border-bottom: 1px solid var(--line2); max-height: 300px; }
+  .hist, .ops-span { display: none; }
+}
+
+/* ======================================================================
+   Shared operator primitives. Every page is full-bleed and built from
+   rules, not cards: a status strip, dense tables, dense rows.
+   ====================================================================== */
+
+/* Compact page header. graph.js and replay.js render through this too. */
+.ph { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--line2); background: var(--panel); }
+.ph h1 { margin: 0; font: 12px var(--mono); font-weight: 500; color: var(--text); letter-spacing: .02em; white-space: nowrap; }
+.ph p { margin: 0; font: 10px var(--mono); color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ph .act { margin-left: auto; display: flex; gap: 6px; flex-shrink: 0; }
+
+/* Inline status strip — the replacement for the KPI card row. */
+.strip { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line2); background: var(--panel); }
+.strip > div { padding: 8px 14px; border-right: 1px solid var(--line2); min-width: 0; }
+.strip dt { font: 9.5px var(--sans); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.strip dd { margin: 3px 0 0; font: 15px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.strip dd small { font: 10px var(--mono); color: var(--dim); margin-left: 4px; }
+.strip dd.ok { color: var(--green); }
+.strip dd.warn { color: var(--amber); }
+.strip dd.crit { color: var(--red); }
+
+/* Side-by-side panes that both scroll independently. */
+.duo { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; }
+.duo > section { border-right: 1px solid var(--line2); min-width: 0; overflow: auto; }
+.duo > section:last-child { border-right: 0; }
+
+/* Dense table. */
+.dt { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+.dt th { position: sticky; top: 0; z-index: 1; background: var(--panel); font: 9.5px var(--sans); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.dt td { padding: 5px 10px; border-bottom: 1px solid var(--line2); vertical-align: top; font-variant-numeric: tabular-nums; }
+.dt tbody tr { cursor: pointer; }
+.dt tbody tr:hover { background: var(--panel2); }
+.dt .t { color: var(--muted); max-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt .sev-critical { color: var(--red); }
+.dt .sev-warning { color: var(--amber); }
+.dt .sev-info { color: var(--dim); }
+.dt .num { text-align: right; }
+.dt .dim { color: var(--dim); }
+
+/* Dense list row, for streams that need two lines rather than columns. */
+.lr { display: block; width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line2); padding: 6px 12px; color: inherit; font: inherit; cursor: pointer; }
+.lr:hover { background: var(--panel2); }
+.lr-top { display: flex; gap: 8px; align-items: baseline; }
+.lr-t { font: 11px var(--mono); color: var(--text); }
+.lr-m { margin-left: auto; font: 10px var(--mono); color: var(--dim); white-space: nowrap; }
+.lr-s { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
+.lr-b { display: inline-block; font: 10px var(--mono); color: var(--dim); border: 1px solid var(--line); padding: 0 4px; }
+
+.scroll { overflow: auto; min-height: 0; }
+.pad { padding: 11px 16px; }
+.more { display: block; width: 100%; background: var(--panel); border: 0; border-top: 1px solid var(--line2); color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; padding: 8px; cursor: pointer; }
+.more:hover { color: var(--blue); }
+.mode { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--line2); font: 10px var(--mono); color: var(--amber); background: #1a1408; }
+.mode.live { color: var(--red); background: #1c0f10; }
+
+@media (max-width: 900px) {
+  .duo { grid-template-columns: 1fr; }
+  .duo > section { border-right: 0; border-bottom: 1px solid var(--line2); }
+}
+
+/* Specification tables: the note column absorbs slack, the label and value
+   columns stay on one line so short values do not wrap to three rows. */
+.dt.spec td:nth-child(1), .dt.spec td:nth-child(2) { white-space: nowrap; }

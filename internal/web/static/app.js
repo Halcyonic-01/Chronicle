@@ -1,17 +1,38 @@
-const state = { page: location.hash.slice(1) || 'overview', events: [], totalEvents: 0, eventError: '', loading: true, postureLoading: true, postureError: '', posture: {resources: [], summary: {total: 0, healthy: 0, warning: 0, critical: 0}}, filterSeverity: '', selectedEvent: null, selectedIncident: null, replayAt: new Date().toISOString(), replayPosition: 60, replayLive: false, graph: {nodes: [], edges: []}, actions: [] };
+/* Chronicle operations console.
+   Shell, shared helpers, data loading, and the views that are not owned by a
+   dedicated file. incidents.js, replay.js and graph.js replace their own view
+   after this file loads; everything here is resolved by name at render time so
+   those overrides always win. */
+
+// Old links used the phase-era page names.
+const pageAliases = {overview: 'now', timeline: 'events', services: 'events', rca: 'incidents'};
+const hashPage = () => { const raw = location.hash.slice(1); return pageAliases[raw] || raw || 'now'; };
+
+const state = {
+  page: hashPage(),
+  events: [], totalEvents: 0, eventError: '', loading: true,
+  postureLoading: true, postureError: '', posture: {resources: [], summary: {total: 0, healthy: 0, warning: 0, critical: 0}},
+  filterSeverity: '', filterSource: '', filterQuery: '', selectedEvent: null, selectedIncident: null,
+  replayAt: new Date().toISOString(), replayPosition: 60, replayLive: false,
+  graph: {nodes: [], edges: []}, actions: []
+};
 window.chronicleState = state;
+
+// Seven destinations, down from ten: root cause is a step inside an incident,
+// and timeline/services were the event table wearing different hats.
 const navItems = [
-  ['overview','Overview','⌂'],['timeline','Timeline','≡'],['replay','Replay','◷'],['graph','Dependency Graph','◇'],
-  ['incidents','Incidents','!'],['rca','Root Cause','⌁'],['healing','Self-Healing','↺'],['events','Events','≡'],
-  ['services','Services','□'],['settings','Settings','⚙']
+  ['now', 'Now', '◉'], ['incidents', 'Incidents', '!'], ['events', 'Events', '≡'],
+  ['graph', 'Graph', '◇'], ['replay', 'Replay', '◷'], ['healing', 'Healing', '↺'],
+  ['settings', 'Settings', '⚙']
 ];
 
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtTime = (v, withDate=false) => { const d = new Date(v); if (Number.isNaN(d.getTime())) return '—'; return d.toLocaleString([], withDate ? {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'} : {hour:'2-digit',minute:'2-digit',second:'2-digit'}); };
-const ago = (v) => { const seconds = Math.max(0, (Date.now()-new Date(v).getTime())/1000); if(seconds<60)return `${Math.round(seconds)}s ago`; if(seconds<3600)return `${Math.round(seconds/60)}m ago`; return `${Math.round(seconds/3600)}h ago`; };
+const ago = (v) => { const s = Math.max(0, (Date.now()-new Date(v).getTime())/1000); if(s<60)return `${Math.round(s)}s`; if(s<3600)return `${Math.round(s/60)}m`; if(s<86400)return `${Math.round(s/3600)}h`; return `${Math.round(s/86400)}d`; };
 const severity = (v='info') => `<span class="severity ${esc(v)}">${esc(v)}</span>`;
-const empty = (title, copy) => `<div class="empty"><strong>${esc(title)}</strong><p>${esc(copy)}</p></div>`;
+const empty = (title, copy) => `<div class="none">${esc(title)}${copy ? ' — ' + esc(copy) : ''}</div>`;
+const targetOf = (e) => `${e.namespace || 'cluster'}/${e.entity_name || '—'}`;
 
 // Every API call goes through api() so an optional CHRONICLE_API_TOKEN can be
 // supplied once and reused. The token is held only for the browser session.
@@ -29,91 +50,310 @@ window.chronicleAPI = api;
 
 function renderNav(){ $('#nav').innerHTML = navItems.map(([id,label,icon]) => `<div class="nav-item ${state.page===id?'active':''}" data-page="${id}"><span class="nav-icon">${icon}</span><span>${label}</span></div>`).join(''); document.querySelectorAll('.nav-item').forEach(el=>el.onclick=()=>navigate(el.dataset.page)); }
 function navigate(page){ state.page=page; location.hash=page; render(); }
-function pageHeading(kicker,title,subtitle,action=''){ const cleanKicker=kicker.replace(/^PHASE\s+\d+\s*\/\s*/i,''); return `<div class="page-heading"><div><div class="eyebrow">${cleanKicker}</div><h1 class="page-title">${title}</h1><p class="page-subtitle">${subtitle}</p></div>${action}</div>`; }
-function metric(label,value,note){ return `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${value}</div><div class="metric-note">${note}</div></div>`; }
-function eventsForView(limit=8){ return state.events.slice(0,limit); }
-function eventRows(items){ if(!items.length)return empty('No infrastructure events', 'Chronicle has not received events in the selected window.'); return items.map(e=>`<div class="event-row" data-event="${esc(e.id)}" role="button" tabindex="0" title="Inspect event"><div class="event-time"><strong>${ago(e.ingested_at)}</strong><span>${fmtTime(e.ingested_at)}</span></div><div class="event-main"><div class="event-title-line"><span class="event-source-badge source-${esc((e.source||'system').toLowerCase())}">${esc(e.source||'system')}</span><p>${esc(e.title||e.type)}</p></div><div class="event-meta"><span class="event-kind">${esc(e.type||'event')}</span><span class="entity-path">${esc(e.namespace||'—')}/${esc(e.entity_kind||'resource')}/${esc(e.entity_name||'—')}</span>${severity(e.severity)}</div></div></div>`).join(''); }
-function eventTable(items){ if(!items.length)return empty('No matching events', 'Try widening the time window or changing the filters.'); return `<table class="table"><thead><tr><th>Time</th><th>Source</th><th>Event</th><th>Entity</th><th>Severity</th></tr></thead><tbody>${items.map(e=>`<tr data-event="${esc(e.id)}"><td class="mono">${fmtTime(e.ingested_at,true)}</td><td>${esc(e.source)}</td><td class="event-title">${esc(e.title||e.type)}</td><td class="mono">${esc(e.namespace)}/${esc(e.entity_name)}</td><td>${severity(e.severity)}</td></tr>`).join('')}</tbody></table>`; }
-function uniqueEntities(items){ return new Set(items.map(e=>`${e.namespace||'—'}/${e.entity_kind||'resource'}/${e.entity_name||'—'}`)); }
-function healthMetrics(){ const liveServices=new Set((state.graph.nodes||[]).filter(n=>n.Kind==='Service').map(n=>`${n.Namespace}/${n.Name}`)); const services=liveServices.size||new Set(state.events.filter(e=>e.entity_kind==='Service').map(e=>`${e.namespace}/${e.entity_name}`)).size; const active=uniqueEntities(state.events.filter(e=>e.severity==='warning'||e.severity==='critical')).size; const pending=(state.actions||[]).filter(a=>a.approval==='pending').length; return [metric('Services observed',services,liveServices.size?'Live graph inventory':'Event-derived inventory'),metric('Events received',state.totalEvents,'Last 24 hours'),metric('Recent signals',active,'Warning/critical resources · 24h'),metric('Pending remediation',pending,pending?'Awaiting review':'No pending actions')].join(''); }
 
-function posture(){ if(state.postureLoading)return empty('Loading live posture','Reading current Kubernetes readiness and deployment status…'); if(state.postureError)return empty('Live posture unavailable',state.postureError); const p=state.posture||{resources:[],summary:{total:0,healthy:0,warning:0,critical:0}}; const unhealthy=(p.resources||[]).filter(r=>r.status!=='healthy').slice(0,6); if(!p.summary.total)return empty('No live resources found','The Kubernetes API returned no pods or deployments.'); return `<div class="posture-summary"><strong>${p.summary.healthy}/${p.summary.total} resources healthy</strong><span>Live Kubernetes status · pods and deployments</span></div>${unhealthy.length?`<div class="posture-list">${unhealthy.map(r=>`<div class="posture-item"><span class="posture-icon ${esc(r.status)}"></span><div><strong>${esc(r.name)}</strong><small>${esc(r.namespace||'cluster')}/${esc(r.kind)} · ${esc(r.message||'Status unavailable')}${r.restarts?` · ${r.restarts} restart${r.restarts===1?'':'s'}`:''}</small></div><span class="live-status ${esc(r.status)}">${esc(r.status)}</span></div>`).join('')}</div>${p.summary.warning+p.summary.critical>unhealthy.length?`<button class="button posture-more" onclick="navigate('services')">View all ${p.summary.warning+p.summary.critical} unhealthy resources</button>`:''}`:`<div class="posture-healthy"><span class="posture-check">✓</span><div><strong>All tracked resources are healthy</strong><span>No pods or deployments are currently reporting readiness problems.</span></div></div>`}`; }
+// Compact header. graph.js and replay.js render through this, so keeping the
+// signature means they inherit the denser chrome without changes.
+function pageHeading(kicker,title,subtitle,action=''){
+  return `<div class="ph"><h1>${esc(title)}</h1><p>${esc(subtitle||'')}</p>${action?`<div class="act">${action}</div>`:''}</div>`;
+}
 
-function overview(){ const items=eventsForView(7); return pageHeading('OPERATIONS / OVERVIEW','Infrastructure at a glance','A live view of what Chronicle knows about your environment.')+`<div class="grid metric-grid">${healthMetrics()}</div><div class="grid split"><section class="panel"><div class="panel-head"><span class="panel-title">Recent infrastructure events</span><span class="panel-meta">${state.loading?'LOADING':`${state.totalEvents||state.events.length} EVENTS · LAST 24H`}</span></div><div class="event-list">${state.loading?empty('Loading event stream','Connecting to Chronicle collectors…'):eventRows(items)}</div></section><section class="panel"><div class="panel-head"><span class="panel-title">Current posture</span><span class="panel-meta">LIVE KUBERNETES</span></div><div class="object-card">${state.eventError?`<div class="banner"><span class="icon">!</span><div><strong>Collector data unavailable</strong><p>${esc(state.eventError)}</p></div></div>`:posture()}</div></section></div>`; }
+/* ---------------------------------------------------------------- shared */
 
-function severityMenu(){ const label=state.filterSeverity?state.filterSeverity.toUpperCase():'ALL SEVERITIES'; return `<details class="filter-menu" id="severity-filter-menu"><summary>${label}<span>⌄</span></summary><div class="filter-menu-options"><button type="button" data-severity-filter="">All severities</button><button type="button" data-severity-filter="info">Info</button><button type="button" data-severity-filter="warning">Warning</button><button type="button" data-severity-filter="critical">Critical</button></div></details>`; }
-function eventPager(){ return state.totalEvents>state.events.length?`<div class="event-pager" id="event-pager"><span>Showing ${state.events.length} of ${state.totalEvents} events</span><button class="button" id="load-more-events">Load older events</button></div>`:`<div class="event-pager"><span>Showing all ${state.totalEvents||state.events.length} events</span></div>`; }
-function timeline(){ return pageHeading('OPERATIONS / TIMELINE','Infrastructure timeline','Follow changes in chronological order and inspect the evidence behind an incident.')+`<div class="panel"><div class="panel-head"><span class="panel-title">Event stream</span><span class="panel-meta">${state.totalEvents||state.events.length} EVENTS · LAST 24H</span></div><div class="filters"><input class="input" id="event-search" placeholder="Filter service or event…"><div class="filter-hint">Filtering loaded events</div>${severityMenu()}</div><div class="event-list" id="timeline-list">${eventRows(state.events)}</div>${eventPager()}</div>`; }
-function incidentGroupKey(e){ const title=String(e.title||e.type||'').replace(/\b[WEI]\d{4}\s+\d{2}:\d{2}:\d{2}\.\d+\b/g,'').replace(/#\d+/g,'#n').replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g,'<ip>').replace(/\s+/g,' ').trim(); return [e.namespace,e.entity_kind,e.entity_name,e.type,title].join('|'); }
-function incidentGroups(items){ const groups=new Map(); items.forEach(e=>{ const key=incidentGroupKey(e); const group=groups.get(key); if(group)group.events.push(e); else groups.set(key,{event:e,events:[e]}); }); return [...groups.values()]; }
-function incidents(){ const groups=incidentGroups(state.events.filter(e=>e.severity==='warning'||e.severity==='critical')); const selected=groups.find(g=>g.events.some(e=>e.id===state.selectedIncident))||groups[0]; if(selected)state.selectedIncident=selected.event.id; return pageHeading('OPERATIONS / INCIDENTS','Incidents','Review grouped signals, investigate the selected incident, and run RCA when needed.')+`<div class="incident-layout"><section class="panel incident-list"><div class="incident-list-head"><span class="panel-title">Open signals</span><span class="panel-meta">${groups.length} GROUPS · ${groups.reduce((n,g)=>n+g.events.length,0)} SIGNALS</span></div>${groups.length?groups.map((g,i)=>{const e=g.event;return `<button class="incident-item ${selected&&selected.event.id===e.id?'selected':''}" data-incident="${esc(e.id)}"><h3>${esc(e.title||e.type)}</h3><p>${esc(e.namespace||'cluster')}/${esc(e.entity_name||'resource')} · ${ago(e.ingested_at)}</p><div class="incident-item-meta">${severity(e.severity)}${g.events.length>1?`<span class="incident-count">${g.events.length} signals</span>`:''}</div></button>`;}).join(''):empty('No active incidents','Chronicle is monitoring your infrastructure. New incidents will appear here when detected.')}</section><section class="panel detail">${selected?incidentDetail(selected.event,selected.events.length):empty('Incident detail unavailable','Select an incident when Chronicle receives a warning or critical event.')}</section></div>`; }
-function incidentDetail(e,count=1){ return `<div class="detail-head"><div class="detail-head-copy"><div class="eyebrow">${esc(e.type)} · ${esc(e.namespace||'cluster')}</div><h2>${esc(e.title||e.type)}</h2><div class="detail-status"><span class="status active">Active</span><span class="panel-meta">Detected ${fmtTime(e.ingested_at,true)}</span>${count>1?`<span class="incident-count">${count} grouped signals</span>`:''}</div></div><button class="button button-primary" data-analyze="${esc(e.id)}">Run RCA</button></div><div class="detail-section"><h3>Root cause analysis</h3><div class="empty" id="rca-result" style="padding:15px 0;text-align:left"><strong>Not analyzed yet</strong><p>Run RCA to rank graph-reachable candidates and show the supporting evidence.</p></div></div><div class="detail-section"><h3>Evidence timeline</h3><div class="event-list incident-evidence">${eventRows(state.events.filter(x=>x.entity_name===e.entity_name).slice(0,8))}</div></div>`; }
-function rca(){ return pageHeading('PHASE 4 / ROOT CAUSE','Explainable root cause analysis','Ranked candidates grounded in time, dependency distance and observed evidence.')+`<section class="panel"><div class="panel-head"><span class="panel-title">Select a symptom event to analyze</span><span class="panel-meta">POST /api/analyze</span></div><div class="table-wrap">${eventTable(state.events.filter(e=>e.severity!=='info').slice(0,20))}</div></section><section class="panel" style="margin-top:14px"><div class="panel-head"><span class="panel-title">How confidence is formed</span><span class="panel-meta">TRANSPARENT SCORING</span></div><div class="object-card"><div class="kv"><span>Event type</span><span>Base causal weight</span><span>Time distance</span><span>Closer events score higher</span><span>Graph distance</span><span>Each upstream hop reduces score</span><span>RCA confidence</span><span>Highest retained candidate</span></div></div></section>`; }
-function events(){ return pageHeading('PHASE 1 / EVENT COLLECTION','Event explorer','Inspect the normalized events Chronicle receives from infrastructure sources.')+`<div class="filters"><input class="input" id="event-search" placeholder="Filter service or event…"><select class="select" id="source-filter"><option value="">All sources</option><option>k8s</option><option>github</option><option>prometheus</option><option>loki</option></select>${severityMenu()}</div><section class="panel"><div class="panel-head"><span class="panel-title">Normalized event stream</span><span class="panel-meta">${state.events.length} OF ${state.totalEvents||state.events.length} LOADED</span></div><div class="table-wrap" id="events-table">${eventTable(state.events)}</div>${eventPager()}</section>`; }
-function services(){ const groups=[...new Map(state.events.map(e=>[`${e.namespace}/${e.entity_name}`,e])).values()]; return pageHeading('INVENTORY / SERVICES','Services','A service-oriented view of entities represented in the event store.')+`<section class="panel"><div class="panel-head"><span class="panel-title">Observed services</span><span class="panel-meta">${groups.length} SERVICES</span></div>${groups.length?eventTable(groups):empty('No services observed','Services will appear after collectors send infrastructure events.')}</section>`; }
-function settings(){ return pageHeading('SYSTEM / SETTINGS','Settings','Review Chronicle configuration and safety boundaries.')+`<section class="panel settings-list"><div class="setting"><div><h3>Environment</h3><p>Deployment target used by this console.</p></div><code>local / kind</code></div><div class="setting"><div><h3>Collectors</h3><p>Kubernetes · GitHub · Prometheus · Loki</p></div><span class="status healthy">CONFIGURED</span></div><div class="setting"><div><h3>Global healing mode</h3><p>Actions are planned and audited, never executed automatically.</p></div><code>DRY RUN</code></div><div class="setting"><div><h3>Automatic healing</h3><p>Live executor, approvals and post-action verification are not enabled.</p></div><span class="status pending">DISABLED</span></div><div class="setting"><div><h3>Refresh interval</h3><p>Event data is refreshed when navigating or pressing refresh.</p></div><code>MANUAL</code></div></section>`; }
+function histogram(events){
+  const buckets = 40;
+  if(!events.length) return `<div class="hist">${'<i></i>'.repeat(buckets)}</div>`;
+  const times = events.map(e=>new Date(e.ingested_at).getTime());
+  const start = Math.min(...times), end = Math.max(Math.max(...times), Math.min(...times)+1);
+  const counts = new Array(buckets).fill(0), crit = new Array(buckets).fill(0);
+  events.forEach(e=>{ const slot = Math.min(buckets-1, Math.floor(((new Date(e.ingested_at).getTime()-start)/(end-start))*buckets)); counts[slot]++; if(e.severity==='critical')crit[slot]++; });
+  const peak = Math.max(...counts,1);
+  return `<div class="hist" role="img" aria-label="Event volume">${counts.map((n,i)=>`<i class="${n?(crit[i]?'c':'w'):''}" style="height:${n?Math.max(8,Math.round(n/peak*100)):0}%" title="${n} event(s)"></i>`).join('')}</div>`;
+}
+
+function severitySegments(){
+  const current = state.filterSeverity;
+  const button = (v,l,c) => `<button type="button" class="${c}" data-severity-filter="${v}" aria-pressed="${current===v}">${l}</button>`;
+  return `<div class="seg">${button('','ALL','')}${button('critical','CRIT','crit')}${button('warning','WARN','warn')}${button('info','INFO','')}</div>`;
+}
+
+function filteredEvents(){
+  const q = (state.filterQuery||'').toLowerCase();
+  return (state.events||[]).filter(e =>
+    (!state.filterSeverity || e.severity === state.filterSeverity) &&
+    (!state.filterSource || e.source === state.filterSource) &&
+    (!q || `${e.title} ${e.type} ${targetOf(e)} ${e.source}`.toLowerCase().includes(q)));
+}
+
+function eventTable(items){
+  if(!items.length) return empty('No matching events','widen the window or clear the filters');
+  return `<table class="dt"><thead><tr><th>Time</th><th>Age</th><th>Source</th><th>Type</th><th>Target</th><th>Sev</th><th>Title</th></tr></thead><tbody>${items.map(e=>`
+    <tr data-event="${esc(e.id)}">
+      <td class="dim">${fmtTime(e.ingested_at)}</td>
+      <td class="dim num">${ago(e.ingested_at)}</td>
+      <td>${esc(e.source)}</td>
+      <td>${esc(e.type)}</td>
+      <td class="dim">${esc(targetOf(e))}</td>
+      <td class="sev-${esc(e.severity)}">${esc((e.severity||'info').slice(0,4))}</td>
+      <td class="t">${esc(e.title||e.type)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+function eventRows(items){
+  if(!items.length) return empty('No events in the loaded window');
+  return items.map(e=>`<button type="button" class="lr" data-event="${esc(e.id)}">
+    <span class="lr-top"><span class="lr-t">${esc(e.type)}</span><span class="lr-b">${esc(e.source)}</span><span class="lr-m">${ago(e.ingested_at)} ago</span></span>
+    <div class="lr-s">${esc(e.title||e.type)}</div>
+    <div class="lr-s" style="color:var(--dim)">${esc(targetOf(e))}</div>
+  </button>`).join('');
+}
+
+/* ------------------------------------------------------------------ now */
+
+function now(){
+  const s = state.posture.summary || {total:0,healthy:0,warning:0,critical:0};
+  const signals = (state.events||[]).filter(e=>e.severity==='warning'||e.severity==='critical');
+  const unhealthy = (state.posture.resources||[]).filter(r=>r.status!=='healthy');
+  const pending = (state.actions||[]).filter(a=>a.approval==='pending');
+  const cell = (label,value,cls,note) => `<div><dt>${label}</dt><dd class="${cls||''}">${value}${note?`<small>${note}</small>`:''}</dd></div>`;
+  return `<div class="ops">
+    <div class="strip">
+      ${cell('Resources', state.postureLoading ? '—' : `${s.healthy}/${s.total}`, s.critical?'crit':(s.warning?'warn':'ok'), 'ready')}
+      ${cell('Degraded', state.postureLoading ? '—' : (s.warning+s.critical), (s.warning+s.critical)?'warn':'ok')}
+      ${cell('Signals', signals.length, signals.some(e=>e.severity==='critical')?'crit':(signals.length?'warn':'ok'), '24h')}
+      ${cell('Events', state.totalEvents||state.events.length, '', '24h')}
+      ${cell('Graph', `${(state.graph.nodes||[]).length}`, '', `nodes · ${(state.graph.edges||[]).length} edges`)}
+      ${cell('Approvals', pending.length, pending.length?'warn':'ok', 'pending')}
+    </div>
+    <div class="duo">
+      <section>
+        <div class="sec-h"><b>Needs attention</b><span>${unhealthy.length} OF ${s.total} RESOURCES</span></div>
+        ${state.postureLoading ? empty('Reading live Kubernetes state')
+          : state.postureError ? empty('Live posture unavailable', state.postureError)
+          : unhealthy.length ? `<table class="dt"><thead><tr><th>Kind</th><th>Resource</th><th>Ready</th><th class="num">Restarts</th><th>Detail</th></tr></thead><tbody>${unhealthy.map(r=>`
+              <tr style="cursor:default"><td>${esc(r.kind)}</td><td>${esc(r.namespace)}/${esc(r.name)}</td>
+              <td class="sev-${r.status==='critical'?'critical':'warning'}">${r.ready}/${r.desired}</td>
+              <td class="num ${r.restarts?'sev-warning':'dim'}">${r.restarts||0}</td>
+              <td class="t dim">${esc(r.message||'')}</td></tr>`).join('')}</tbody></table>`
+          : empty(`All ${s.total} resources ready`, 'no pod or deployment is reporting a readiness problem')}
+      </section>
+      <section>
+        <div class="sec-h"><b>Active signals</b><span>WARNING AND CRITICAL</span></div>
+        ${signals.length ? eventRows(signals.slice(0,40)) : empty('No warning or critical signals')}
+      </section>
+    </div>
+    <div class="ops-foot">
+      <span>${esc(state.eventError || 'collectors online')}</span>
+      <span style="margin-left:auto">${state.totalEvents||state.events.length} events loaded · last 24h</span>
+    </div>
+  </div>`;
+}
+
+/* --------------------------------------------------------------- events */
+
+function events(){
+  const items = filteredEvents();
+  const sources = [...new Set((state.events||[]).map(e=>e.source))].sort();
+  return `<div class="ops">
+    <div class="ops-bar">
+      <input class="ops-find" id="event-search" placeholder="filter  /" value="${esc(state.filterQuery||'')}" autocomplete="off" spellcheck="false">
+      ${severitySegments()}
+      <select id="source-filter" style="font:10px var(--mono);background:var(--bg);border:1px solid var(--line);color:var(--text);padding:4px 6px">
+        <option value="">all sources</option>
+        ${sources.map(s=>`<option value="${esc(s)}" ${state.filterSource===s?'selected':''}>${esc(s)}</option>`).join('')}
+      </select>
+      ${histogram(items)}
+      <span class="ops-span">${items.length} SHOWN · ${state.totalEvents||state.events.length} LOADED</span>
+    </div>
+    <div class="scroll" id="events-table">${eventTable(items)}</div>
+    <div class="ops-foot">
+      ${state.totalEvents > state.events.length ? `<button id="load-more-events" style="background:none;border:0;color:var(--muted);font:10px var(--mono);cursor:pointer;padding:0">load ${Math.min(100, state.totalEvents-state.events.length)} older →</button>` : '<span>all loaded events shown</span>'}
+      <span style="margin-left:auto">click a row to inspect the raw record</span>
+    </div>
+  </div>`;
+}
+
+/* -------------------------------------------------------------- healing */
+
+function healing(){
+  const actions = state.actions||[];
+  const pending = actions.filter(a=>a.approval==='pending');
+  const rules = [
+    ['restart-deadlocked-pod','became_unready','restart_pod','0.80','3/h','approval required'],
+    ['bump-memory-on-oom','oom_kill','bump_memory','0.85','2/h','automatic when live'],
+    ['rollback-bad-deploy','deploy','rollback_deployment','0.90','1/h','approval required']
+  ];
+  return `<div class="ops">
+    <div class="mode"><span>●</span><span>DRY RUN · execution disabled · every decision is recorded before anything runs</span></div>
+    <div class="strip">
+      <div><dt>Queued</dt><dd>${actions.length}</dd></div>
+      <div><dt>Pending approval</dt><dd class="${pending.length?'warn':'ok'}">${pending.length}</dd></div>
+      <div><dt>Executed</dt><dd>${actions.filter(a=>a.status==='succeeded').length}</dd></div>
+      <div><dt>Blocked</dt><dd>${actions.filter(a=>a.status==='blocked').length}</dd></div>
+    </div>
+    <div class="scroll">
+      <div class="sec-h"><b>Remediation queue</b><span>AUDIT STORE</span></div>
+      ${actions.length ? `<table class="dt"><thead><tr><th>Created</th><th>Rule</th><th>Action</th><th>Target</th><th class="num">Conf</th><th>Status</th><th>Approval</th><th>Review</th></tr></thead><tbody>${actions.map(a=>`
+        <tr style="cursor:default">
+          <td class="dim">${fmtTime(a.created_at,true)}</td>
+          <td>${esc(a.rule||'—')}</td>
+          <td>${esc(a.action_type||'—')}</td>
+          <td class="dim">${a.target?`${esc(a.namespace||'default')}/${esc(a.target)}`:'—'}</td>
+          <td class="num">${(a.confidence||0).toFixed(2)}</td>
+          <td class="${a.status==='blocked'||a.status==='failed'?'sev-warning':''}">${esc(a.status)}</td>
+          <td class="dim">${esc(a.approval)}</td>
+          <td>${a.approval==='pending'
+            ? `<button class="k pri" data-approve="${esc(a.id)}">approve</button> <button class="k no" data-deny="${esc(a.id)}">deny</button>`
+            : `<span class="dim">${esc(a.result||'')}</span>`}</td>
+        </tr>`).join('')}</tbody></table>`
+        : empty('No remediation actions recorded','run RCA on a signal; a matched rule appears here as an audited decision')}
+      <div class="sec-h" style="border-top:1px solid var(--line2)"><b>Rules</b><span>CONFIDENCE FLOOR · RATE LIMIT</span></div>
+      <table class="dt"><thead><tr><th>Rule</th><th>Trigger</th><th>Action</th><th class="num">Min conf</th><th>Limit</th><th>Mode</th></tr></thead><tbody>
+        ${rules.map(([n,t,a,c,l,m])=>`<tr style="cursor:default"><td>${n}</td><td class="dim">${t}</td><td>${a}</td><td class="num">${c}</td><td class="dim">${l}</td><td class="sev-warning">${m}</td></tr>`).join('')}
+      </tbody></table>
+    </div>
+    <div class="ops-foot"><span>live execution also requires: live mode on · kill switch off · 30-day observation elapsed · namespace, action and target allowlisted</span></div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------- settings */
+
+function settings(){
+  const row = (k,v,note) => `<tr style="cursor:default"><td>${esc(k)}</td><td>${esc(v)}</td><td class="t dim">${esc(note||'')}</td></tr>`;
+  return `<div class="ops">
+    <div class="scroll">
+      <div class="sec-h"><b>Collection</b><span>READ-ONLY</span></div>
+      <table class="dt spec"><thead><tr><th>Setting</th><th>Value</th><th>Note</th></tr></thead><tbody>
+        ${row('Environment','local / kind','cluster this console is served from')}
+        ${row('Collectors','k8s · github · prometheus · loki','argocd and terraform activate when their URL is set')}
+        ${row('Event bus','kafka → postgres','offsets commit only after a batch is persisted')}
+        ${row('Recent cache','redis','serves the default event view; postgres is the fallback')}
+        ${row('Snapshots','every 5 min','retained: all 7d · hourly 30d · daily 1y')}
+        ${row('Graph sync','every 30 s','diffed against open edges; only real changes are versioned')}
+      </tbody></table>
+      <div class="sec-h" style="border-top:1px solid var(--line2)"><b>Safety</b><span>DEFAULT DENY</span></div>
+      <table class="dt spec"><thead><tr><th>Gate</th><th>Value</th><th>Note</th></tr></thead><tbody>
+        ${row('Healing mode','dry run','plans and audits actions, never executes')}
+        ${row('Kill switch','enabled','blocks execution regardless of every other gate')}
+        ${row('Observation period','30 days','must elapse before any live action')}
+        ${row('Approval','token required','sent as X-Chronicle-Heal-Token')}
+        ${row('API auth','set CHRONICLE_API_TOKEN','unset means anything reaching the Service can read')}
+        ${row('Secrets','not readable','Chronicle has no cluster-wide Secret access')}
+      </tbody></table>
+    </div>
+    <div class="ops-foot"><span>configuration is supplied by environment; this view reports it, it does not change it</span></div>
+  </div>`;
+}
+
+/* ------------------------------------------------------- event inspector */
 
 function payloadText(e){ try { const value=typeof e.payload==='string'?JSON.parse(e.payload):e.payload; if(value==null||value===''||(typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===0))return 'No structured payload was recorded for this event.'; return JSON.stringify(value,null,2); } catch (_) { return String(e.payload||''); } }
-function eventInspector(){ const e=state.events.find(x=>x.id===state.selectedEvent); if(!e)return ''; return `<div class="event-inspector-backdrop" id="event-inspector" role="presentation"><section class="event-inspector" role="dialog" aria-modal="true" aria-labelledby="event-inspector-title"><div class="event-inspector-head"><div><div class="eyebrow">EVENT INSPECTOR · ${esc(e.source||'system')}</div><h2 id="event-inspector-title">${esc(e.title||e.type)}</h2><div class="event-inspector-sub">${severity(e.severity)} <span>${esc(e.namespace||'—')}/${esc(e.entity_kind||'resource')}/${esc(e.entity_name||'—')}</span></div></div><button class="icon-button" id="close-event" aria-label="Close event inspector">×</button></div><div class="event-inspector-grid"><div><span>Event type</span><strong>${esc(e.type||'event')}</strong></div><div><span>Source</span><strong>${esc(e.source||'system')}</strong></div><div><span>Occurred</span><strong>${fmtTime(e.occurred_at,true)}</strong></div><div><span>Ingested</span><strong>${fmtTime(e.ingested_at,true)}</strong></div></div><div class="event-inspector-section"><h3>Event payload</h3><pre>${esc(payloadText(e))}</pre></div><div class="event-inspector-links">${e.trace_id?`<span>Trace <code>${esc(e.trace_id)}</code></span>`:''}${e.correlation_key?`<span>Correlation <code>${esc(e.correlation_key)}</code></span>`:''}</div></section></div>`; }
+
+function eventInspector(){
+  const e=state.events.find(x=>x.id===state.selectedEvent);
+  if(!e)return '';
+  return `<div class="event-inspector-backdrop" id="event-inspector" role="presentation"><section class="event-inspector" role="dialog" aria-modal="true" aria-labelledby="event-inspector-title">
+    <div class="det-head"><div class="det-id"><div class="det-type" id="event-inspector-title">${esc(e.type)}</div><div class="det-target">${esc(targetOf(e))} · ${esc(e.entity_kind||'Resource')} · ${esc(e.source)}</div></div>
+    <div class="det-act"><button class="k" id="close-event">close</button></div></div>
+    <dl class="kv">
+      <div><dt>Severity</dt><dd>${esc(e.severity)}</dd></div>
+      <div><dt>Ingested</dt><dd>${fmtTime(e.ingested_at,true)}</dd></div>
+      <div><dt>Occurred</dt><dd>${fmtTime(e.occurred_at,true)}</dd></div>
+      <div><dt>Event ID</dt><dd>${esc(e.id)}</dd></div>
+      <div><dt>Correlation</dt><dd>${esc(e.correlation_key||'—')}</dd></div>
+      <div><dt>Trace</dt><dd>${esc(e.trace_id||'—')}</dd></div>
+    </dl>
+    <div class="sec-h"><b>Title</b></div><pre class="raw">${esc(e.title||'')}</pre>
+    <div class="sec-h"><b>Payload</b></div><pre class="raw">${esc(payloadText(e))}</pre>
+  </section></div>`;
+}
 function openEvent(id){ if(state.events.some(e=>e.id===id)){state.selectedEvent=id;render();} }
 function closeEvent(){state.selectedEvent=null;render();}
+
 if(!window.__chronicleEventClickHandler){
   document.addEventListener('click', event=>{
-    const row=event.target.closest?.('.event-row, #events-table [data-event]');
-    if(!row || row.closest('#event-inspector') || row.classList.contains('replay-event'))return;
+    const row=event.target.closest?.('[data-event]');
+    if(!row || row.closest('#event-inspector') || row.classList.contains('replay-event') || row.classList.contains('sig'))return;
     const id=row.dataset.event;
     if(state.events.some(e=>e.id===id)){event.preventDefault();openEvent(id);}
   });
-  document.addEventListener('keydown', event=>{
-    const row=event.target.closest?.('.event-row, #events-table [data-event]');
-    if(!row || row.classList.contains('replay-event') || (event.key!=='Enter'&&event.key!==' '))return;
-    const id=row.dataset.event;
-    if(state.events.some(e=>e.id===id)){event.preventDefault();openEvent(id);}
-  });
+  document.addEventListener('keydown', event=>{ if(event.key==='Escape' && state.selectedEvent) closeEvent(); });
   window.__chronicleEventClickHandler=true;
 }
-// Views are resolved by name at render time, not captured up front: replay.js
-// and graph.js replace their view once loaded, and a captured reference would
-// pin this file's placeholder instead. Only known page ids are resolved.
-const pageIDs = new Set(navItems.map(item => item[0]));
-function render(){ renderNav(); const page=pageIDs.has(state.page)?state.page:'overview'; $('#page-label').textContent=(navItems.find(x=>x[0]===page)||navItems[0])[1]; const view=window[page]||overview; $('#app').innerHTML=view()+eventInspector(); bindView(); }
-async function analyze(id){const box=$('#rca-result');if(box)box.innerHTML=empty('Analyzing','Checking the event window and dependency graph…');try{const r=await api(`/api/analyze?event_id=${encodeURIComponent(id)}`,{method:'POST'});const data=await r.json();if(!r.ok)throw new Error(data.error||'RCA failed');state.graphEvidence=data.evidence||[];const c=data.candidates?.[0];if(box)box.innerHTML=c?`<strong>${esc(c.event.title)}</strong><p class="page-subtitle">Confidence <span class="confidence">${Math.round((data.confidence||0)*100)}%</span></p><div class="confidence-bar"><span style="width:${Math.round((data.confidence||0)*100)}%"></span></div><p class="page-subtitle">${esc(data.narrative)}</p><div class="candidate"><span class="candidate-rank">1</span><div><strong>Evidence · ${c.affected_services||0} affected service(s)</strong><small>${(c.reasons||[]).map(esc).join(' · ')}</small></div></div><button class="button" onclick="navigate('graph')">Show evidence on dependency graph</button>`:empty('No graph-reachable cause','The analysis is inconclusive for this symptom.');}catch(err){if(box)box.innerHTML=empty('RCA unavailable',err.message);}}
-function showToast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
-$('#refresh').onclick=()=>loadEvents(); window.addEventListener('hashchange',()=>{state.page=location.hash.slice(1)||'overview';render();}); document.addEventListener('DOMContentLoaded',()=>loadEvents());
 
-// Data-backed graph and review queue. The declarations intentionally live at
-// the end so the console remains compatible with the first embedded build.
-async function loadGraph(){ try { const r=await api('/api/graph'); state.graph=r.ok?await r.json():{nodes:[],edges:[]}; } catch (_) { state.graph={nodes:[],edges:[]}; } }
-async function loadPosture(){ state.postureLoading=true; try { const r=await api('/api/posture'); const data=await r.json(); if(!r.ok)throw new Error(data.error||'Live posture unavailable'); state.posture=data; state.postureError=''; } catch (e) { state.posture={resources:[],summary:{total:0,healthy:0,warning:0,critical:0}}; state.postureError=e.message; } state.postureLoading=false; }
-async function loadActions(){ try { const r=await api('/api/heal/actions'); state.actions=r.ok?(await r.json()).actions||[]:[]; } catch (_) { state.actions=[]; } }
-function graph(){
-  const g=state.graph||{nodes:[],edges:[]};
-  const nodes=g.nodes||[]; const edges=g.edges||[];
-  const positions=nodes.map((n,i)=>({n,left:12+(i%4)*23,top:18+(Math.floor(i/4)%3)*28}));
-  const nodeMarkup=positions.length?positions.map(({n,left,top})=>`<div class="graph-node" style="left:${left}%;top:${top}%"><h3>${esc(n.Name)}</h3><small><span class="dot dot-green"></span> ${esc(n.Kind)} · ${esc(n.Namespace)}</small></div>`).join(''):empty('No dependency edges','The graph collector has not stored active dependencies yet.');
-  return pageHeading('PHASE 2 / DEPENDENCY GRAPH','Service relationships','Trace upstream causes and downstream impact across the infrastructure graph.')+`<section class="panel graph">${nodeMarkup}<div class="panel-meta" style="position:absolute;right:15px;bottom:12px">${nodes.length} NODES · ${edges.length} EDGES</div></section><p class="page-subtitle" style="margin-top:12px">Edges are read from the active dependency graph used by RCA. Selectors and edge highlighting will be added with graph interaction controls.</p>`;
+/* --------------------------------------------------------------- render */
+
+const pageIDs = new Set(navItems.map(item => item[0]));
+function render(){
+  renderNav();
+  const page = pageIDs.has(state.page) ? state.page : 'now';
+  $('#page-label').textContent = (navItems.find(x=>x[0]===page)||navItems[0])[1];
+  const view = window[page] || now;
+  $('#app').innerHTML = view() + eventInspector();
+  bindView();
 }
-function healing(){
-  const actions=state.actions||[];
-  const rows=actions.length?`<table class="table"><thead><tr><th>Action</th><th>Target</th><th>Confidence</th><th>Mode</th><th>Review</th></tr></thead><tbody>${actions.map(a=>`<tr><td><div class="event-title">${esc(a.rule||a.action_type||'No rule')}</div><small class="panel-meta">${esc(a.result||'')}</small></td><td class="mono">${esc(a.namespace)}/${esc(a.target)}</td><td class="mono">${Math.round((a.confidence||0)*100)}%</td><td><span class="status ${a.dry_run?'dry':'active'}">${a.dry_run?'DRY RUN':esc(a.status)}</span></td><td>${a.approval==='pending'?`<button class="button" data-approve="${esc(a.id)}">Approve</button> <button class="button button-danger" data-deny="${esc(a.id)}">Deny</button>`:`<span class="panel-meta">${esc(a.approval||a.status)}</span>`}</td></tr>`).join('')}</tbody></table>`:empty('No remediation actions loaded','Run RCA on a warning or critical event. Matched rules will appear here as audited dry-run decisions.');
-  return pageHeading('PHASE 5 / SELF-HEALING','Remediation','Review safe, explainable remediation plans. Chronicle does not execute actions automatically.',`<button class="button" id="healing-info">Safety model</button>`)+`<div class="banner"><span class="icon">!</span><div><strong>DRY RUN MODE · execution disabled</strong><p>Approval changes the review record only. Kubernetes execution remains disabled until the live-execution safeguards are completed.</p></div></div><section class="panel"><div class="panel-head"><span class="panel-title">Remediation queue</span><span class="panel-meta">${actions.length} AUDITED ACTIONS</span></div><div class="table-wrap">${rows}</div></section><section class="panel" style="margin-top:14px"><div class="panel-head"><span class="panel-title">Rule trust</span><span class="panel-meta">NOT AUTOMATIC</span></div><div class="table-wrap"><table class="table"><thead><tr><th>Rule</th><th>Trigger</th><th>Threshold</th><th>Mode</th></tr></thead><tbody><tr><td class="mono">restart-deadlocked-pod</td><td>became_unready</td><td>≥ 80%</td><td><span class="status dry">DRY RUN</span></td></tr><tr><td class="mono">bump-memory-on-oom</td><td>oom_kill</td><td>≥ 85%</td><td><span class="status dry">DRY RUN</span></td></tr><tr><td class="mono">rollback-bad-deploy</td><td>deploy</td><td>≥ 90%</td><td><span class="status pending">APPROVAL REQUIRED</span></td></tr></tbody></table></div></section>`;
-}
-async function decide(id,approved){ try { let token=sessionStorage.getItem('chronicle_heal_token')||window.prompt('Enter the healing approval token'); if(!token)return; sessionStorage.setItem('chronicle_heal_token',token); const r=await api(`/api/heal/actions/${encodeURIComponent(id)}/${approved?'approve':'deny'}`,{method:'POST',headers:{'Content-Type':'application/json','X-Chronicle-Heal-Token':token},body:JSON.stringify({by:'local-reviewer'})}); if(r.status===401){sessionStorage.removeItem('chronicle_heal_token');throw new Error('Invalid approval token');} if(!r.ok)throw new Error('Action is no longer pending'); await loadActions(); render(); showToast(approved?'Action approved in audit record':'Action denied and recorded'); } catch(e){showToast(e.message);} }
-function applyEventFilters(){ const search=$('#event-search'), source=$('#source-filter'); const q=(search?.value||'').toLowerCase(); const f=state.events.filter(e=>(!q||JSON.stringify(e).toLowerCase().includes(q))&&(!source||!source.value||e.source===source.value)&&(!state.filterSeverity||e.severity===state.filterSeverity)); const t=$('#events-table')||$('#timeline-list'); if(t)t.innerHTML=t.id==='events-table'?eventTable(f):eventRows(f); }
-async function loadMoreEvents(){ const button=$('#load-more-events'); if(button){button.disabled=true;button.textContent='Loading…';} try { const r=await api(`/api/events?limit=100&offset=${state.events.length}`); const d=await r.json(); if(!r.ok)throw new Error(d.error||'Unable to load older events'); state.events=state.events.concat(d.events||[]); state.totalEvents=Number.isFinite(d.total)?d.total:state.totalEvents; render(); applyEventFilters(); } catch(e) { showToast(e.message); if(button){button.disabled=false;button.textContent='Load older events';} } }
-async function loadEvents(){ state.loading=true; render(); try{const r=await api('/api/events?limit=100');const d=await r.json();if(!r.ok)throw new Error(d.error||'Events unavailable');state.events=d.events||[];state.totalEvents=Number.isFinite(d.total)?d.total:state.events.length;state.eventError='';}catch(e){state.events=[];state.totalEvents=0;state.eventError=e.message} await Promise.all([loadGraph(),loadActions(),loadPosture()]); state.loading=false; render(); }
 
 function bindView(){
+  const content = $('#app');
+  if(content) content.classList.add('bleed');
   const search=$('#event-search'), source=$('#source-filter');
-  if(search)search.addEventListener('input',applyEventFilters);
-  if(source)source.addEventListener('change',applyEventFilters);
-  document.querySelectorAll('[data-severity-filter]').forEach(button=>button.onclick=()=>{state.filterSeverity=button.dataset.severityFilter||'';const menu=$('#severity-filter-menu');if(menu)menu.removeAttribute('open');const label=menu?.querySelector('summary');if(label)label.firstChild.textContent=state.filterSeverity?state.filterSeverity.toUpperCase():'ALL SEVERITIES';applyEventFilters();});
+  if(search) search.oninput=()=>{ const at=search.selectionStart; state.filterQuery=search.value; render(); const again=$('#event-search'); if(again){again.focus();again.setSelectionRange(at,at);} };
+  if(source) source.onchange=()=>{ state.filterSource=source.value; render(); };
+  document.querySelectorAll('[data-severity-filter]').forEach(button=>button.onclick=()=>{ state.filterSeverity=button.dataset.severityFilter||''; render(); });
   if($('#load-more-events'))$('#load-more-events').onclick=loadMoreEvents;
-  if(search&&state.filterSeverity)applyEventFilters();
-  document.querySelectorAll('[data-analyze]').forEach(b=>b.onclick=()=>analyze(b.dataset.analyze));
   document.querySelectorAll('[data-approve]').forEach(b=>b.onclick=()=>decide(b.dataset.approve,true));
   document.querySelectorAll('[data-deny]').forEach(b=>b.onclick=()=>decide(b.dataset.deny,false));
-  document.querySelectorAll('[data-incident]').forEach(item=>item.onclick=()=>{state.selectedIncident=item.dataset.incident;render();});
   if($('#close-event'))$('#close-event').onclick=closeEvent;
   if($('#event-inspector'))$('#event-inspector').onclick=(e)=>{if(e.target.id==='event-inspector')closeEvent();};
 }
+
+/* ----------------------------------------------------------------- data */
+
+async function loadEvents(){
+  state.loading=true; render();
+  try{
+    const r=await api('/api/events?limit=100');
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Events unavailable');
+    state.events=d.events||[];
+    state.totalEvents=Number.isFinite(d.total)?d.total:state.events.length;
+    state.eventError='';
+  }catch(e){ state.events=[]; state.totalEvents=0; state.eventError=e.message; }
+  await Promise.all([loadGraph(),loadActions(),loadPosture()]);
+  state.loading=false; render();
+}
+async function loadGraph(){ try { const r=await api('/api/graph'); state.graph=r.ok?await r.json():{nodes:[],edges:[]}; } catch (_) { state.graph={nodes:[],edges:[]}; } }
+async function loadPosture(){ state.postureLoading=true; try { const r=await api('/api/posture'); const d=await r.json(); if(!r.ok)throw new Error(d.error||'Live posture unavailable'); state.posture=d; state.postureError=''; } catch (e) { state.posture={resources:[],summary:{total:0,healthy:0,warning:0,critical:0}}; state.postureError=e.message; } state.postureLoading=false; }
+async function loadActions(){ try { const r=await api('/api/heal/actions'); state.actions=r.ok?(await r.json()).actions||[]:[]; } catch (_) { state.actions=[]; } }
+async function loadMoreEvents(){
+  const button=$('#load-more-events');
+  if(button){button.disabled=true;button.textContent='loading…';}
+  try{
+    const r=await api(`/api/events?limit=100&offset=${state.events.length}`);
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Unable to load older events');
+    state.events=state.events.concat(d.events||[]);
+    if(Number.isFinite(d.total))state.totalEvents=d.total;
+  }catch(e){ showToast(e.message); }
+  render();
+}
+
+async function decide(id,approved){
+  try{
+    let token=sessionStorage.getItem('chronicle_heal_token')||window.prompt('Healing approval token');
+    if(!token)return;
+    sessionStorage.setItem('chronicle_heal_token',token);
+    const r=await api(`/api/heal/actions/${encodeURIComponent(id)}/${approved?'approve':'deny'}`,{method:'POST',headers:{'Content-Type':'application/json','X-Chronicle-Heal-Token':token},body:JSON.stringify({by:'local-reviewer'})});
+    if(r.status===401){sessionStorage.removeItem('chronicle_heal_token');throw new Error('Invalid approval token');}
+    if(!r.ok)throw new Error('Action is no longer pending');
+    await loadActions(); render();
+    showToast(approved?'Approved and recorded':'Denied and recorded');
+  }catch(e){ showToast(e.message); }
+}
+
+function showToast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
+
+$('#refresh').onclick=()=>loadEvents();
+window.addEventListener('hashchange',()=>{ state.page=hashPage(); render(); });
+// The first render waits for incidents.js, replay.js and graph.js to install
+// their views, otherwise a deep link renders this file's fallback.
+document.addEventListener('DOMContentLoaded',()=>loadEvents());

@@ -92,18 +92,20 @@ func main() {
 	}
 	defer pool.Close()
 
-	var eventBus *store.KafkaBus
-	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
-		eventBus = store.NewKafkaBus(brokers, valueOrEnv("KAFKA_TOPIC", "chronicle.events"), valueOrEnv("KAFKA_GROUP", "chronicle-writer"))
-		defer eventBus.Close()
-	}
+	// The Kafka reader is NOT created here. A reader with a group ID joins the
+	// consumer group as soon as it exists, so building one on every replica
+	// lets a follower be assigned the partition it will never read from —
+	// stranding the whole event stream. Only the leader may hold it, so the bus
+	// is built per leadership term below.
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+
 	var recentCache *store.RecentCache
 	if address := os.Getenv("REDIS_ADDR"); address != "" {
 		recentCache = store.NewRecentCache(address, os.Getenv("REDIS_PASSWORD"), 0)
 		defer recentCache.Close()
 	}
 	collectorEvents := events
-	if eventBus != nil {
+	if kafkaBrokers != "" {
 		collectorEvents = make(chan event.Event, 10_000)
 	}
 	eventAcknowledgements := make(chan string, 10_000)
@@ -169,6 +171,13 @@ func main() {
 	// workloads. Only the pod holding the Kubernetes Lease runs them.
 	runLeaderWorkloads := func(leaderCtx context.Context) {
 		if err := func() error {
+			// Created and closed with the leadership term: a demoted replica
+			// must leave the consumer group rather than sit on the partition.
+			var eventBus *store.KafkaBus
+			if kafkaBrokers != "" {
+				eventBus = store.NewKafkaBus(kafkaBrokers, valueOrEnv("KAFKA_TOPIC", "chronicle.events"), valueOrEnv("KAFKA_GROUP", "chronicle-writer"))
+				defer eventBus.Close()
+			}
 			syncGraph(leaderCtx)
 			leaderGroup, leaderCtx := errgroup.WithContext(leaderCtx)
 			leaderGroup.Go(func() error { return collect.NewK8sCollector(k8sClient, collectorEvents).Run(leaderCtx) })

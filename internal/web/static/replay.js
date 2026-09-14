@@ -71,7 +71,7 @@
     document.querySelector('#replay-event-close')?.addEventListener('click', closeReplayEvent);
     document.querySelector('#replay-event-inspector')?.addEventListener('click', event => { if (event.target.id === 'replay-event-inspector') closeReplayEvent(); });
   };
-  const heading = (title, subtitle, action) => `<div class="page-heading"><div><div class="eyebrow">REPLAY</div><h1 class="page-title">${title}</h1><p class="page-subtitle">${subtitle}</p></div>${action||''}</div>`;
+  const heading = (title, subtitle, action) => `<div class="ph"><h1>${title}</h1><p>${subtitle}</p>${action?`<div class="act">${action}</div>`:''}</div>`;
   const position = () => Number(state.replayPosition ?? 30);
   const setPosition = value => { state.replayPosition=Math.max(0,Math.min(60,Number(value))); state.replayAt=timeFor(state.replayPosition); state.replayLive=false; state.replayData=null; state.replayEvents=[]; state.replayDataLive=false; };
   const replayDataMatchesSelection = data => data && Number.isFinite(new Date(data.taken_at).getTime()) && new Date(data.taken_at).getTime()===new Date(state.replayAt).getTime() && Boolean(state.replayDataLive)===Boolean(state.replayLive);
