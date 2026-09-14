@@ -27,6 +27,13 @@ type ImpactGraphSource interface {
 type HistoricalEdgeSource interface {
 	EdgesAt(ctx context.Context, t time.Time) ([]graph.Edge, error)
 }
+
+// WindowedEdgeSource can hand over every edge that was valid anywhere in the
+// causal window, which is what the analyzer wants: a resource deleted during
+// the incident has no edges left by the time the symptom arrives.
+type WindowedEdgeSource interface {
+	EdgesBetween(ctx context.Context, from, to time.Time) ([]graph.Edge, error)
+}
 type Narrator interface {
 	Narrate(context.Context, *Result) (string, error)
 }
@@ -110,12 +117,21 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		local *graph.Graph
 		edges []graph.Edge
 	)
-	if edgeSource, ok := a.Graph.(HistoricalEdgeSource); ok {
-		if loaded, edgeErr := edgeSource.EdgesAt(ctx, symptom.IngestedAt); edgeErr == nil {
+	if windowed, ok := a.Graph.(WindowedEdgeSource); ok {
+		if loaded, edgeErr := windowed.EdgesBetween(ctx, symptom.IngestedAt.Add(-back), symptom.IngestedAt); edgeErr == nil {
 			edges = loaded
-			local = graph.New()
-			local.SetEdges(loaded)
 		}
+	}
+	if edges == nil {
+		if edgeSource, ok := a.Graph.(HistoricalEdgeSource); ok {
+			if loaded, edgeErr := edgeSource.EdgesAt(ctx, symptom.IngestedAt); edgeErr == nil {
+				edges = loaded
+			}
+		}
+	}
+	if edges != nil {
+		local = graph.New()
+		local.SetEdges(edges)
 	}
 
 	var upstream map[string]int

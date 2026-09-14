@@ -81,9 +81,9 @@ func TestAnalyzeLoadsTheGraphOnceRegardlessOfCandidateCount(t *testing.T) {
 		return graph.Node{Kind: "Service", Name: name, Namespace: "default"}
 	}
 	source := &countingGraph{edges: []graph.Edge{
-		{From: node("redis"), To: node("api"), Kind: "calls", Weight: 1, Source: "static"},
-		{From: node("worker"), To: node("api"), Kind: "calls", Weight: 1, Source: "static"},
-		{From: node("db"), To: node("worker"), Kind: "calls", Weight: 1, Source: "static"},
+		{From: node("api"), To: node("redis"), Kind: "calls", Weight: 1, Source: "static"},
+		{From: node("api"), To: node("worker"), Kind: "calls", Weight: 1, Source: "static"},
+		{From: node("worker"), To: node("db"), Kind: "calls", Weight: 1, Source: "static"},
 	}}
 	symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
 	upstream := []event.Event{

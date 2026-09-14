@@ -92,12 +92,20 @@
     });
   }
 
+  // Collect everything, triage what you own. These namespaces stay in the event
+  // store and in the dependency graph — they are just not what you are on call
+  // for, and Chronicle should not be the thing triaging its own incidents.
+  const PLATFORM_NAMESPACES = new Set(['kube-system', 'kube-public', 'kube-node-lease', 'monitoring', 'linkerd', 'local-path-storage', 'chronicle', 'argocd']);
+  const scopeOf = e => PLATFORM_NAMESPACES.has(e.namespace) ? 'platform' : 'application';
+  const triageScope = () => state.opsScope || 'application';
+
   const severityFilter = () => state.opsSeverity || '';
   const queryFilter = () => (state.opsQuery || '').toLowerCase();
 
   function signals() {
     return (state.events || []).filter(e => {
       if (e.severity !== 'warning' && e.severity !== 'critical') return false;
+      if (triageScope() !== 'all' && scopeOf(e) !== triageScope()) return false;
       if (severityFilter() && e.severity !== severityFilter()) return false;
       const q = queryFilter();
       if (!q) return true;
@@ -138,6 +146,8 @@
     return `<div class="ops-bar">
       <input class="ops-find" id="ops-find" placeholder="filter  /" value="${esc(state.opsQuery || '')}" autocomplete="off" spellcheck="false">
       <div class="seg">${button('', 'ALL', '')}${button('critical', 'CRIT', 'crit')}${button('warning', 'WARN', 'warn')}</div>
+      <div class="seg">${['application', 'platform', 'all'].map(scope =>
+        `<button type="button" data-scope="${scope}" aria-pressed="${triageScope() === scope}">${scope.toUpperCase()}</button>`).join('')}</div>
       ${histogram(all)}
       <span class="ops-span">${groups.length} GROUP${groups.length === 1 ? '' : 'S'} · ${all.length} SIGNAL${all.length === 1 ? '' : 'S'}</span>
     </div>`;
@@ -277,14 +287,29 @@
 
   // Upstream hop distance from the symptom, over the evidence subgraph.
   // Anything the walk never reaches sits downstream of the symptom.
+  // Causality runs backwards along ownership and forwards along dependencies —
+  // the same rule the analyzer walks. Anything a step never reaches sits
+  // downstream of the symptom rather than upstream of it.
+  const CAUSAL_WITH_EDGE = new Set(['owns']);
+
+  function causalSteps(edges) {
+    const step = new Map();
+    const add = (node, next, kind) => { if (!step.has(node)) step.set(node, []); step.get(node).push({next, kind}); };
+    edges.forEach(e => {
+      const from = nodeKey(e.From), to = nodeKey(e.To);
+      if (CAUSAL_WITH_EDGE.has(e.Kind)) add(to, from, e.Kind);
+      else add(from, to, e.Kind);
+    });
+    return step;
+  }
+
   function layersFrom(edges, symptomKey) {
-    const incoming = new Map();
-    edges.forEach(e => { const to = nodeKey(e.To), from = nodeKey(e.From); if (!incoming.has(to)) incoming.set(to, []); incoming.get(to).push(from); });
+    const step = causalSteps(edges);
     const layer = new Map([[symptomKey, 0]]);
     let frontier = [symptomKey];
     for (let depth = 1; depth <= 6 && frontier.length; depth++) {
       const next = [];
-      frontier.forEach(node => (incoming.get(node) || []).forEach(from => { if (!layer.has(from)) { layer.set(from, depth); next.push(from); } }));
+      frontier.forEach(node => (step.get(node) || []).forEach(({next: to}) => { if (!layer.has(to)) { layer.set(to, depth); next.push(to); } }));
       frontier = next;
     }
     return layer;
@@ -292,19 +317,22 @@
 
   // Shortest chain of edges from the cause to the symptom, so the hop count in
   // the ranking table can be read as an actual route.
-  function pathBetween(edges, fromKey, toKey) {
-    if (fromKey === toKey) return [];
-    const outgoing = new Map();
-    edges.forEach(e => { const from = nodeKey(e.From); if (!outgoing.has(from)) outgoing.set(from, []); outgoing.get(from).push(e); });
-    const queue = [[fromKey, []]];
-    const seen = new Set([fromKey]);
+  function causalRoute(edges, symptomKey, causeKey) {
+    if (symptomKey === causeKey) return [];
+    const step = causalSteps(edges);
+    const queue = [[symptomKey, []]];
+    const seen = new Set([symptomKey]);
     while (queue.length) {
       const [node, trail] = queue.shift();
-      for (const edge of outgoing.get(node) || []) {
-        const next = nodeKey(edge.To);
+      for (const {next, kind} of step.get(node) || []) {
         if (seen.has(next)) continue;
-        const extended = trail.concat([edge]);
-        if (next === toKey) return extended;
+        const extended = trail.concat([{to: next, kind, reversed: !CAUSAL_WITH_EDGE.has(kind)}]);
+        if (next === causeKey) {
+          // Collected symptom-first; read it back cause-first.
+          const nodes = [symptomKey, ...extended.map(x => x.to)].reverse();
+          const steps = extended.map(x => ({kind: x.kind, reversed: x.reversed})).reverse();
+          return nodes.slice(1).map((to, i) => ({to, kind: steps[i].kind, reversed: steps[i].reversed}));
+        }
         seen.add(next);
         queue.push([next, extended]);
       }
@@ -319,7 +347,7 @@
       const self = parseKey(causeKey);
       return `<div class="path"><span class="hop self"><b>${esc(shortName(self.name, 30))}</b><small>${esc(self.kind)}</small></span><span class="path-note">cause and symptom are the same resource \u2014 no hop between them</span></div>`;
     }
-    const route = pathBetween(result.evidence || [], causeKey, symptomKey);
+    const route = causalRoute(result.evidence || [], symptomKey, causeKey);
     const start = parseKey(causeKey);
     if (!route || !route.length) {
       const end = parseKey(symptomKey);
@@ -327,8 +355,8 @@
     }
     return `<div class="path">
       <span class="hop cause"><b>${esc(shortName(start.name, 28))}</b><small>${esc(start.kind)}</small></span>
-      ${route.map(edge => { const to = parseKey(nodeKey(edge.To)); const last = nodeKey(edge.To) === symptomKey;
-        return `<span class="link">${esc(edge.Kind)}</span><span class="hop ${last ? 'sym' : ''}"><b>${esc(shortName(to.name, 28))}</b><small>${esc(to.kind)}</small></span>`; }).join('')}
+      ${route.map(hop => { const to = parseKey(hop.to); const last = hop.to === symptomKey;
+        return `<span class="link${hop.reversed ? ' rev' : ''}">${esc(hop.kind)}</span><span class="hop ${last ? 'sym' : ''}"><b>${esc(shortName(to.name, 28))}</b><small>${esc(to.kind)}</small></span>`; }).join('')}
     </div>`;
   }
 
@@ -496,6 +524,10 @@
         if (again) { again.focus(); again.setSelectionRange(at, at); }
       };
     }
+    document.querySelectorAll('[data-scope]').forEach(button => button.onclick = () => {
+      state.opsScope = button.dataset.scope;
+      window.render();
+    });
     document.querySelectorAll('[data-sev]').forEach(button => button.onclick = () => {
       state.opsSeverity = button.dataset.sev;
       window.render();

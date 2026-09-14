@@ -14,7 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/api"
 	"golang.org/x/sync/errgroup"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -115,55 +119,6 @@ func main() {
 	meshBuilder := graph.NewMeshBuilder(promClient)
 	graphStore := store.NewGraphStore(pool)
 
-	syncGraph := func(syncCtx context.Context) {
-		var allEdges []graph.Edge
-		graphReady := false
-		pods, podErr := k8sClient.CoreV1().Pods("").List(syncCtx, metav1.ListOptions{})
-		svcs, svcErr := k8sClient.CoreV1().Services("").List(syncCtx, metav1.ListOptions{})
-		if podErr == nil && svcErr == nil {
-			graphReady = true
-			allEdges = append(allEdges, graph.BuildServiceEdges(svcs.Items, pods.Items)...)
-			allEdges = append(allEdges, graph.BuildOwnerEdges(pods.Items)...)
-			allEdges = append(allEdges, graph.BuildReferenceEdges(pods.Items)...)
-			knownSvcs := make(map[string]bool)
-			for _, s := range svcs.Items {
-				knownSvcs[s.Namespace+"/"+s.Name] = true
-			}
-			for _, p := range pods.Items {
-				allEdges = append(allEdges, graph.InferCallEdges(p, knownSvcs)...)
-			}
-		} else {
-			slog.Warn("failed to fetch k8s resources for graph", "pod_err", podErr, "service_err", svcErr)
-		}
-		if ingresses, err := k8sClient.NetworkingV1().Ingresses("").List(syncCtx, metav1.ListOptions{}); err == nil {
-			allEdges = append(allEdges, graph.BuildIngressEdges(ingresses.Items)...)
-		} else {
-			graphReady = false
-			slog.Warn("failed to fetch ingresses for graph", "err", err)
-		}
-
-		if runtimeEdges, err := meshBuilder.RuntimeEdges(syncCtx); err == nil {
-			allEdges = append(allEdges, runtimeEdges...)
-		}
-
-		if graphReady {
-			deduped := make([]graph.Edge, 0, len(allEdges))
-			seen := make(map[string]bool)
-			for _, e := range allEdges {
-				key := fmt.Sprintf("%s|%s|%s", e.From.Key(), e.To.Key(), e.Kind)
-				if !seen[key] {
-					seen[key] = true
-					deduped = append(deduped, e)
-				}
-			}
-
-			inMemGraph.SetEdges(deduped)
-			if err := graphStore.Sync(syncCtx, deduped); err != nil {
-				slog.Error("failed to sync graph to postgres", "err", err)
-			}
-		}
-	}
-
 	// Phase 3: Snapshotter — takes a full cluster snapshot every 5 minutes.
 	snapshotter := replay.NewSnapshotter(k8sClient, promClient, pool, inMemGraph)
 
@@ -177,6 +132,97 @@ func main() {
 			if kafkaBrokers != "" {
 				eventBus = store.NewKafkaBus(kafkaBrokers, valueOrEnv("KAFKA_TOPIC", "chronicle.events"), valueOrEnv("KAFKA_GROUP", "chronicle-writer"))
 				defer eventBus.Close()
+			}
+			// Topology is read from a shared informer cache rather than re-listing every
+			// pod in the cluster every 30 seconds. On a cluster of any size that LIST is
+			// tens of megabytes of API traffic per sync; a watch-backed cache is
+			// incremental and already local. The factory is built per leadership term
+			// because informers cannot be restarted once their stop channel closes.
+			graphFactory := informers.NewSharedInformerFactory(k8sClient, 10*time.Minute)
+			podLister := graphFactory.Core().V1().Pods().Lister()
+			serviceLister := graphFactory.Core().V1().Services().Lister()
+			deploymentLister := graphFactory.Apps().V1().Deployments().Lister()
+			ingressLister := graphFactory.Networking().V1().Ingresses().Lister()
+
+			syncGraph := func(syncCtx context.Context) {
+				var allEdges []graph.Edge
+				graphReady := false
+				podRefs, podErr := podLister.List(labels.Everything())
+				serviceRefs, svcErr := serviceLister.List(labels.Everything())
+				if podErr == nil && svcErr == nil && len(podRefs) > 0 {
+					graphReady = true
+					pods := make([]corev1.Pod, 0, len(podRefs))
+					for _, p := range podRefs {
+						pods = append(pods, *p)
+					}
+					svcs := make([]corev1.Service, 0, len(serviceRefs))
+					for _, s := range serviceRefs {
+						svcs = append(svcs, *s)
+					}
+					allEdges = append(allEdges, graph.BuildServiceEdges(svcs, pods)...)
+					allEdges = append(allEdges, graph.BuildOwnerEdges(pods)...)
+					allEdges = append(allEdges, graph.BuildReferenceEdges(pods)...)
+					knownSvcs := make(map[string]bool)
+					for _, s := range svcs {
+						knownSvcs[s.Namespace+"/"+s.Name] = true
+					}
+					for _, p := range pods {
+						allEdges = append(allEdges, graph.InferCallEdges(p, knownSvcs)...)
+					}
+				} else {
+					slog.Warn("failed to read k8s cache for graph", "pod_err", podErr, "service_err", svcErr)
+				}
+				// Argo CD stamps an instance label on what it deploys; that label is the
+				// only thing tying an Application event to a node in this graph.
+				if deploymentRefs, err := deploymentLister.List(labels.Everything()); err == nil {
+					deployments := make([]appsv1.Deployment, 0, len(deploymentRefs))
+					for _, d := range deploymentRefs {
+						deployments = append(deployments, *d)
+					}
+					allEdges = append(allEdges, graph.BuildArgoEdges(deployments)...)
+				} else {
+					slog.Warn("failed to read deployments for graph", "err", err)
+				}
+				if ingressRefs, err := ingressLister.List(labels.Everything()); err == nil {
+					ingresses := make([]networkingv1.Ingress, 0, len(ingressRefs))
+					for _, i := range ingressRefs {
+						ingresses = append(ingresses, *i)
+					}
+					allEdges = append(allEdges, graph.BuildIngressEdges(ingresses)...)
+				} else {
+					graphReady = false
+					slog.Warn("failed to read ingresses for graph", "err", err)
+				}
+
+				if runtimeEdges, err := meshBuilder.RuntimeEdges(syncCtx); err == nil {
+					allEdges = append(allEdges, runtimeEdges...)
+				}
+
+				if graphReady {
+					deduped := make([]graph.Edge, 0, len(allEdges))
+					seen := make(map[string]bool)
+					for _, e := range allEdges {
+						key := fmt.Sprintf("%s|%s|%s", e.From.Key(), e.To.Key(), e.Kind)
+						if !seen[key] {
+							seen[key] = true
+							deduped = append(deduped, e)
+						}
+					}
+
+					inMemGraph.SetEdges(deduped)
+					if err := graphStore.Sync(syncCtx, deduped); err != nil {
+						slog.Error("failed to sync graph to postgres", "err", err)
+					}
+				}
+			}
+
+			graphFactory.Start(leaderCtx.Done())
+			// WaitForCacheSync with no informers returns true immediately; the
+			// factory's own method is the one that actually waits.
+			for informer, synced := range graphFactory.WaitForCacheSync(leaderCtx.Done()) {
+				if !synced {
+					return fmt.Errorf("informer cache for %v did not sync", informer)
+				}
 			}
 			syncGraph(leaderCtx)
 			leaderGroup, leaderCtx := errgroup.WithContext(leaderCtx)
@@ -282,7 +328,12 @@ func main() {
 		Events:   rcaDB,
 		Graph:    &rca.ReplayerGraphSource{Replayer: replayer, Historical: graphStore},
 		Narrator: narrator,
-		MaxHops:  3,
+		// One service hop costs two graph hops, because calls are modelled as
+		// Pod -> Service -> Pod. A budget of 3 therefore reaches barely one
+		// service away; 5 reaches the service behind the one that broke, which
+		// is where root causes usually live. Distance already damps the score
+		// (x0.33 at five hops), so the extra reach cannot dominate a ranking.
+		MaxHops: 5,
 	}
 	healStore := heal.NewPostgresAuditStore(pool)
 	healer := heal.NewEngine(healStore)

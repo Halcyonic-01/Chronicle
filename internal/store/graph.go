@@ -162,6 +162,45 @@ func (s *GraphStore) At(ctx context.Context, at time.Time) ([]graph.Edge, error)
 	return s.at(ctx, at)
 }
 
+// Between returns every edge that was valid at any point in the window. A
+// resource that was deleted during an incident has already lost its edges by
+// the time the symptom lands, so querying a single instant hides exactly the
+// thing that caused the outage.
+func (s *GraphStore) Between(ctx context.Context, from, to time.Time) ([]graph.Edge, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT from_key, to_key, kind, weight, source
+		FROM graph_edges
+		WHERE valid_from <= $2 AND (valid_to IS NULL OR valid_to > $1)
+		ORDER BY from_key, to_key`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{})
+	var edges []graph.Edge
+	for rows.Next() {
+		var fromKey, toKey string
+		var e graph.Edge
+		if err := rows.Scan(&fromKey, &toKey, &e.Kind, &e.Weight, &e.Source); err != nil {
+			return nil, err
+		}
+		if e.From, err = graph.ParseKey(fromKey); err != nil {
+			return nil, err
+		}
+		if e.To, err = graph.ParseKey(toKey); err != nil {
+			return nil, err
+		}
+		// An edge that changed weight mid-window has several versions.
+		identity := fromKey + "|" + toKey + "|" + e.Kind
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
 func (s *GraphStore) UpstreamAt(ctx context.Context, at time.Time, start string, maxDepth int) (map[string]int, error) {
 	edges, err := s.At(ctx, at)
 	if err != nil {

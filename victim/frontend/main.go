@@ -51,6 +51,7 @@ func main() {
 		resp, err := client.Get(apiURL)
 		if err != nil {
 			status = "500"
+			log.Printf("error: calling api at %s failed: %v", apiURL, err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -58,6 +59,7 @@ func main() {
 
 		if resp.StatusCode != http.StatusOK {
 			status = fmt.Sprintf("%d", resp.StatusCode)
+			log.Printf("error: api at %s returned HTTP %d", apiURL, resp.StatusCode)
 			http.Error(w, "api returned non-200", resp.StatusCode)
 			return
 		}

@@ -67,6 +67,7 @@ func main() {
 		val, err := rdb.Incr(ctx, "api_hits").Result()
 		if err != nil {
 			status = "500"
+			log.Printf("error: redis INCR against %s failed: %v", redisURL, err)
 			http.Error(w, fmt.Sprintf("redis error: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -76,6 +77,7 @@ func main() {
 		resp, err := client.Get(workerURL)
 		if err != nil {
 			status = "500"
+			log.Printf("error: calling worker at %s failed: %v", workerURL, err)
 			http.Error(w, fmt.Sprintf("worker error: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -83,6 +85,7 @@ func main() {
 
 		if resp.StatusCode != http.StatusOK {
 			status = fmt.Sprintf("%d", resp.StatusCode)
+			log.Printf("error: worker at %s returned HTTP %d", workerURL, resp.StatusCode)
 			http.Error(w, "worker returned non-200", resp.StatusCode)
 			return
 		}

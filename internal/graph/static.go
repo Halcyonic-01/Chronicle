@@ -1,8 +1,10 @@
 package graph
 
 import (
+	"strconv"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -38,34 +40,100 @@ func BuildServiceEdges(svcs []corev1.Service, pods []corev1.Pod) []Edge {
 	return edges
 }
 
-// InferCallEdges builds 'calls' edges from Pods to Services inferred via Env vars.
-func InferCallEdges(pod corev1.Pod, knownSvcs map[string]bool) []Edge {
-	var edges []Edge
-	for _, c := range pod.Spec.Containers {
-		for _, env := range c.Env {
-			// Looking for values like redis://redis.default.svc.cluster.local:6379 or http://api:8080
-			for serviceKey := range knownSvcs {
-				parts := strings.SplitN(serviceKey, "/", 2)
-				svcNamespace, svcName := pod.Namespace, serviceKey
-				if len(parts) == 2 {
-					svcNamespace, svcName = parts[0], parts[1]
-				}
-				if svcNamespace != pod.Namespace {
-					continue
-				}
-				if strings.Contains(env.Value, svcName) {
-					edges = append(edges, Edge{
-						From:   Node{Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace},
-						To:     Node{Kind: "Service", Name: svcName, Namespace: svcNamespace},
-						Kind:   "calls",
-						Weight: 0.7, // inferred, so lower confidence
-						Source: "static",
-					})
-				}
-			}
+// ArgoNamespace is where Argo CD Application nodes live in the graph. The
+// collector and the edge builder must agree on it, or an Application event
+// names a node that does not exist and the causal filter discards it.
+const ArgoNamespace = "argocd"
+
+// argoInstanceLabels are the labels Argo CD stamps on the workloads it manages.
+var argoInstanceLabels = []string{"argocd.argoproj.io/instance", "app.kubernetes.io/instance"}
+
+// hostNames pulls the host out of an environment value so a service is matched
+// on identity rather than on appearing somewhere in the string. Accepts
+// "redis://redis.default.svc.cluster.local:6379", "http://api:8080", "api:8080"
+// and a bare "api".
+func hostNames(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 2048 {
+		return nil
+	}
+	if i := strings.Index(value, "://"); i >= 0 {
+		value = value[i+3:]
+	}
+	if i := strings.IndexAny(value, "/?#"); i >= 0 {
+		value = value[:i]
+	}
+	if i := strings.LastIndex(value, "@"); i >= 0 {
+		value = value[i+1:]
+	}
+	if i := strings.LastIndex(value, ":"); i >= 0 {
+		if _, err := strconv.Atoi(value[i+1:]); err == nil {
+			value = value[:i]
 		}
 	}
-	return edges
+	if value == "" || strings.ContainsAny(value, " \t\"'") {
+		return nil
+	}
+	return strings.Split(value, ".")
+}
+
+// InferCallEdges builds 'calls' edges from Pods to Services named by their
+// environment. Since causality now runs along these edges, a false match
+// invents a false cause — so the service name must be the host's first label
+// ("api" from "http://api:8080"), not merely a substring of the value.
+func InferCallEdges(pod corev1.Pod, knownSvcs map[string]bool) []Edge {
+	var edges []Edge
+	containers := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+	for _, c := range containers {
+		for _, env := range c.Env {
+			labels := hostNames(env.Value)
+			if len(labels) == 0 {
+				continue
+			}
+			host := labels[0]
+			// A cross-namespace address spells out the namespace: svc.namespace...
+			namespace := pod.Namespace
+			if len(labels) > 1 {
+				namespace = labels[1]
+			}
+			if !knownSvcs[namespace+"/"+host] {
+				continue
+			}
+			edges = append(edges, Edge{
+				From:   Node{Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace},
+				To:     Node{Kind: "Service", Name: host, Namespace: namespace},
+				Kind:   "calls",
+				Weight: 0.7, // inferred, so lower confidence
+				Source: "static",
+			})
+		}
+	}
+	return dedupeEdges(edges)
+}
+
+// BuildArgoEdges links an Argo CD Application to the Deployments it manages,
+// using the instance label Argo stamps on them. Without these edges an Argo
+// sync event has no node in the graph, so it can never be ranked as a cause of
+// anything it deployed.
+func BuildArgoEdges(deployments []appsv1.Deployment) []Edge {
+	var edges []Edge
+	for _, deployment := range deployments {
+		for _, label := range argoInstanceLabels {
+			instance := deployment.Labels[label]
+			if instance == "" {
+				continue
+			}
+			edges = append(edges, Edge{
+				From:   Node{Kind: "Application", Name: instance, Namespace: ArgoNamespace},
+				To:     Node{Kind: "Deployment", Name: deployment.Name, Namespace: deployment.Namespace},
+				Kind:   "owns",
+				Weight: 1,
+				Source: "static",
+			})
+			break
+		}
+	}
+	return dedupeEdges(edges)
 }
 
 // BuildOwnerEdges builds 'owns' edges from Deployments to Pods.

@@ -54,6 +54,8 @@ func main() {
 		conn, err := pgx.Connect(ctx, pgURL)
 		if err != nil {
 			status = "500"
+			// The connection string carries credentials, so it is never logged.
+			log.Printf("error: connecting to postgres failed: %v", err)
 			http.Error(w, fmt.Sprintf("postgres connection error: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -63,6 +65,7 @@ func main() {
 		err = conn.QueryRow(ctx, "SELECT NOW()").Scan(&now)
 		if err != nil {
 			status = "500"
+			log.Printf("error: postgres query %q failed: %v", "SELECT NOW()", err)
 			http.Error(w, fmt.Sprintf("postgres query error: %v", err), http.StatusInternalServerError)
 			return
 		}

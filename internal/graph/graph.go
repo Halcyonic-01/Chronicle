@@ -72,8 +72,21 @@ func (g *Graph) CurrentEdges() []Edge {
 	return all
 }
 
-// Upstream returns everything that could possibly have caused a failure at `start`.
-// Returns node key -> number of hops away.
+// causalWithEdge lists the edge kinds where a change at the From end can cause
+// a failure at the To end, so causality runs the same way the edge points.
+//
+// Ownership is the only one: a Deployment's image or replica change breaks the
+// Pods it owns. Every other edge is a dependency, and causality runs against
+// it — a Pod "calls" a Service, so it is the Service failing that breaks the
+// Pod, not the other way round. Walking only incoming edges therefore finds
+// the caller when what you want is the callee, which is why a frontend error
+// could never reach the Redis outage behind it.
+var causalWithEdge = map[string]bool{"owns": true}
+
+// Upstream returns everything that could possibly have caused a failure at
+// `start`, keyed by node with its shortest hop distance. It follows ownership
+// edges backwards and dependency edges forwards, because those are the two
+// directions causality actually travels.
 func (g *Graph) Upstream(start string, maxDepth int) map[string]int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -83,13 +96,25 @@ func (g *Graph) Upstream(start string, maxDepth int) map[string]int {
 
 	for depth := 1; depth <= maxDepth; depth++ {
 		var next []string
+		visit := func(key string) {
+			if _, ok := seen[key]; ok {
+				return // cycle guard
+			}
+			seen[key] = depth
+			next = append(next, key)
+		}
 		for _, node := range queue {
+			// Something that owns this node changed, breaking it.
 			for _, e := range g.incoming[node] {
-				if _, ok := seen[e.From.Key()]; ok {
-					continue // cycle guard
+				if causalWithEdge[e.Kind] {
+					visit(e.From.Key())
 				}
-				seen[e.From.Key()] = depth
-				next = append(next, e.From.Key())
+			}
+			// Something this node depends on failed, breaking it.
+			for _, e := range g.outgoing[node] {
+				if !causalWithEdge[e.Kind] {
+					visit(e.To.Key())
+				}
 			}
 		}
 		queue = next

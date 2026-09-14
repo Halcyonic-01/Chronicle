@@ -212,6 +212,8 @@
 .link { font: 9.5px var(--mono); color: var(--dim); letter-spacing: .05em; white-space: nowrap; }
 .link::before { content: "──"; margin-right: 5px; color: var(--line); }
 .link::after { content: "─▶"; margin-left: 5px; color: var(--line); }
+.link.rev::before { content: "◀──"; }
+.link.rev::after { content: "──"; }
 .path-note { font: 10px var(--mono); color: var(--dim); }
 
 /* --- evidence graph ---------------------------------------------------- */

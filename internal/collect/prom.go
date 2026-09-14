@@ -81,48 +81,67 @@ func (p *PromCollector) Run(ctx context.Context) error {
 				}
 
 				for _, sample := range vec {
-					svc := string(sample.Metric["service"])
-					if svc == "" {
-						svc = string(sample.Metric["pod"])
-					}
-					if svc == "" {
+					name, kind, namespace := identify(sample.Metric)
+					if name == "" {
 						continue
 					}
 
-					key := rule.Name + "/" + svc
+					// Alert state is per resource, not per name: two namespaces
+					// may each run a pod called "api".
+					key := rule.Name + "/" + namespace + "/" + name
 					over := float64(sample.Value) > rule.Threshold
+					payload := mustJSON(map[string]any{
+						"value":     float64(sample.Value),
+						"query":     rule.Query,
+						"threshold": rule.Threshold,
+					})
 
 					switch {
 					case over && !firing[key]:
 						firing[key] = true
 						p.Emit(event.Event{
 							Source:     "prometheus",
-							EntityKind: "Service",
-							EntityName: svc,
-							Namespace:  "default",
+							EntityKind: kind,
+							EntityName: name,
+							Namespace:  namespace,
 							Type:       rule.EventType,
 							Severity:   rule.Severity,
 							Title: fmt.Sprintf("%s on %s: %.3f (limit %.3f)",
-								rule.Name, svc, float64(sample.Value), rule.Threshold),
-							Payload: mustJSON(map[string]any{
-								"value": float64(sample.Value),
-								"query": rule.Query,
-							}),
+								rule.Name, name, float64(sample.Value), rule.Threshold),
+							Payload: payload,
 						})
 					case !over && firing[key]:
 						firing[key] = false
 						p.Emit(event.Event{
 							Source:     "prometheus",
-							EntityKind: "Service",
-							EntityName: svc,
-							Namespace:  "default",
+							EntityKind: kind,
+							EntityName: name,
+							Namespace:  namespace,
 							Type:       rule.EventType + "_resolved",
 							Severity:   "info",
-							Title:      fmt.Sprintf("%s resolved on %s", rule.Name, svc),
+							Title:      fmt.Sprintf("%s resolved on %s", rule.Name, name),
+							Payload:    payload,
 						})
 					}
 				}
 			}
 		}
 	}
+}
+
+// identify turns a metric's labels into the identity of a real graph node.
+// Chronicle's causal filter drops any event whose namespace/kind/name does not
+// match a node, so guessing here silently deletes the signal instead of
+// misfiling it: a cAdvisor series carries a pod, not a service, and neither is
+// necessarily in the "default" namespace.
+func identify(metric model.Metric) (name, kind, namespace string) {
+	name, kind = string(metric["service"]), "Service"
+	if name == "" {
+		name, kind = string(metric["pod"]), "Pod"
+	}
+	namespace = string(metric["namespace"])
+	if namespace == "" {
+		namespace = "default"
+	}
+	return name, kind, namespace
 }

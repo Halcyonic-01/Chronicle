@@ -12,7 +12,17 @@ type ReplayerGraphSource struct {
 	Replayer   *replay.Replayer
 	Historical interface {
 		At(context.Context, time.Time) ([]graph.Edge, error)
+		Between(context.Context, time.Time, time.Time) ([]graph.Edge, error)
 	}
+}
+
+// EdgesBetween returns the union of edges valid anywhere in the window, so a
+// resource deleted mid-incident is still connected to what it broke.
+func (s *ReplayerGraphSource) EdgesBetween(ctx context.Context, from, to time.Time) ([]graph.Edge, error) {
+	if s.Historical != nil {
+		return s.Historical.Between(ctx, from, to)
+	}
+	return s.edgesAt(ctx, to)
 }
 
 func (s *ReplayerGraphSource) edgesAt(ctx context.Context, t time.Time) ([]graph.Edge, error) {

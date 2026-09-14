@@ -77,8 +77,8 @@ func (g *GitHubCollector) commitToEvent(c *github.RepositoryCommit) event.Event 
 	return event.Event{
 		Source:     "github",
 		EntityKind: "Repository",
-		EntityName: g.repo,
-		Namespace:  "default",
+		EntityName: g.owner + "/" + g.repo,
+		Namespace:  "github",
 		Type:       "commit",
 		Severity:   "info",
 		OccurredAt: c.Commit.Author.GetDate().Time,

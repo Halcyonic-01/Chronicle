@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/graph"
 )
 
 type ArgoCollector struct {
@@ -89,7 +90,7 @@ func (a *ArgoCollector) poll(ctx context.Context) error {
 		revision := app.Status.Sync.Revision
 		if revision != "" && a.seen[key] != revision {
 			a.seen[key] = revision
-			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: valueOr(app.Metadata.Namespace, "argocd"), Type: "deploy", Severity: "info", Title: fmt.Sprintf("%s synced revision %s", name, shortRevision(revision)), Payload: mustJSON(map[string]any{"revision": revision, "sync_status": app.Status.Sync.Status})})
+			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: graph.ArgoNamespace, Type: "deploy", Severity: "info", Title: fmt.Sprintf("%s synced revision %s", name, shortRevision(revision)), Payload: mustJSON(map[string]any{"revision": revision, "sync_status": app.Status.Sync.Status})})
 		}
 		healthKey := name + "/health"
 		health := app.Status.Health.Status
@@ -101,7 +102,7 @@ func (a *ArgoCollector) poll(ctx context.Context) error {
 				typeName = "application_healthy"
 				severity = "info"
 			}
-			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: valueOr(app.Metadata.Namespace, "argocd"), Type: typeName, Severity: severity, Title: fmt.Sprintf("%s health is %s", name, health), Payload: mustJSON(map[string]any{"health": health})})
+			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: graph.ArgoNamespace, Type: typeName, Severity: severity, Title: fmt.Sprintf("%s health is %s", name, health), Payload: mustJSON(map[string]any{"health": health})})
 		}
 	}
 	return nil
@@ -174,6 +175,10 @@ func (t *TerraformCollector) poll(ctx context.Context) error {
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return err
 	}
+	// A Terraform run has no Kubernetes counterpart, so these events are
+	// recorded for the timeline and are intentionally never graph-reachable:
+	// the causal filter would need a node to attach them to, and inventing one
+	// would be worse than admitting the gap.
 	for _, run := range response.Data {
 		if run.ID == "" || run.Attributes.Status == "" || t.seen[run.ID] == run.Attributes.Status {
 			continue
