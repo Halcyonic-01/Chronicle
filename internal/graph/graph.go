@@ -151,9 +151,14 @@ func (g *Graph) Downstream(start string, maxDepth int) map[string]int {
 	return seen
 }
 
-// Impact walks both directions because some infrastructure relationships are
-// represented as Service -> Pod while the operational impact travels Pod ->
-// Service. Causality still uses Upstream; this method is only for blast radius.
+// Impact returns what fails if `start` fails — the exact dual of Upstream.
+// It follows ownership forwards (what this node owns fails with it) and
+// dependency edges backwards (whatever depends on this node fails with it).
+//
+// It deliberately does NOT walk both directions over every edge. Shared
+// resources are hubs: fourteen pods "runs_on" one node, so a bidirectional
+// walk hops pod -> node -> every other pod on that node and the blast radius
+// of anything becomes the whole cluster. Reachability is not impact.
 func (g *Graph) Impact(start string, maxDepth int) map[string]int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -161,17 +166,22 @@ func (g *Graph) Impact(start string, maxDepth int) map[string]int {
 	queue := []string{start}
 	for depth := 1; depth <= maxDepth; depth++ {
 		var next []string
+		visit := func(key string) {
+			if _, ok := seen[key]; ok {
+				return
+			}
+			seen[key] = depth
+			next = append(next, key)
+		}
 		for _, node := range queue {
 			for _, edge := range g.outgoing[node] {
-				if _, ok := seen[edge.To.Key()]; !ok {
-					seen[edge.To.Key()] = depth
-					next = append(next, edge.To.Key())
+				if causalWithEdge[edge.Kind] {
+					visit(edge.To.Key()) // a Deployment takes its Pods with it
 				}
 			}
 			for _, edge := range g.incoming[node] {
-				if _, ok := seen[edge.From.Key()]; !ok {
-					seen[edge.From.Key()] = depth
-					next = append(next, edge.From.Key())
+				if !causalWithEdge[edge.Kind] {
+					visit(edge.From.Key()) // whatever called, mounted or ran on it
 				}
 			}
 		}

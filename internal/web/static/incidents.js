@@ -92,11 +92,8 @@
     });
   }
 
-  // Collect everything, triage what you own. These namespaces stay in the event
-  // store and in the dependency graph — they are just not what you are on call
-  // for, and Chronicle should not be the thing triaging its own incidents.
-  const PLATFORM_NAMESPACES = new Set(['kube-system', 'kube-public', 'kube-node-lease', 'monitoring', 'linkerd', 'local-path-storage', 'chronicle', 'argocd']);
-  const scopeOf = e => PLATFORM_NAMESPACES.has(e.namespace) ? 'platform' : 'application';
+  // Namespace classification is shared with the graph and posture views.
+  const scopeOf = e => window.chronicleScopeOf(e.namespace);
   const triageScope = () => state.opsScope || 'application';
 
   const severityFilter = () => state.opsSeverity || '';
@@ -200,9 +197,9 @@
             <div style="font:11px var(--mono);color:var(--text)">${esc(a.rule || a.action_type || 'no rule matched')}${a.target ? ` → ${esc(a.namespace || 'default')}/${esc(a.target)}` : ''}</div>
             <div style="font:10px var(--mono);color:var(--dim);margin-top:4px">${esc(a.status)} · ${esc(a.result || '')}</div>
           </div>
-          ${a.approval === 'pending'
+          ${a.approval === 'pending' && a.status === 'would_run'
             ? `<div class="det-act"><button class="k pri" data-approve="${esc(a.id)}">Approve</button><button class="k no" data-deny="${esc(a.id)}">Deny</button></div>`
-            : `<span style="font:10px var(--mono);color:var(--dim)">${esc(a.approval)}</span>`}
+            : `<span class="gate">${esc(a.status === 'blocked' ? 'blocked by safety gate' : a.approval)}</span>`}
         </div>`).join('')}</div></section>`;
   }
 

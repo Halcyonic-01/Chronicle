@@ -140,3 +140,52 @@ func TestBuildArgoEdgesLinkApplicationsToWhatTheyDeploy(t *testing.T) {
 		t.Fatalf("an Argo sync should be reachable as a cause, got %#v", upstream)
 	}
 }
+
+// Every meshed pod depends on the mesh control plane, so following those edges
+// makes everything's blast radius the size of the cluster.
+func meshedGraph() *Graph {
+	g := New()
+	g.SetEdges([]Edge{
+		{From: node("Pod", "api-1"), To: node("Service", "redis"), Kind: "calls"},
+		{From: node("Pod", "api-1"), To: Node{Kind: "Service", Name: "linkerd-identity", Namespace: "linkerd"}, Kind: EdgeCallsInfra},
+		{From: node("Pod", "unrelated-1"), To: Node{Kind: "Service", Name: "linkerd-identity", Namespace: "linkerd"}, Kind: EdgeCallsInfra},
+		{From: node("Pod", "stranger-1"), To: Node{Kind: "Service", Name: "linkerd-identity", Namespace: "linkerd"}, Kind: EdgeCallsInfra},
+	})
+	return g
+}
+
+func TestImpactFollowsWhatDependsOnTheFailure(t *testing.T) {
+	impact := victimGraph().Impact("default/Service/redis", 4)
+	for key, want := range map[string]int{"default/Pod/api-1": 1, "default/Service/api": 2, "default/Pod/frontend-1": 3} {
+		if got, reached := impact[key]; !reached || got != want {
+			t.Errorf("%s should be %d hop(s) into the blast radius, got %d (reached=%v)", key, want, got, reached)
+		}
+	}
+}
+
+// Fourteen pods run on one node. A bidirectional walk would hop
+// pod -> node -> every other pod and make everything's blast radius the cluster.
+func TestImpactDoesNotSpreadThroughSharedResources(t *testing.T) {
+	g := New()
+	node := Node{Kind: "Node", Name: "worker-1"}
+	g.SetEdges([]Edge{
+		{From: Node{Kind: "Pod", Name: "mine", Namespace: "default"}, To: node, Kind: "runs_on"},
+		{From: Node{Kind: "Pod", Name: "stranger", Namespace: "other"}, To: node, Kind: "runs_on"},
+	})
+	if _, reached := g.Impact("default/Pod/mine", 4)["other/Pod/stranger"]; reached {
+		t.Fatal("a co-tenant on the same node is not collateral damage")
+	}
+	// The node itself failing is a different matter entirely.
+	if _, reached := g.Impact("/Node/worker-1", 2)["other/Pod/stranger"]; !reached {
+		t.Fatal("a node failure must take its pods with it")
+	}
+}
+
+// Causality still follows the edge: if the mesh control plane fails, the pods
+// plugged into it really do break.
+func TestUpstreamStillFollowsSharedInfrastructure(t *testing.T) {
+	upstream := meshedGraph().Upstream("default/Pod/api-1", 3)
+	if _, reachable := upstream["linkerd/Service/linkerd-identity"]; !reachable {
+		t.Fatal("a mesh outage is a legitimate cause and must stay reachable")
+	}
+}

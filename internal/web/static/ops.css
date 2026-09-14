@@ -252,3 +252,21 @@
 .cand tbody tr { cursor: pointer; }
 .cand tbody tr:hover td { background: var(--panel2); }
 .cand tr.top:hover td { background: #16212d; }
+
+
+/* --- collapsible navigation --------------------------------------------
+   Same collapsed geometry the narrow-viewport rule already used, driven by a
+   class so it can be toggled deliberately on any screen. */
+.topbar > div:first-child { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#nav-toggle { font-size: 13px; line-height: 1; flex-shrink: 0; }
+
+.app-shell.nav-collapsed .sidebar { width: 66px; padding: 18px 8px; }
+.app-shell.nav-collapsed .brand span:not(.brand-mark),
+.app-shell.nav-collapsed .workspace-label,
+.app-shell.nav-collapsed .nav-item span:not(.nav-icon),
+.app-shell.nav-collapsed .sidebar-foot { display: none; }
+.app-shell.nav-collapsed .brand { padding: 0 12px 28px; }
+.app-shell.nav-collapsed .nav-item { justify-content: center; }
+
+/* A decision that cannot change the outcome is reported, not offered. */
+.gate { font: 10px var(--mono); color: var(--amber); border: 1px solid var(--line); padding: 3px 7px; white-space: nowrap; }

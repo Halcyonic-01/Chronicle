@@ -20,23 +20,43 @@
     return positions;
   };
 
-  window.graph = function () {
-    const g = state.graph || { nodes: [], edges: [] }, layout = readLayout();
+  const graphScope = () => state.graphScope || 'application';
+
+  // 174 nodes is not a view, it is a haystack. Scope narrows what is drawn;
+  // nothing is removed from the stored graph.
+  function visibleGraph() {
+    const g = state.graph || { nodes: [], edges: [] };
     const nodes = g.nodes || [], edges = g.edges || [];
+    const scope = graphScope();
+    if (scope === 'all') return { nodes, edges };
+    const keep = new Set(nodes.filter(n => window.chronicleScopeOf(n.Namespace) === scope).map(keyOf));
+    return {
+      nodes: nodes.filter(n => keep.has(keyOf(n))),
+      edges: edges.filter(e => keep.has(keyOf(e.From)) && keep.has(keyOf(e.To)))
+    };
+  }
+
+  window.graph = function () {
+    const layout = readLayout();
+    const { nodes, edges } = visibleGraph();
     const automatic = autoLayout(nodes, edges);
     const maxX = Math.max(1500, ...nodes.map(n => (automatic[keyOf(n)] || {x:0}).x + 300));
     const maxY = Math.max(900, ...nodes.map(n => (automatic[keyOf(n)] || {y:0}).y + 180));
     const nodeMarkup = nodes.length ? nodes.map((n, i) => {
       const p = layout[keyOf(n)] || automatic[keyOf(n)];
       return `<div class="graph-node draggable" data-node="${esc(keyOf(n))}" data-x="${p.x}" data-y="${p.y}" style="left:${p.x}px;top:${p.y}px"><h3>${esc(n.Name)}</h3><small><span class="dot dot-green"></span> ${esc(n.Kind)} · ${esc(n.Namespace)}</small></div>`;
-    }).join('') : empty('No dependency edges', 'The graph collector has not stored active dependencies yet.');
-    return pageHeading('PHASE 2 / DEPENDENCY GRAPH','Service relationships','Connected resources are arranged from upstream to downstream. Drag nodes to refine the layout.',`<button class="button" id="graph-auto">Auto layout</button>`)+`<section class="panel"><div class="graph-toolbar"><input class="input graph-search" id="graph-search" placeholder="Find a service, pod, or namespace…"><button class="button" id="graph-zoom-out">−</button><input class="graph-zoom" id="graph-zoom" type="range" min="35" max="140" value="100" title="Zoom graph"><button class="button" id="graph-zoom-in">+</button><button class="button" id="graph-fit">Fit all</button><button class="button" id="graph-reset">Reset</button><span class="graph-help">DRAG NODES · DRAG BACKGROUND TO PAN · CLICK A NODE FOR DETAILS</span></div><div class="graph-viewport" id="graph-viewport"><div class="graph-canvas" id="graph-canvas" style="width:${maxX}px;height:${maxY}px"><svg class="graph-edges" id="graph-edges"></svg>${nodeMarkup}</div></div><div class="graph-legend"><span><span class="dot dot-green"></span> observed resource</span><span>${nodes.length} NODES</span><span>${edges.length} EDGES</span><span>FLOW: LEFT → RIGHT</span></div></section><p class="page-subtitle" style="margin-top:12px">All live resources are included, including services without a dependency edge. Search narrows the view without deleting resources.</p>`;
+    }).join('') : empty('No resources in this scope', graphScope()==='all' ? 'The graph collector has not stored active dependencies yet.' : 'Try the ALL scope.');
+    return pageHeading('PHASE 2 / DEPENDENCY GRAPH','Service relationships','Connected resources are arranged from upstream to downstream. Drag nodes to refine the layout.',`<button class="button" id="graph-auto">Auto layout</button>`)+`<section class="panel"><div class="graph-toolbar">${scopeSegments('graph-scope', graphScope())}<input class="input graph-search" id="graph-search" placeholder="Find a service, pod, or namespace…"><button class="button" id="graph-zoom-out">−</button><input class="graph-zoom" id="graph-zoom" type="range" min="35" max="140" value="100" title="Zoom graph"><button class="button" id="graph-zoom-in">+</button><button class="button" id="graph-fit">Fit all</button><button class="button" id="graph-reset">Reset</button><span class="graph-help">DRAG NODES · DRAG BACKGROUND TO PAN · CLICK A NODE FOR DETAILS</span></div><div class="graph-viewport" id="graph-viewport"><div class="graph-canvas" id="graph-canvas" style="width:${maxX}px;height:${maxY}px"><svg class="graph-edges" id="graph-edges"></svg>${nodeMarkup}</div></div><div class="graph-legend"><span><span class="dot dot-green"></span> observed resource</span><span>${nodes.length} NODES</span><span>${edges.length} EDGES</span><span>FLOW: LEFT → RIGHT</span></div></section><p class="page-subtitle" style="margin-top:12px">All live resources are included, including services without a dependency edge. Search narrows the view without deleting resources.</p>`;
   };
 
   function setupGraph() {
+    document.querySelectorAll('[data-graph-scope]').forEach(button => button.onclick = () => {
+      state.graphScope = button.dataset.graphScope;
+      window.render();
+    });
     const viewport = document.querySelector('#graph-viewport'), canvas = document.querySelector('#graph-canvas');
     if (!viewport || !canvas) return;
-    const g = state.graph || { nodes: [], edges: [] }, nodes = g.nodes || [], edges = g.edges || [];
+    const { nodes, edges } = visibleGraph();
     let zoom = 1, panX = 0, panY = 0, selected = null, dragging = null, panning = null;
     const nodeMap = new Map(nodes.map(n => [keyOf(n), n]));
     const nodeEl = key => canvas.querySelector(`[data-node="${CSS.escape(key)}"]`);

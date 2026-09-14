@@ -45,6 +45,17 @@ func BuildServiceEdges(svcs []corev1.Service, pods []corev1.Pod) []Edge {
 // names a node that does not exist and the causal filter discards it.
 const ArgoNamespace = "argocd"
 
+// sidecarContainers are injected proxies. Their environment names the mesh
+// control plane, which every meshed pod in the cluster depends on equally —
+// so those edges say nothing about how the application is wired together.
+var sidecarContainers = map[string]bool{"linkerd-proxy": true, "istio-proxy": true, "envoy": true}
+
+// EdgeCallsInfra is a dependency on shared infrastructure rather than on
+// another application component. Causality still follows it — if the mesh
+// control plane fails, the pods do too — but blast radius ignores it, because
+// "reachable through the thing everything is plugged into" is not impact.
+const EdgeCallsInfra = "calls_infra"
+
 // argoInstanceLabels are the labels Argo CD stamps on the workloads it manages.
 var argoInstanceLabels = []string{"argocd.argoproj.io/instance", "app.kubernetes.io/instance"}
 
@@ -99,11 +110,15 @@ func InferCallEdges(pod corev1.Pod, knownSvcs map[string]bool) []Edge {
 			if !knownSvcs[namespace+"/"+host] {
 				continue
 			}
+			kind, weight := "calls", 0.7 // inferred, so lower confidence
+			if sidecarContainers[c.Name] {
+				kind, weight = EdgeCallsInfra, 0.3
+			}
 			edges = append(edges, Edge{
 				From:   Node{Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace},
 				To:     Node{Kind: "Service", Name: host, Namespace: namespace},
-				Kind:   "calls",
-				Weight: 0.7, // inferred, so lower confidence
+				Kind:   kind,
+				Weight: weight,
 				Source: "static",
 			})
 		}

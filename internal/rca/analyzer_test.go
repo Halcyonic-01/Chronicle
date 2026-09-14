@@ -139,3 +139,31 @@ func TestScoreFactorsExplainTheScoreTheyProduce(t *testing.T) {
 		t.Fatalf("every factor should still have a sentence: %d reasons, %d factors", len(candidate.Reasons), len(candidate.Factors))
 	}
 }
+
+// A factor that saturates at five affected services is a constant, and a
+// constant cannot rank anything.
+func TestBlastRadiusFactorKeepsDiscriminatingAtScale(t *testing.T) {
+	now := time.Now().UTC()
+	symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api"}
+	factorFor := func(affected int) float64 {
+		c := Candidate{
+			Event:            event.Event{IngestedAt: now.Add(-time.Second), Namespace: "default", EntityKind: "Service", EntityName: "redis", Type: "deploy"},
+			AffectedServices: affected,
+		}
+		score(&c, symptom)
+		for _, f := range c.Factors {
+			if f.Label == "Blast radius" {
+				return f.Multiplier
+			}
+		}
+		t.Fatalf("no blast radius factor for %d services", affected)
+		return 0
+	}
+	small, medium, large := factorFor(5), factorFor(20), factorFor(45)
+	if !(small < medium && medium < large) {
+		t.Fatalf("blast radius must keep separating candidates: 5=%.4f 20=%.4f 45=%.4f", small, medium, large)
+	}
+	if large >= 1.25 {
+		t.Fatalf("the factor must stay under its ceiling, got %.4f", large)
+	}
+}

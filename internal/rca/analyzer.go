@@ -11,6 +11,7 @@ import (
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
+	"github.com/tidwall/gjson"
 )
 
 type EventSource interface {
@@ -52,6 +53,7 @@ type Candidate struct {
 	Distance         int         `json:"distance"`
 	Score            float64     `json:"score"`
 	Reasons          []string    `json:"reasons"`
+	Reverts          string      `json:"reverts,omitempty"`
 	Factors          []Factor    `json:"factors"`
 	AffectedServices int         `json:"affected_services"`
 	AffectedNodes    int         `json:"affected_nodes"`
@@ -152,6 +154,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	if edges != nil {
 		result.Evidence = evidenceEdges(edges, upstream, key(symptom))
 	}
+	reverts := revertingChanges(raw)
 	candidates := make([]Candidate, 0, len(raw))
 	for _, e := range raw {
 		if !e.IngestedAt.Before(symptom.IngestedAt) || e.ID == symptom.ID {
@@ -161,7 +164,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		if !reachable {
 			continue
 		}
-		c := Candidate{Event: e, Distance: distance}
+		c := Candidate{Event: e, Distance: distance, Reverts: reverts[e.ID]}
 		impact := summarizeImpact(impactOf(key(e)))
 		c.AffectedServices, c.AffectedNodes, c.BlastRadiusScore = impact.AffectedServices, impact.AffectedNodes, impact.Score
 		score(&c, symptom)
@@ -261,10 +264,16 @@ func score(c *Candidate, symptom event.Event) {
 	c.Factors = append(c.Factors, Factor{Label: "Graph distance", Detail: fmt.Sprintf("%d hop(s) upstream", c.Distance), Multiplier: df})
 
 	if c.AffectedServices > 0 {
-		impactFactor := 1 + math.Min(0.25, float64(c.AffectedServices)*0.05)
+		affected := float64(c.AffectedServices)
+		impactFactor := 1 + 0.25*affected/(affected+10)
 		s *= impactFactor
 		c.Reasons = append(c.Reasons, fmt.Sprintf("%d affected service(s) (×%.2f)", c.AffectedServices, impactFactor))
 		c.Factors = append(c.Factors, Factor{Label: "Blast radius", Detail: fmt.Sprintf("%d service(s) affected", c.AffectedServices), Multiplier: impactFactor})
+	}
+	if c.Reverts != "" {
+		s *= remediationFactor
+		c.Reasons = append(c.Reasons, fmt.Sprintf("undoes an earlier change (×%.2f)", remediationFactor))
+		c.Factors = append(c.Factors, Factor{Label: "Remediation", Detail: "undoes an earlier change in this window", Multiplier: remediationFactor})
 	}
 	c.Score = math.Min(s, 1.0)
 }
@@ -292,4 +301,49 @@ func FallbackNarrative(r *Result) string {
 		impact = fmt.Sprintf(", affecting %d downstream service(s)", r.BlastRadius.AffectedServices)
 	}
 	return fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom%s), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, c.Event.IngestedAt.Format(time.RFC3339), c.Distance, r.Symptom.IngestedAt.Sub(c.Event.IngestedAt).Seconds(), impact, r.Confidence, r.Scanned, len(r.Candidates))
+}
+
+// remediationFactor damps a change that undoes an earlier one. It is a
+// demotion rather than an exclusion: rolling back to a bad older version is a
+// real way to cause an incident, so the candidate stays rankable.
+const remediationFactor = 0.35
+
+// revertingChanges finds events that undo an earlier change to the same target
+// inside the causal window, returning the reverting event's ID mapped to the
+// event it undoes.
+//
+// Fixing an outage puts a change into the causal window like any other, and
+// recency alone ranks it above the break it was fixing: restoring an image at
+// the moment the pod finally reports Failed scores higher than the deploy that
+// broke it a minute earlier. An exact there-and-back pair is the one signal
+// that separates the two without guessing.
+func revertingChanges(events []event.Event) map[string]string {
+	type change struct{ id, from, to string }
+	history := make(map[string][]change)
+	reverts := make(map[string]string)
+	for _, e := range events {
+		var from, to string
+		switch e.Type {
+		case "deploy":
+			from = gjson.GetBytes(e.Payload, "old_image").String()
+			to = gjson.GetBytes(e.Payload, "new_image").String()
+		case "scale":
+			from = gjson.GetBytes(e.Payload, "old_replicas").String()
+			to = gjson.GetBytes(e.Payload, "new_replicas").String()
+		default:
+			continue
+		}
+		if from == "" || to == "" || from == to {
+			continue
+		}
+		target := key(e)
+		for _, earlier := range history[target] {
+			if earlier.from == to && earlier.to == from {
+				reverts[e.ID] = earlier.id
+				break
+			}
+		}
+		history[target] = append(history[target], change{id: e.ID, from: from, to: to})
+	}
+	return reverts
 }

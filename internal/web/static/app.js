@@ -32,6 +32,17 @@ const fmtTime = (v, withDate=false) => { const d = new Date(v); if (Number.isNaN
 const ago = (v) => { const s = Math.max(0, (Date.now()-new Date(v).getTime())/1000); if(s<60)return `${Math.round(s)}s`; if(s<3600)return `${Math.round(s/60)}m`; if(s<86400)return `${Math.round(s/3600)}h`; return `${Math.round(s/86400)}d`; };
 const severity = (v='info') => `<span class="severity ${esc(v)}">${esc(v)}</span>`;
 const empty = (title, copy) => `<div class="none">${esc(title)}${copy ? ' — ' + esc(copy) : ''}</div>`;
+// Collect everything, triage what you own. These namespaces stay in the event
+// store and in the dependency graph; they are simply not what you are on call
+// for. Shared so incidents, the graph and the posture list never drift apart.
+const PLATFORM_NAMESPACES = new Set(['kube-system','kube-public','kube-node-lease','monitoring','linkerd','local-path-storage','chronicle','argocd','github','terraform']);
+const scopeOf = (namespace) => PLATFORM_NAMESPACES.has(namespace) ? 'platform' : 'application';
+window.chronicleScopeOf = scopeOf;
+function scopeSegments(id, current){
+  return `<div class="seg">${['application','platform','all'].map(scope =>
+    `<button type="button" data-${id}="${scope}" aria-pressed="${current===scope}">${scope.toUpperCase()}</button>`).join('')}</div>`;
+}
+
 const targetOf = (e) => `${e.namespace || 'cluster'}/${e.entity_name || '—'}`;
 
 // Every API call goes through api() so an optional CHRONICLE_API_TOKEN can be
@@ -201,9 +212,9 @@ function healing(){
           <td class="num">${(a.confidence||0).toFixed(2)}</td>
           <td class="${a.status==='blocked'||a.status==='failed'?'sev-warning':''}">${esc(a.status)}</td>
           <td class="dim">${esc(a.approval)}</td>
-          <td>${a.approval==='pending'
+          <td>${a.approval==='pending' && a.status==='would_run'
             ? `<button class="k pri" data-approve="${esc(a.id)}">approve</button> <button class="k no" data-deny="${esc(a.id)}">deny</button>`
-            : `<span class="dim">${esc(a.result||'')}</span>`}</td>
+            : `<span class="dim">${esc(a.result||a.approval||'')}</span>`}</td>
         </tr>`).join('')}</tbody></table>`
         : empty('No remediation actions recorded','run RCA on a signal; a matched rule appears here as an audited decision')}
       <div class="sec-h" style="border-top:1px solid var(--line2)"><b>Rules</b><span>CONFIDENCE FLOOR · RATE LIMIT</span></div>
@@ -351,6 +362,25 @@ async function decide(id,approved){
 }
 
 function showToast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
+
+// Navigation collapse persists per browser: an operator who wants the width
+// back should not have to reclaim it on every page load.
+const navKey = 'chronicle.nav.collapsed';
+function setNavCollapsed(collapsed){
+  document.querySelector('.app-shell').classList.toggle('nav-collapsed', collapsed);
+  const toggle = $('#nav-toggle');
+  if(toggle) toggle.setAttribute('aria-expanded', String(!collapsed));
+  try { localStorage.setItem(navKey, collapsed ? '1' : '0'); } catch (_) {}
+}
+function toggleNav(){ setNavCollapsed(!document.querySelector('.app-shell').classList.contains('nav-collapsed')); }
+try { setNavCollapsed(localStorage.getItem(navKey) === '1'); } catch (_) {}
+$('#nav-toggle').onclick = toggleNav;
+document.addEventListener('keydown', event => {
+  if(event.key !== '[' || event.metaKey || event.ctrlKey || event.altKey) return;
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
+  event.preventDefault();
+  toggleNav();
+});
 
 $('#refresh').onclick=()=>loadEvents();
 window.addEventListener('hashchange',()=>{ state.page=hashPage(); render(); });
