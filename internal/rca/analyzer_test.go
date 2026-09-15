@@ -175,23 +175,94 @@ func deployEvent(id string, at time.Time, from, to string) event.Event {
 	}
 }
 
-// Fixing an outage puts a change into the causal window like any other, and
-// recency alone ranks the fix above the break it was fixing.
-func TestRevertingChangesAreIdentified(t *testing.T) {
-	now := time.Now().UTC()
-	broke := deployEvent("broke", now.Add(-90*time.Second), "latest", "nonexistent")
-	fixed := deployEvent("fixed", now.Add(-5*time.Second), "nonexistent", "latest")
-	unrelated := deployEvent("unrelated", now.Add(-60*time.Second), "v1", "v2")
+func failureOn(id string, at time.Time, name string) event.Event {
+	return event.Event{ID: id, IngestedAt: at, Namespace: "default", EntityKind: "Pod", EntityName: name, Type: "k8s_event", Severity: "warning", Title: "ErrImageNeverPull"}
+}
 
-	reverts := revertingChanges([]event.Event{broke, unrelated, fixed})
+func recoveryOn(id string, at time.Time, name string) event.Event {
+	return event.Event{ID: id, IngestedAt: at, Namespace: "default", EntityKind: "Pod", EntityName: name, Type: "became_ready", Severity: "info", Title: "started serving traffic"}
+}
+
+// Everything the worker deployment owns, for the failure-scope lookup.
+func workerScope(string) map[string]int {
+	return map[string]int{"default/Deployment/worker": 0, "default/Pod/worker-1": 1}
+}
+
+// A change made while its target is failing is a repair, not a cause.
+func TestRemediationRequiresAFailingTarget(t *testing.T) {
+	now := time.Now().UTC()
+	window := []event.Event{
+		deployEvent("broke", now.Add(-120*time.Second), "latest", "nonexistent"),
+		failureOn("failing", now.Add(-100*time.Second), "worker-1"),
+		deployEvent("fixed", now.Add(-90*time.Second), "nonexistent", "latest"),
+	}
+	reverts := revertingChanges(window, workerScope)
 	if reverts["fixed"] != "broke" {
-		t.Fatalf("the restore should be recognised as undoing the break, got %#v", reverts)
+		t.Fatalf("a change made while the target was failing is a remediation, got %#v", reverts)
 	}
 	if _, marked := reverts["broke"]; marked {
 		t.Error("the break undoes nothing that came before it")
 	}
-	if _, marked := reverts["unrelated"]; marked {
-		t.Error("a forward change to a different image is not a revert")
+}
+
+// The bug this replaced: break, fix, break, fix alternates, so every change
+// reverses the one before it. Judging by "were there failures in the interval"
+// still marked the second break, because the previous episode's signals had
+// not finished draining. Only an explicit recovery closes an episode.
+func TestRecoverySignalEndsTheEpisode(t *testing.T) {
+	now := time.Now().UTC()
+	window := []event.Event{
+		deployEvent("broke1", now.Add(-300*time.Second), "latest", "nonexistent"),
+		failureOn("failing1", now.Add(-280*time.Second), "worker-1"),
+		deployEvent("fixed1", now.Add(-260*time.Second), "nonexistent", "latest"),
+		// The previous episode's signals are still draining after the repair:
+		// this is what made "were there failures in the interval?" mark the
+		// next change as a repair too.
+		failureOn("draining", now.Add(-255*time.Second), "worker-1"),
+		recoveryOn("ready", now.Add(-250*time.Second), "worker-1"),
+		// Twenty seconds later someone breaks it again. The target had
+		// recovered, so this is a fresh cause, not part of the repair.
+		deployEvent("broke2", now.Add(-230*time.Second), "latest", "nonexistent"),
+		failureOn("failing2", now.Add(-210*time.Second), "worker-1"),
+		deployEvent("fixed2", now.Add(-200*time.Second), "nonexistent", "latest"),
+	}
+	reverts := revertingChanges(window, workerScope)
+	for _, fix := range []string{"fixed1", "fixed2"} {
+		if _, marked := reverts[fix]; !marked {
+			t.Errorf("%s repaired a failing target and should be marked", fix)
+		}
+	}
+	for _, brk := range []string{"broke1", "broke2"} {
+		if _, marked := reverts[brk]; marked {
+			t.Errorf("%s was made after the target recovered; it is a cause, not a repair", brk)
+		}
+	}
+}
+
+// Quiet is not the same as healthy: without an explicit recovery the episode
+// is still open, so a redeploy during it is still a repair.
+func TestSilenceDoesNotEndAnEpisode(t *testing.T) {
+	now := time.Now().UTC()
+	window := []event.Event{
+		deployEvent("broke", now.Add(-600*time.Second), "latest", "nonexistent"),
+		failureOn("failing", now.Add(-580*time.Second), "worker-1"),
+		deployEvent("fixed", now.Add(-60*time.Second), "nonexistent", "latest"),
+	}
+	if _, marked := revertingChanges(window, workerScope)["fixed"]; !marked {
+		t.Fatal("no recovery arrived, so the episode was still open")
+	}
+}
+
+// A recovery seen while nothing was failing resolves nothing.
+func TestRecoveryWithoutAFailureHasNoEffect(t *testing.T) {
+	now := time.Now().UTC()
+	window := []event.Event{
+		recoveryOn("ready", now.Add(-300*time.Second), "worker-1"),
+		deployEvent("broke", now.Add(-200*time.Second), "latest", "nonexistent"),
+		deployEvent("second", now.Add(-100*time.Second), "nonexistent", "latest"),
+	}
+	if _, marked := revertingChanges(window, workerScope)["second"]; marked {
+		t.Fatal("nothing was failing, so the reversal is not a repair")
 	}
 }
 
@@ -206,6 +277,7 @@ func TestTheFixDoesNotOutrankTheBreak(t *testing.T) {
 	}}
 	window := []event.Event{
 		deployEvent("broke", now.Add(-47*time.Second), "latest", "nonexistent"),
+		failureOn("failing", now.Add(-20*time.Second), "worker-1"),
 		deployEvent("fixed", now.Add(-1*time.Second), "nonexistent", "latest"),
 	}
 
@@ -213,7 +285,7 @@ func TestTheFixDoesNotOutrankTheBreak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Candidates) != 2 {
+	if len(got.Candidates) < 2 {
 		t.Fatalf("both deploys should be graph-reachable candidates, got %d", len(got.Candidates))
 	}
 	if got.Candidates[0].Event.ID != "broke" {
@@ -226,5 +298,36 @@ func TestTheFixDoesNotOutrankTheBreak(t *testing.T) {
 	// Demoted, not hidden: a rollback to a bad older version is a real cause.
 	if got.Candidates[1].Score <= 0 {
 		t.Error("a remediation stays rankable rather than being excluded")
+	}
+}
+
+// Observed live: a rolling update never repairs the failing pod, it replaces
+// it. The broken pod is deleted and a different pod serves traffic, so no pod
+// is ever seen becoming ready and the episode would never close.
+func TestDeletingTheFailingResourceEndsItsEpisode(t *testing.T) {
+	now := time.Now().UTC()
+	scope := func(string) map[string]int {
+		return map[string]int{"default/Deployment/worker": 0, "default/Pod/worker-broken-1": 1, "default/Pod/worker-broken-2": 1}
+	}
+	deleted := func(id string, at time.Time, name string) event.Event {
+		return event.Event{ID: id, IngestedAt: at, Namespace: "default", EntityKind: "Pod", EntityName: name, Type: "resource_deleted", Severity: "info"}
+	}
+	window := []event.Event{
+		deployEvent("broke1", now.Add(-300*time.Second), "latest", "nonexistent"),
+		failureOn("failing1", now.Add(-295*time.Second), "worker-broken-1"),
+		deployEvent("fixed1", now.Add(-255*time.Second), "nonexistent", "latest"),
+		deleted("gone1", now.Add(-254*time.Second), "worker-broken-1"),
+		deployEvent("broke2", now.Add(-235*time.Second), "latest", "nonexistent"),
+		failureOn("failing2", now.Add(-230*time.Second), "worker-broken-2"),
+		deployEvent("fixed2", now.Add(-190*time.Second), "nonexistent", "latest"),
+	}
+	reverts := revertingChanges(window, scope)
+	for _, fix := range []string{"fixed1", "fixed2"} {
+		if _, marked := reverts[fix]; !marked {
+			t.Errorf("%s was made while a pod was failing and is a repair", fix)
+		}
+	}
+	if _, marked := reverts["broke2"]; marked {
+		t.Error("the failing pod had been deleted; this break is a fresh cause")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
@@ -154,7 +155,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	if edges != nil {
 		result.Evidence = evidenceEdges(edges, upstream, key(symptom))
 	}
-	reverts := revertingChanges(raw)
+	reverts := revertingChanges(raw, impactOf)
 	candidates := make([]Candidate, 0, len(raw))
 	for _, e := range raw {
 		if !e.IngestedAt.Before(symptom.IngestedAt) || e.ID == symptom.ID {
@@ -308,18 +309,22 @@ func FallbackNarrative(r *Result) string {
 // real way to cause an incident, so the candidate stays rankable.
 const remediationFactor = 0.35
 
-// revertingChanges finds events that undo an earlier change to the same target
-// inside the causal window, returning the reverting event's ID mapped to the
-// event it undoes.
+// revertingChanges finds changes that undo the previous change to the same
+// target *after that change had already started failing*, returning the
+// reverting event's ID mapped to the event it undoes.
 //
 // Fixing an outage puts a change into the causal window like any other, and
-// recency alone ranks it above the break it was fixing: restoring an image at
-// the moment the pod finally reports Failed scores higher than the deploy that
-// broke it a minute earlier. An exact there-and-back pair is the one signal
-// that separates the two without guessing.
-func revertingChanges(events []event.Event) map[string]string {
+// recency alone ranks the fix above the break it was fixing. But a there-and-
+// back pair is not enough on its own: break, fix, break, fix alternates, so
+// every change reverses the one before it and marking them all demotes the
+// whole window equally — which changes no ranking at all.
+//
+// What separates the two is that nobody fixes something before it breaks. A
+// change only counts as a remediation when the thing it targets was already
+// emitting failures when it was made.
+func revertingChanges(events []event.Event, affected func(target string) map[string]int) map[string]string {
 	type change struct{ id, from, to string }
-	history := make(map[string][]change)
+	previous := make(map[string]change)
 	reverts := make(map[string]string)
 	for _, e := range events {
 		var from, to string
@@ -337,13 +342,66 @@ func revertingChanges(events []event.Event) map[string]string {
 			continue
 		}
 		target := key(e)
-		for _, earlier := range history[target] {
-			if earlier.from == to && earlier.to == from {
-				reverts[e.ID] = earlier.id
-				break
-			}
+		last, seen := previous[target]
+		previous[target] = change{id: e.ID, from: from, to: to}
+		if !seen || last.from != to || last.to != from {
+			continue // not a there-and-back pair with the change right before it
 		}
-		history[target] = append(history[target], change{id: e.ID, from: from, to: to})
+		if failingAt(events, affected(target), e.IngestedAt) {
+			reverts[e.ID] = last.id
+		}
 	}
 	return reverts
+}
+
+// isRecovery reports whether an event says a resource became healthy again.
+// Chronicle already emits these explicitly, which is what makes the state
+// machine below possible without inventing a heuristic.
+func isRecovery(e event.Event) bool {
+	switch e.Type {
+	case "became_ready", "application_healthy":
+		return true
+	case "resource_status":
+		phase := gjson.GetBytes(e.Payload, "phase").String()
+		return phase == "Running" || phase == "Completed"
+	}
+	return strings.HasSuffix(e.Type, "_resolved")
+}
+
+// failingAt reports whether anything the target affects was in a failing state
+// at that instant, using hysteresis: the two directions are not symmetric.
+//
+// A failure opens an episode immediately. Closing it requires an explicit
+// signal — never merely the absence of further failures, because quiet and
+// healthy are not the same thing, and a redeploy that lands while the previous
+// failures have simply stopped arriving would otherwise read as a repair. This
+// mirrors how monitors avoid flapping with separate alert and recovery
+// thresholds; a recovery seen while nothing was failing has no effect, exactly
+// as a metric crossing a recovery threshold it never breached resolves nothing.
+//
+// Episodes are tracked per entity, not per target, because a rolling update
+// replaces the failing pod rather than repairing it: the broken pod is deleted
+// and a different one serves traffic, so no pod is ever observed becoming
+// ready again. A deleted resource therefore closes its own episode — whatever
+// was unhealthy no longer exists.
+//
+// Events must be in ascending time order, which EventsBetween guarantees.
+func failingAt(events []event.Event, scope map[string]int, at time.Time) bool {
+	failing := make(map[string]bool)
+	for _, e := range events {
+		if !e.IngestedAt.Before(at) {
+			break
+		}
+		entity := key(e)
+		if _, within := scope[entity]; !within {
+			continue
+		}
+		switch {
+		case e.Type == "resource_deleted", isRecovery(e):
+			delete(failing, entity)
+		case e.Severity == "warning" || e.Severity == "critical":
+			failing[entity] = true
+		}
+	}
+	return len(failing) > 0
 }
