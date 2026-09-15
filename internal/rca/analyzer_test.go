@@ -2,6 +2,7 @@ package rca
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -329,5 +330,149 @@ func TestDeletingTheFailingResourceEndsItsEpisode(t *testing.T) {
 	}
 	if _, marked := reverts["broke2"]; marked {
 		t.Error("the failing pod had been deleted; this break is a fresh cause")
+	}
+}
+
+func candidateAt(score float64, hops int) Candidate {
+	return Candidate{Score: score, Distance: hops}
+}
+
+// The bug: confidence multiplied the raw score, which already carries the
+// graph-distance penalty, so it was structurally capped at 0.89 for a one-hop
+// cause and 0.57 at three hops. rollback-bad-deploy needs 0.90 and could
+// therefore never fire, however obvious the cause was.
+func TestConfidenceIsNotCappedByGraphDistance(t *testing.T) {
+	for _, hops := range []int{1, 2, 3, 4} {
+		// A perfect candidate at this distance: nothing else competes and its
+		// score is the most the scoring can produce that far out.
+		best := distanceFactor(hops) * 1.25
+		overall, _, _ := confidence([]Candidate{candidateAt(best, hops)})
+		if overall < 0.9 {
+			t.Errorf("an unambiguous cause %d hop(s) away reached only %.3f; a 0.90 gate would be unreachable", hops, overall)
+		}
+	}
+}
+
+// Margin confidence: how clearly the leader beats the runner-up.
+func TestConfidenceFallsWhenCandidatesAreTied(t *testing.T) {
+	clear, _, clearSeparation := confidence([]Candidate{candidateAt(0.64, 1), candidateAt(0.10, 1)})
+	tied, _, tiedSeparation := confidence([]Candidate{candidateAt(0.64, 1), candidateAt(0.63, 1)})
+	if tied >= clear {
+		t.Fatalf("two near-tied candidates should be less conclusive: tied %.3f vs clear %.3f", tied, clear)
+	}
+	if tiedSeparation > 0.55 || clearSeparation < 0.9 {
+		t.Fatalf("separation should collapse towards 0.5 when tied and approach 1 when dominant: tied %.3f clear %.3f", tiedSeparation, clearSeparation)
+	}
+}
+
+// A lone candidate has nothing to compete with, but that is not the same as
+// being a good explanation.
+func TestASingleWeakCandidateIsNotConfident(t *testing.T) {
+	overall, strength, separation := confidence([]Candidate{candidateAt(0.05, 1)})
+	if separation != 1 {
+		t.Errorf("with no runner-up, separation cannot argue either way: %.3f", separation)
+	}
+	if strength > 0.2 || overall > 0.2 {
+		t.Errorf("a weak lone candidate must stay unconfident: strength %.3f overall %.3f", strength, overall)
+	}
+}
+
+func TestConfidenceIsBounded(t *testing.T) {
+	overall, _, _ := confidence(nil)
+	if overall != 0 {
+		t.Errorf("no candidates means no confidence, got %.3f", overall)
+	}
+	if overall, _, _ := confidence([]Candidate{candidateAt(5, 1), candidateAt(0, 1)}); overall > 1 {
+		t.Errorf("confidence must stay within 0..1, got %.3f", overall)
+	}
+}
+
+func logNoise(id string, at time.Time, seconds int) event.Event {
+	return event.Event{
+		ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Pod", EntityName: "worker-1",
+		Type: "log_error", Severity: "warning",
+		Title: fmt.Sprintf("[  %d.413010s] INFO ThreadId(01) inbound:server{port=8080}", seconds),
+	}
+}
+
+// One misbehaving container emits the same line every 30 seconds. Ranked as
+// individual events they fill every slot and push out the deploy that caused
+// them, which is the only candidate anyone can act on.
+func TestRepeatedNoiseCollapsesIntoOneCandidate(t *testing.T) {
+	now := time.Now().UTC()
+	node := func(kind, name string) graph.Node { return graph.Node{Kind: kind, Name: name, Namespace: "default"} }
+	source := &countingGraph{edges: []graph.Edge{
+		{From: node("Deployment", "worker"), To: node("Pod", "worker-1"), Kind: "owns", Weight: 1, Source: "static"},
+	}}
+	window := []event.Event{deployEvent("deploy", now.Add(-500*time.Second), "latest", "nonexistent")}
+	for i := 1; i <= 12; i++ {
+		window = append(window, logNoise(fmt.Sprintf("noise-%d", i), now.Add(-time.Duration(i*20)*time.Second), 500+i))
+	}
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "worker-1", Type: "k8s_event", Severity: "warning"}
+
+	got, err := (&Analyzer{Events: fakeEvents(window), Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawDeploy bool
+	var noiseCandidates, noiseOccurrences int
+	for _, c := range got.Candidates {
+		if c.Event.Type == "deploy" {
+			sawDeploy = true
+		}
+		if c.Event.Type == "log_error" {
+			noiseCandidates++
+			noiseOccurrences = c.Occurrences
+		}
+	}
+	if !sawDeploy {
+		t.Fatalf("the deploy was crowded out by repeated noise: %d candidates returned", len(got.Candidates))
+	}
+	if noiseCandidates != 1 {
+		t.Fatalf("twelve copies of one log line are one hypothesis, got %d candidates", noiseCandidates)
+	}
+	if noiseOccurrences != 12 {
+		t.Errorf("the repeat count should be kept, got %d", noiseOccurrences)
+	}
+}
+
+// An event that happened before the symptom but reached the store after it is
+// exactly the deploy that caused the incident: collectors notice changes last.
+func TestLateArrivingCauseIsStillConsidered(t *testing.T) {
+	now := time.Now().UTC()
+	node := func(kind, name string) graph.Node { return graph.Node{Kind: kind, Name: name, Namespace: "default"} }
+	source := &countingGraph{edges: []graph.Edge{
+		{From: node("Deployment", "worker"), To: node("Pod", "worker-1"), Kind: "owns", Weight: 1, Source: "static"},
+	}}
+	late := deployEvent("late", now.Add(-40*time.Second), "latest", "nonexistent")
+	late.OccurredAt = now.Add(-40 * time.Second) // happened before the symptom
+	late.IngestedAt = now.Add(5 * time.Second)   // but was seen after it
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "worker-1", Type: "k8s_event", Severity: "warning"}
+
+	got, err := (&Analyzer{Events: fakeEvents([]event.Event{late}), Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "late" {
+		t.Fatalf("a cause ingested after the symptom but which happened before it must still rank: %+v", got.Candidates)
+	}
+	if !got.Provisional {
+		t.Error("a symptom this recent may still be missing events and should say so")
+	}
+}
+
+// A repeating Kubernetes Event keeps the timestamp of when its series began.
+// Trusting that dates a warning still firing now to a quarter of an hour ago,
+// and its causal window then excludes the change that caused it.
+func TestImplausibleEventTimeFallsBackToIngestion(t *testing.T) {
+	now := time.Now().UTC()
+	stale := event.Event{ID: "stale", OccurredAt: now.Add(-15 * time.Minute), IngestedAt: now}
+	if got := causalTime(stale); !got.Equal(now) {
+		t.Fatalf("an event claiming to be 15 minutes older than its arrival should not be trusted, got %v", got)
+	}
+	// Ordinary lateness is still honoured.
+	late := event.Event{ID: "late", OccurredAt: now.Add(-20 * time.Second), IngestedAt: now}
+	if got := causalTime(late); !got.Equal(late.OccurredAt) {
+		t.Fatalf("a normally late event must keep its own timestamp, got %v", got)
 	}
 }

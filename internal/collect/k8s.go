@@ -130,6 +130,7 @@ func (k *K8sCollector) fromK8sEvent(ev *corev1.Event) {
 	// Create event representation
 	e := event.Event{
 		Source:     "k8s",
+		OccurredAt: k8sEventTime(ev),
 		Namespace:  ev.InvolvedObject.Namespace,
 		EntityKind: ev.InvolvedObject.Kind,
 		EntityName: ev.InvolvedObject.Name,
@@ -505,4 +506,27 @@ func isHex(value string) bool {
 		}
 	}
 	return value != ""
+}
+
+// k8sEventTime recovers when this occurrence of a Kubernetes Event happened.
+//
+// Field order matters and is not obvious: a repeating Event keeps its original
+// EventTime and FirstTimestamp for the whole series while Kubernetes re-emits
+// it with an incremented count. Reading those first dates an occurrence to when
+// the series began — a warning still firing now looks fifteen minutes old, and
+// its causal window then excludes the change that caused it.
+func k8sEventTime(ev *corev1.Event) time.Time {
+	if ev.Series != nil && !ev.Series.LastObservedTime.IsZero() {
+		return ev.Series.LastObservedTime.Time.UTC()
+	}
+	if !ev.LastTimestamp.IsZero() {
+		return ev.LastTimestamp.Time.UTC()
+	}
+	if !ev.EventTime.IsZero() {
+		return ev.EventTime.Time.UTC()
+	}
+	if !ev.FirstTimestamp.IsZero() {
+		return ev.FirstTimestamp.Time.UTC()
+	}
+	return time.Time{}
 }

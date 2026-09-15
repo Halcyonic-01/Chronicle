@@ -227,19 +227,21 @@
       return `<tr class="${i === focus ? 'top' : ''}" data-cand="${i}">
         <td class="num">${i + 1}</td>
         <td><span class="bar"><i style="width:${Math.round((c.score || 0) * 100)}%"></i></span>${(c.score || 0).toFixed(3)}</td>
-        <td>${esc(c.event.type)}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div></td>
+        <td>${esc(c.event.type)}${c.occurrences > 1 ? `<span class="rep">×${c.occurrences}</span>` : ''}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div></td>
         <td class="num">${Math.round(gap / 1000)}s</td>
         <td class="num">${c.distance}</td>
         <td class="num">${c.affected_services || 0}</td>
       </tr>`;
     }).join('');
     return `<div class="sec-body">
+      ${r.provisional ? `<div class="provisional">Provisional — this symptom is newer than the ${'30s'} lateness allowance, so events explaining it may still be arriving. Re-run shortly to confirm.</div>` : ''}
       <div class="conf${confidence < 0.5 ? ' low' : ''}">
         <span class="conf-n">${pct}%</span>
         <span class="conf-t"><i style="width:${pct}%"></i></span>
-        <span class="conf-l">${confidence < 0.5 ? 'INCONCLUSIVE' : 'CONFIDENCE'} · BLAST RADIUS ${r.blast_radius ? r.blast_radius.affected_services : 0} SVC / ${r.blast_radius ? r.blast_radius.affected_nodes : 0} NODES</span>
+        <span class="conf-l">${confidence < 0.5 ? 'INCONCLUSIVE' : 'CONFIDENCE'}</span>
+        <span class="conf-split" title="Evidence strength of the leading candidate, multiplied by how clearly it beats the runner-up">EVIDENCE ${Math.round((r.strength || 0) * 100)}% × SEPARATION ${Math.round((r.separation || 0) * 100)}%</span>
       </div>
-      <table class="cand"><thead><tr><th>#</th><th>Score</th><th>Cause · target</th><th class="num">Gap</th><th class="num">Hops</th><th class="num">Svc</th></tr></thead><tbody>${rows}</tbody></table>
+      <table class="cand"><thead><tr><th>#</th><th>Score</th><th>Cause · target</th><th class="num">Gap</th><th class="num">Hops</th><th class="num" title="Services affected if this candidate fails">Svc</th></tr></thead><tbody>${rows}</tbody></table>
       ${derivation(r.candidates[focus] || r.candidates[0])}
       ${r.narrative ? `<div class="narr"><span class="narr-l">Narrative</span><p class="note">${esc(r.narrative)}</p></div>` : ''}
     </div>`;
@@ -428,12 +430,13 @@
     if (!result || result === 'loading' || result.error || !result.candidates || !result.candidates.length) return '';
     const candidate = result.candidates[Math.min(focusIndex(g), result.candidates.length - 1)];
     const radius = result.blast_radius || {};
-    return `<section class="sec"><div class="sec-h"><b>Causal path</b><span>SELECTED CANDIDATE \u2192 SYMPTOM</span></div>
-        <div class="sec-body">${causalPath(result, candidate)}</div>
+    return `<section class="sec"><div class="sec-h"><b>Causal path</b><span>WHAT COULD HAVE CAUSED THIS</span></div>
+        <div class="sec-body"><div class="sub">Route from the selected cause to the symptom</div>${causalPath(result, candidate)}</div>
+        <div class="sub sub-pad">Upstream dependencies of the symptom \u2014 things whose failure could reach it. This is not the blast radius; effects are listed below.</div>
         ${evidenceGraph(result, candidate)}
       </section>
-      <section class="sec"><div class="sec-h"><b>Blast radius</b><span>${radius.affected_services || 0} SERVICES \u00b7 ${radius.affected_nodes || 0} NODES REACHABLE</span></div>
-        <div class="sec-body">${blastRadius(result)}</div>
+      <section class="sec"><div class="sec-h"><b>Blast radius</b><span>IF ${esc((result.symptom.entity_name || 'the symptom')).slice(0, 28)} FAILS</span></div>
+        <div class="sec-body"><div class="sub">${radius.affected_services || 0} service(s) and ${radius.affected_nodes || 0} node(s) depend on the failing resource. Each candidate's own blast radius is the SVC column above.</div>${blastRadius(result)}</div>
       </section>`;
   }
 

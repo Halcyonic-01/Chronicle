@@ -270,3 +270,11 @@
 
 /* A decision that cannot change the outcome is reported, not offered. */
 .gate { font: 10px var(--mono); color: var(--amber); border: 1px solid var(--line); padding: 3px 7px; white-space: nowrap; }
+
+/* Captions that say which question a section answers. The causal path shows
+   upstream causes; the blast radius shows downstream effects. */
+.sub { font: 10.5px/1.6 var(--sans); color: var(--dim); margin-bottom: 9px; max-width: 86ch; }
+.sub-pad { padding: 0 16px; margin: 0 0 6px; }
+
+.rep { margin-left: 6px; font: 10px var(--mono); color: var(--dim); border: 1px solid var(--line); padding: 0 4px; }
+.provisional { font: 10.5px/1.6 var(--sans); color: var(--amber); border: 1px solid #3a3116; background: #1a1408; padding: 7px 10px; margin-bottom: 11px; }
