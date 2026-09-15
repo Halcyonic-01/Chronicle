@@ -224,17 +224,18 @@
     }
     const rows = r.candidates.map((c, i) => {
       const gap = Math.round((ts(r.symptom.ingested_at) - ts(c.event.ingested_at)));
-      return `<tr class="${i === focus ? 'top' : ''}" data-cand="${i}">
+      const linked = i > 0 && c.chain && c.chain === r.candidates[0].chain;
+      return `<tr class="${i === focus ? 'top' : ''}${linked ? ' linked' : ''}" data-cand="${i}" title="${linked ? 'An effect of the leading candidate, not a rival explanation' : ''}">
         <td class="num">${i + 1}</td>
         <td><span class="bar"><i style="width:${Math.round((c.score || 0) * 100)}%"></i></span>${(c.score || 0).toFixed(3)}</td>
-        <td>${esc(c.event.type)}${c.occurrences > 1 ? `<span class="rep">×${c.occurrences}</span>` : ''}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div></td>
+        <td>${esc(c.event.type)}${c.occurrences > 1 ? `<span class="rep">×${c.occurrences}</span>` : ''}${linked ? `<span class="chain-tag">same chain</span>` : ''}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div></td>
         <td class="num">${Math.round(gap / 1000)}s</td>
         <td class="num">${c.distance}</td>
         <td class="num">${c.affected_services || 0}</td>
       </tr>`;
     }).join('');
     return `<div class="sec-body">
-      ${r.provisional ? `<div class="provisional">Provisional — this symptom is newer than the ${'30s'} lateness allowance, so events explaining it may still be arriving. Re-run shortly to confirm.</div>` : ''}
+      ${r.provisional ? `<div class="provisional">Provisional — this symptom is too recent for its inputs to have settled: events explaining it may still be arriving, and a resource created since the last graph sync has no dependencies yet. Re-run in a minute to confirm.</div>` : ''}
       <div class="conf${confidence < 0.5 ? ' low' : ''}">
         <span class="conf-n">${pct}%</span>
         <span class="conf-t"><i style="width:${pct}%"></i></span>
@@ -317,7 +318,7 @@
   // Shortest chain of edges from the cause to the symptom, so the hop count in
   // the ranking table can be read as an actual route.
   function causalRoute(edges, symptomKey, causeKey) {
-    if (symptomKey === causeKey) return [];
+    if (symptomKey === causeKey) return {nodes: [symptomKey], steps: []};
     const step = causalSteps(edges);
     const queue = [[symptomKey, []]];
     const seen = new Set([symptomKey]);
@@ -329,8 +330,8 @@
         if (next === causeKey) {
           // Collected symptom-first; read it back cause-first.
           const nodes = [symptomKey, ...extended.map(x => x.to)].reverse();
-          const steps = extended.map(x => ({kind: x.kind, reversed: x.reversed})).reverse();
-          return nodes.slice(1).map((to, i) => ({to, kind: steps[i].kind, reversed: steps[i].reversed}));
+          const ordered = extended.map(x => ({kind: x.kind, reversed: x.reversed})).reverse();
+          return {nodes, steps: nodes.slice(1).map((to, i) => ({to, kind: ordered[i].kind, reversed: ordered[i].reversed}))};
         }
         seen.add(next);
         queue.push([next, extended]);
@@ -346,7 +347,8 @@
       const self = parseKey(causeKey);
       return `<div class="path"><span class="hop self"><b>${esc(shortName(self.name, 30))}</b><small>${esc(self.kind)}</small></span><span class="path-note">cause and symptom are the same resource \u2014 no hop between them</span></div>`;
     }
-    const route = causalRoute(result.evidence || [], symptomKey, causeKey);
+    const found = causalRoute(result.evidence || [], symptomKey, causeKey);
+    const route = found ? found.steps : null;
     const start = parseKey(causeKey);
     if (!route || !route.length) {
       const end = parseKey(symptomKey);
@@ -361,23 +363,53 @@
 
   // A small layered picture of the retained evidence: upstream on the left,
   // the symptom in its own column, anything downstream on the right.
+  const evidenceScope = () => state.opsEvidenceScope || 'application';
+
+  // A layered picture of the retained evidence: upstream on the left, the
+  // symptom in its own column, anything downstream on the right.
   function evidenceGraph(result, candidate) {
-    const edges = result.evidence || [];
-    if (!edges.length) return `<div class="none">No dependency edges were retained for this analysis.</div>`;
+    const all = result.evidence || [];
+    if (!all.length) return `<div class="none">No dependency edges were retained for this analysis.</div>`;
     const symptomKey = nodeKey({Namespace: result.symptom.namespace, Kind: result.symptom.entity_kind, Name: result.symptom.entity_name});
     const causeKey = candidate ? nodeKey({Namespace: candidate.event.namespace, Kind: candidate.event.entity_kind, Name: candidate.event.entity_name}) : '';
-    const layer = layersFrom(edges, symptomKey);
 
+    // Edges on the route from cause to symptom, so the picture emphasises the
+    // same chain the chips above it spell out.
+    const found = causalRoute(all, symptomKey, causeKey);
+    const routeNodes = found ? found.nodes : [symptomKey];
+    const onRoute = new Set(routeNodes);
+    const routePairs = new Set();
+    for (let i = 0; i + 1 < routeNodes.length; i++) {
+      routePairs.add(routeNodes[i] + '\u0000' + routeNodes[i + 1]);
+      routePairs.add(routeNodes[i + 1] + '\u0000' + routeNodes[i]);
+    }
+
+    // Platform plumbing is what makes this unreadable: every meshed pod hangs
+    // off the same few control-plane services. It is hidden unless the route
+    // actually runs through it, or the reader asks for everything.
+    const keep = key => evidenceScope() === 'all' || onRoute.has(key) || key === symptomKey || key === causeKey ||
+      window.chronicleScopeOf(parseKey(key).namespace) === 'application';
+    const edges = all.filter(e => keep(nodeKey(e.From)) && keep(nodeKey(e.To)));
+    const hidden = all.length - edges.length;
+    if (!edges.length) return `<div class="none">Every retained edge runs through platform infrastructure. Switch to ALL to see them.</div>` + evidenceControls(all.length, all.length);
+
+    const layer = layersFrom(edges, symptomKey);
     const nodes = new Map();
     edges.forEach(e => [e.From, e.To].forEach(n => { const k = nodeKey(n); if (!nodes.has(k)) nodes.set(k, {key: k, ...parseKey(k)}); }));
     if (!nodes.has(symptomKey)) nodes.set(symptomKey, {key: symptomKey, ...parseKey(symptomKey)});
 
     const columns = [...new Set([...nodes.keys()].map(k => layer.has(k) ? layer.get(k) : -1))].sort((a, b) => b - a);
     const order = new Map(columns.map((c, i) => [c, i]));
-    const W = 172, H = 40, GAPX = 74, GAPY = 12, PAD = 12;
+    const W = 176, H = 42, GAPX = 128, GAPY = 20, PAD = 14;
     const counters = new Map();
     const placed = new Map();
-    [...nodes.values()].sort((a, b) => a.key.localeCompare(b.key)).forEach(n => {
+    // Nodes on the route are laid out first so the chain reads as a straight
+    // line across the top instead of zig-zagging between rows.
+    const ordered = [...nodes.values()].sort((a, b) => {
+      const routed = (onRoute.has(b.key) ? 1 : 0) - (onRoute.has(a.key) ? 1 : 0);
+      return routed !== 0 ? routed : a.key.localeCompare(b.key);
+    });
+    ordered.forEach(n => {
       const column = layer.has(n.key) ? layer.get(n.key) : -1;
       const row = counters.get(column) || 0;
       counters.set(column, row + 1);
@@ -385,32 +417,63 @@
     });
     const width = PAD * 2 + columns.length * W + Math.max(0, columns.length - 1) * GAPX;
     const height = PAD * 2 + Math.max(...counters.values(), 1) * (H + GAPY);
-    const showLabels = edges.length <= 14;
+
+    // Every edge used to leave and arrive at the node's vertical centre, so a
+    // service with eight callers drew eight lines through one point. Fanning
+    // the anchors across each node's height separates them.
+    const outSeen = new Map(), inSeen = new Map();
+    const outTotal = new Map(), inTotal = new Map();
+    edges.forEach(e => {
+      outTotal.set(nodeKey(e.From), (outTotal.get(nodeKey(e.From)) || 0) + 1);
+      inTotal.set(nodeKey(e.To), (inTotal.get(nodeKey(e.To)) || 0) + 1);
+    });
+    const anchor = (node, index, total) => node.y + H * (index + 1) / (total + 1);
 
     const lines = edges.map(e => {
-      const a = placed.get(nodeKey(e.From)), b = placed.get(nodeKey(e.To));
+      const fromKey = nodeKey(e.From), toKey = nodeKey(e.To);
+      const a = placed.get(fromKey), b = placed.get(toKey);
       if (!a || !b) return '';
-      const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
-      const midX = (x1 + x2) / 2;
-      const onPath = nodeKey(e.From) === causeKey || nodeKey(e.To) === symptomKey;
-      return `<path d="M${x1} ${y1} C${midX} ${y1} ${midX} ${y2} ${x2} ${y2}" class="ev-edge${onPath ? ' on' : ''}" marker-end="url(#ev-arrow)"/>` +
-        (showLabels ? `<text class="ev-kind" x="${midX}" y="${(y1 + y2) / 2 - 4}" text-anchor="middle">${esc(e.Kind)}</text>` : '');
-    }).join('');
-
-    const boxes = [...placed.values()].map(n => {
-      const role = n.key === symptomKey ? 'sym' : (n.key === causeKey ? 'cause' : '');
-      return `<g class="ev-node ${role}" transform="translate(${n.x},${n.y})">
-        <rect width="${W}" height="${H}" rx="2"/>
-        <text class="ev-name" x="9" y="17">${esc(shortName(n.name, 24))}</text>
-        <text class="ev-meta" x="9" y="30">${esc(n.kind)} \u00b7 ${esc(n.namespace || 'cluster')}</text>
+      const oi = outSeen.get(fromKey) || 0; outSeen.set(fromKey, oi + 1);
+      const ii = inSeen.get(toKey) || 0; inSeen.set(toKey, ii + 1);
+      const x1 = a.x + W, y1 = anchor(a, oi, outTotal.get(fromKey));
+      const x2 = b.x, y2 = anchor(b, ii, inTotal.get(toKey));
+      // Bend within the channel between columns so lines never cross a box.
+      const bend = Math.min(52, (x2 - x1) / 2);
+      const on = routePairs.has(fromKey + '\u0000' + toKey);
+      return `<g class="ev-line${on ? ' on' : ''}" data-from="${esc(fromKey)}" data-to="${esc(toKey)}">
+        <path d="M${x1} ${y1} C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2} ${y2}" class="ev-edge" marker-end="url(#ev-arrow${on ? '-on' : ''})"/>
+        <text class="ev-kind" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 5}" text-anchor="middle">${esc(e.Kind)}</text>
       </g>`;
     }).join('');
 
-    return `<div class="ev-wrap"><svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
-      <defs><marker id="ev-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 z" class="ev-head"/></marker></defs>
+    const boxes = [...placed.values()].map(n => {
+      const role = n.key === symptomKey ? 'sym' : (n.key === causeKey ? 'cause' : (onRoute.has(n.key) ? 'route' : ''));
+      return `<g class="ev-node ${role}" data-key="${esc(n.key)}" transform="translate(${n.x},${n.y})">
+        <rect width="${W}" height="${H}" rx="2"/>
+        <text class="ev-name" x="10" y="18">${esc(shortName(n.name, 24))}</text>
+        <text class="ev-meta" x="10" y="31">${esc(n.kind)} \u00b7 ${esc(n.namespace || 'cluster')}</text>
+      </g>`;
+    }).join('');
+
+    return `<div class="ev-wrap"><svg id="ev-svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+      <defs>
+        <marker id="ev-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 z" class="ev-head"/></marker>
+        <marker id="ev-arrow-on" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" class="ev-head-on"/></marker>
+      </defs>
       ${lines}${boxes}
-    </svg></div>
-    <div class="ev-key"><span class="sw sym"></span><span>symptom</span><span class="sw cause"></span><span>selected cause</span><span class="sw"></span><span>dependency</span><span class="ev-count">${edges.length} edge(s) \u00b7 ${placed.size} node(s)${showLabels ? '' : ' \u00b7 labels hidden'}</span></div>`;
+    </svg></div>` + evidenceControls(edges.length, all.length, placed.size, hidden);
+  }
+
+  function evidenceControls(shown, total, nodeCount, hidden) {
+    const scope = evidenceScope();
+    return `<div class="ev-key">
+      <span class="sw sym"></span><span>symptom</span>
+      <span class="sw cause"></span><span>selected cause</span>
+      <span class="sw route"></span><span>on the route</span>
+      <div class="seg ev-seg">${['application', 'all'].map(value =>
+        `<button type="button" data-evidence-scope="${value}" aria-pressed="${scope === value}">${value.toUpperCase()}</button>`).join('')}</div>
+      <span class="ev-count">${shown} of ${total} edge(s)${nodeCount ? ` \u00b7 ${nodeCount} node(s)` : ''}${hidden ? ` \u00b7 ${hidden} through platform infrastructure hidden` : ''} \u00b7 hover a box to isolate it</span>
+    </div>`;
   }
 
   function blastRadius(result) {
@@ -543,6 +606,34 @@
       state.opsCandidateBy[active.id] = Number(row.dataset.cand);
       window.render();
     });
+    document.querySelectorAll('[data-evidence-scope]').forEach(button => button.onclick = () => {
+      state.opsEvidenceScope = button.dataset.evidenceScope;
+      window.render();
+    });
+    // Hovering a box lights its own edges and dims the rest, which is the only
+    // way to follow one dependency through a dense picture.
+    const svg = el('#ev-svg');
+    if (svg) {
+      svg.querySelectorAll('.ev-node').forEach(box => {
+        const key = box.dataset.key;
+        box.onmouseenter = () => {
+          svg.classList.add('isolating');
+          svg.querySelectorAll('.ev-line').forEach(line => {
+            const touches = line.dataset.from === key || line.dataset.to === key;
+            line.classList.toggle('lit', touches);
+            if (touches) {
+              const other = line.dataset.from === key ? line.dataset.to : line.dataset.from;
+              svg.querySelector(`.ev-node[data-key="${CSS.escape(other)}"]`)?.classList.add('lit');
+            }
+          });
+          box.classList.add('lit');
+        };
+        box.onmouseleave = () => {
+          svg.classList.remove('isolating');
+          svg.querySelectorAll('.lit').forEach(node => node.classList.remove('lit'));
+        };
+      });
+    }
     const evidence = el('.ev-wrap');
     if (evidence && evidence.scrollWidth > evidence.clientWidth) {
       const symptom = evidence.querySelector('.ev-node.sym');

@@ -57,6 +57,7 @@ type Candidate struct {
 	Reasons          []string    `json:"reasons"`
 	Reverts          string      `json:"reverts,omitempty"`
 	Occurrences      int         `json:"occurrences"`
+	Chain            string      `json:"chain,omitempty"`
 	Factors          []Factor    `json:"factors"`
 	AffectedServices int         `json:"affected_services"`
 	AffectedNodes    int         `json:"affected_nodes"`
@@ -85,7 +86,22 @@ type Analyzer struct {
 	Graph    GraphSource
 	Narrator Narrator
 	MaxHops  int
+	// DecayDivisor sets how sharply causal plausibility falls off across the
+	// causal window. The time constant is the window divided by this, so an
+	// event at the far edge of the window scores e^-divisor. Zero uses the
+	// default.
+	DecayDivisor float64
+	// GraphInterval is how often the dependency graph is resynced. A symptom
+	// about a resource created since the last sync has no edges yet, so its
+	// owner is unreachable and the analysis is incomplete rather than wrong.
+	GraphInterval time.Duration
 }
+
+const defaultGraphInterval = 30 * time.Second
+
+// defaultDecayDivisor puts three e-folds across the window, so a cause at its
+// far edge retains about 5% of its weight.
+const defaultDecayDivisor = 3.0
 
 var lookback = map[string]time.Duration{
 	"error_spike": 10 * time.Minute, "latency_spike": 15 * time.Minute,
@@ -153,6 +169,15 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	if hops <= 0 {
 		hops = 4
 	}
+	// The decay must match the window it is applied over. A fixed five-minute
+	// constant made the deliberately long windows pointless: an oom_kill looks
+	// back an hour, but a memory-limit change thirty minutes earlier scored
+	// e^-6, near zero, so the extra reach found nothing it could rank.
+	divisor := a.DecayDivisor
+	if divisor <= 0 {
+		divisor = defaultDecayDivisor
+	}
+	decay := back.Seconds() / divisor
 
 	// The graph at the symptom instant is loaded once and walked in memory.
 	// Querying it per candidate turns one analysis into N+2 full graph loads.
@@ -208,16 +233,34 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		c := Candidate{Event: e, Distance: distance, Reverts: reverts[e.ID]}
 		impact := summarizeImpact(impactOf(key(e)))
 		c.AffectedServices, c.AffectedNodes, c.BlastRadiusScore = impact.AffectedServices, impact.AffectedNodes, impact.Score
-		score(&c, symptom)
+		score(&c, symptom, decay)
 		candidates = append(candidates, c)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+	linkChains(candidates, func(from, to string) bool {
+		if local != nil {
+			_, reachable := local.Upstream(to, hops)[from]
+			return reachable
+		}
+		_, reachable := upstream[from]
+		return reachable
+	})
 	result.Candidates = topDistinct(candidates, 5)
 
-	// A symptom younger than the lateness allowance may still be missing the
-	// events that explain it, so the answer is provisional rather than wrong.
-	result.Provisional = time.Since(symptomAt) < allowedLateness
-	result.Confidence, result.Strength, result.Separation = confidence(candidates)
+	// An answer is provisional while the inputs behind it are still settling:
+	// events explaining the symptom may not have arrived yet, and a resource
+	// created since the last graph sync has no edges, so nothing it depends on
+	// can be reached. Both make the analysis incomplete rather than wrong.
+	graphInterval := a.GraphInterval
+	if graphInterval <= 0 {
+		graphInterval = defaultGraphInterval
+	}
+	settleFor := allowedLateness
+	if graphInterval > settleFor {
+		settleFor = graphInterval
+	}
+	result.Provisional = time.Since(symptomAt) < settleFor
+	result.Confidence, result.Strength, result.Separation = confidence(result.Candidates)
 	if a.Narrator != nil {
 		result.Narrative, err = a.Narrator.Narrate(ctx, result)
 		if err != nil {
@@ -286,7 +329,7 @@ func evidenceEdges(edges []graph.Edge, reachable map[string]int, symptom string)
 // amplifying factors. Each step is recorded twice: Reasons keeps the sentence
 // form the heal audit trail stores, and Factors keeps the same step as data so
 // a caller can lay the derivation out as a table instead of parsing prose.
-func score(c *Candidate, symptom event.Event) {
+func score(c *Candidate, symptom event.Event, timeConstant float64) {
 	s := typeWeight[c.Event.Type]
 	if s == 0 {
 		s = 0.20
@@ -295,7 +338,7 @@ func score(c *Candidate, symptom event.Event) {
 	c.Factors = append(c.Factors, Factor{Label: "Event type", Detail: c.Event.Type, Multiplier: s, Base: true})
 
 	gap := causalTime(symptom).Sub(causalTime(c.Event)).Seconds()
-	tf := math.Exp(-gap / 300.0)
+	tf := math.Exp(-gap / timeConstant)
 	s *= tf
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%.0fs before symptom (×%.2f)", gap, tf))
 	c.Factors = append(c.Factors, Factor{Label: "Time distance", Detail: fmt.Sprintf("%.0fs before the symptom", gap), Multiplier: tf})
@@ -342,14 +385,100 @@ func confidence(c []Candidate) (overall, strength, separation float64) {
 	}
 	// How good is the leading candidate, setting aside how far away it is.
 	strength = math.Min(1, c[0].Score/distanceFactor(c[0].Distance))
-	// How clearly does it beat the runner-up? With nothing to compare against,
-	// separation cannot argue either way, so it does not reduce the result.
+	// How clearly does it beat the runner-up? Only a genuinely different
+	// explanation counts as a rival: the links of one causal chain are the same
+	// answer told at different depths, and letting them compete made Chronicle
+	// least certain exactly when it had traced the chain most completely.
 	separation = 1
-	if len(c) > 1 && c[0].Score > 0 {
-		margin := (c[0].Score - c[1].Score) / c[0].Score
-		separation = 0.5 + 0.5*math.Max(0, math.Min(1, margin))
+	for _, rival := range c[1:] {
+		if sameChain(c[0], rival) {
+			continue
+		}
+		if c[0].Score > 0 {
+			margin := (c[0].Score - rival.Score) / c[0].Score
+			separation = 0.5 + 0.5*math.Max(0, math.Min(1, margin))
+		}
+		break
 	}
 	return strength * separation, strength, separation
+}
+
+// sameChain reports whether two candidates are links of one causal chain.
+func sameChain(a, b Candidate) bool {
+	if a.Chain == "" || b.Chain == "" {
+		return false
+	}
+	return a.Chain == b.Chain
+}
+
+// linkChains groups candidates that are links of one chain rather than rival
+// explanations. A candidate explains a later one when it can causally reach it
+// in the dependency graph — scaling a Deployment to zero is why its Pod stopped
+// serving traffic, not a competing theory for it. Both conditions are required:
+// topology says the propagation is possible, timing says it ran that way.
+//
+// Membership is resolved by union-find over every pair rather than a forward
+// scan, because collectors stamp simultaneous events with the same second. A
+// Deployment and the Pod it owns are routinely created in the same instant, and
+// an order-dependent pass splits them into two chains depending on which the
+// tie-break happened to put first.
+func linkChains(candidates []Candidate, reaches func(from, to string) bool) {
+	parent := make([]int, len(candidates))
+	for i := range parent {
+		parent[i] = i
+	}
+	explained := make([]bool, len(candidates))
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+
+	for i := range candidates {
+		for j := range candidates {
+			if i == j {
+				continue
+			}
+			from, to := candidates[i].Event, candidates[j].Event
+			if causalTime(to).Before(causalTime(from)) {
+				continue // an effect cannot precede its cause
+			}
+			if !reaches(key(from), key(to)) {
+				continue
+			}
+			// Simultaneous and mutually reachable says nothing about direction.
+			if causalTime(from).Equal(causalTime(to)) && reaches(key(to), key(from)) {
+				continue
+			}
+			explained[j] = true
+			if a, b := find(i), find(j); a != b {
+				parent[b] = a
+			}
+		}
+	}
+
+	// The chain is named for its head: the member nothing else in the chain
+	// explains. Naming it after the earliest alone picks the wrong end when a
+	// cause and its effect share a timestamp.
+	head := make(map[int]int, len(candidates))
+	better := func(candidate, current int) bool {
+		if explained[candidate] != explained[current] {
+			return !explained[candidate] // an unexplained member heads the chain
+		}
+		return causalTime(candidates[candidate].Event).Before(causalTime(candidates[current].Event))
+	}
+	for i := range candidates {
+		root := find(i)
+		if at, seen := head[root]; !seen || better(i, at) {
+			head[root] = i
+		}
+	}
+	for i := range candidates {
+		candidates[i].Chain = candidates[head[find(i)]].Event.ID
+	}
 }
 
 func FallbackNarrative(r *Result) string {
@@ -362,8 +491,8 @@ func FallbackNarrative(r *Result) string {
 		prefix = "The most likely cause is "
 	}
 	impact := ""
-	if r.BlastRadius.AffectedServices > 0 {
-		impact = fmt.Sprintf(", affecting %d downstream service(s)", r.BlastRadius.AffectedServices)
+	if c.AffectedServices > 0 {
+		impact = fmt.Sprintf(", affecting %d downstream service(s)", c.AffectedServices)
 	}
 	return fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom%s), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, c.Event.IngestedAt.Format(time.RFC3339), c.Distance, r.Symptom.IngestedAt.Sub(c.Event.IngestedAt).Seconds(), impact, r.Confidence, r.Scanned, len(r.Candidates))
 }

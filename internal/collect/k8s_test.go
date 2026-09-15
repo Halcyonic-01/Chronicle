@@ -2,6 +2,10 @@ package collect
 
 import (
 	"testing"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	corev1 "k8s.io/api/core/v1"
@@ -90,5 +94,69 @@ func TestExtractSHAOnlyAcceptsCommitLikeTags(t *testing.T) {
 		if got := extractSHA(image); got != want {
 			t.Errorf("extractSHA(%q) = %q, want %q", image, got, want)
 		}
+	}
+}
+
+// The informer sees a change some time after it happened. The API server
+// records when each field manager last wrote, which is the real change time.
+func TestSpecChangeTimeUsesTheFieldManagerNotTheStatusWriter(t *testing.T) {
+	// Relative to now, because a field-manager timestamp older than the age
+	// bound cannot describe the change being emitted.
+	specWrite := metav1.NewTime(time.Now().Add(-20 * time.Second))
+	statusWrite := metav1.NewTime(time.Now().Add(-19 * time.Second))
+	older := metav1.NewTime(time.Now().Add(-90 * time.Second))
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: "worker", Namespace: "default",
+		ManagedFields: []metav1.ManagedFieldsEntry{
+			{Manager: "kubectl-client-side-apply", Time: &older},
+			{Manager: "kubectl-set", Time: &specWrite},
+			// The controller writing rollout progress is not a change to the
+			// deployment, and it always lands last.
+			{Manager: "kube-controller-manager", Subresource: "status", Time: &statusWrite},
+		},
+	}}
+	at, manager := specChangeTime(deployment)
+	if !at.Equal(specWrite.Time.UTC()) {
+		t.Fatalf("expected the spec write at %v, got %v", specWrite.Time.UTC(), at)
+	}
+	if manager != "kubectl-set" {
+		t.Fatalf("expected the client that made the change, got %q", manager)
+	}
+}
+
+func TestSpecChangeTimeIsZeroWhenUnavailable(t *testing.T) {
+	at, manager := specChangeTime(&appsv1.Deployment{})
+	if !at.IsZero() || manager != "" {
+		t.Fatalf("with no managed fields there is nothing to report, got %v %q", at, manager)
+	}
+}
+
+// "kubectl scale" goes through the /scale subresource, which leaves no managed
+// field entry of its own. The newest remaining entry is then whatever last
+// applied the manifest — hours earlier — and reporting it dated every scale
+// event to the original deploy.
+func TestSpecChangeTimeRejectsAStaleManagerTimestamp(t *testing.T) {
+	stale := metav1.NewTime(time.Now().Add(-5 * time.Hour))
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubectl-client-side-apply", Time: &stale}},
+	}}
+	if at, manager := specChangeTime(deployment); !at.IsZero() || manager != "" {
+		t.Fatalf("a five-hour-old apply cannot describe the change being emitted now, got %v %q", at, manager)
+	}
+}
+
+// A scale recorded against the subresource is still a real spec change.
+func TestSpecChangeTimeAcceptsTheScaleSubresource(t *testing.T) {
+	recent := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	older := metav1.NewTime(time.Now().Add(-4 * time.Hour))
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		ManagedFields: []metav1.ManagedFieldsEntry{
+			{Manager: "kubectl-client-side-apply", Time: &older},
+			{Manager: "kubectl-scale", Subresource: "scale", Time: &recent},
+		},
+	}}
+	at, manager := specChangeTime(deployment)
+	if !at.Equal(recent.Time.UTC()) || manager != "kubectl-scale" {
+		t.Fatalf("expected the scale write, got %v %q", at, manager)
 	}
 }

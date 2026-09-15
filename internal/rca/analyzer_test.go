@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,7 +120,7 @@ func TestScoreFactorsExplainTheScoreTheyProduce(t *testing.T) {
 		Distance:         2,
 		AffectedServices: 3,
 	}
-	score(&candidate, symptom)
+	score(&candidate, symptom, 300)
 
 	if len(candidate.Factors) != 4 {
 		t.Fatalf("expected a factor per scoring step, got %d: %+v", len(candidate.Factors), candidate.Factors)
@@ -151,7 +152,7 @@ func TestBlastRadiusFactorKeepsDiscriminatingAtScale(t *testing.T) {
 			Event:            event.Event{IngestedAt: now.Add(-time.Second), Namespace: "default", EntityKind: "Service", EntityName: "redis", Type: "deploy"},
 			AffectedServices: affected,
 		}
-		score(&c, symptom)
+		score(&c, symptom, 300)
 		for _, f := range c.Factors {
 			if f.Label == "Blast radius" {
 				return f.Multiplier
@@ -474,5 +475,206 @@ func TestImplausibleEventTimeFallsBackToIngestion(t *testing.T) {
 	late := event.Event{ID: "late", OccurredAt: now.Add(-20 * time.Second), IngestedAt: now}
 	if got := causalTime(late); !got.Equal(late.OccurredAt) {
 		t.Fatalf("a normally late event must keep its own timestamp, got %v", got)
+	}
+}
+
+// A fixed five-minute constant made the deliberately long windows useless: an
+// oom_kill looks back an hour, but a change thirty minutes earlier scored e^-6.
+func TestDecayScalesWithTheCausalWindow(t *testing.T) {
+	now := time.Now().UTC()
+	node := func(kind, name string) graph.Node { return graph.Node{Kind: kind, Name: name, Namespace: "default"} }
+	source := &countingGraph{edges: []graph.Edge{
+		{From: node("Deployment", "worker"), To: node("Pod", "worker-1"), Kind: "owns", Weight: 1, Source: "static"},
+	}}
+	// A memory limit change half an hour before an OOM kill: well inside the
+	// hour-long oom_kill window, and exactly the cause that window exists for.
+	cause := event.Event{
+		ID: "limit", IngestedAt: now.Add(-30 * time.Minute), OccurredAt: now.Add(-30 * time.Minute),
+		Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "resource_change",
+		Title: "worker resource limits changed",
+	}
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "worker-1", Type: "oom_kill"}
+
+	got, err := (&Analyzer{Events: fakeEvents([]event.Event{cause}), Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 {
+		t.Fatalf("the change is inside the oom_kill window and must be a candidate, got %d", len(got.Candidates))
+	}
+	// With the old fixed 300s constant this scored e^-6 ≈ 0.002 and was noise.
+	if got.Candidates[0].Score < 0.1 {
+		t.Fatalf("a cause halfway through its own window should keep real weight, got %.4f", got.Candidates[0].Score)
+	}
+}
+
+// The default window must keep behaving exactly as it did.
+func TestDefaultWindowKeepsItsOriginalDecay(t *testing.T) {
+	now := time.Now().UTC()
+	c := Candidate{Event: event.Event{IngestedAt: now.Add(-300 * time.Second), Type: "deploy"}, Distance: 0}
+	symptom := event.Event{IngestedAt: now}
+	// 15-minute default window / 3 = the 300s constant the code used to hardcode.
+	score(&c, symptom, (15*time.Minute).Seconds()/defaultDecayDivisor)
+	var timeFactor float64
+	for _, f := range c.Factors {
+		if f.Label == "Time distance" {
+			timeFactor = f.Multiplier
+		}
+	}
+	if math.Abs(timeFactor-math.Exp(-1)) > 1e-9 {
+		t.Fatalf("one time constant before the symptom should be e^-1, got %.6f", timeFactor)
+	}
+}
+
+// A resource created since the last graph sync has no edges yet, so nothing it
+// depends on is reachable. That makes the analysis incomplete, not wrong.
+func TestAnalysisIsProvisionalWhileTheGraphIsStale(t *testing.T) {
+	now := time.Now().UTC()
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "new-1", Type: "k8s_event", Severity: "warning"}
+	analyzer := &Analyzer{Events: fakeEvents(nil), Graph: fakeGraph{"default/Pod/new-1": 0}, MaxHops: 3, GraphInterval: 30 * time.Second}
+	got, err := analyzer.Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Provisional {
+		t.Fatal("a symptom younger than the graph sync interval must be flagged provisional")
+	}
+
+	settled := symptom
+	settled.IngestedAt = now.Add(-2 * time.Minute)
+	settled.OccurredAt = settled.IngestedAt
+	if got, _ := analyzer.Analyze(context.Background(), settled); got.Provisional {
+		t.Error("a settled symptom should not be flagged provisional")
+	}
+}
+
+// The narrative describes the cause, so it must quote the cause's own blast
+// radius. The symptom's is a different number whenever the cause sits further
+// from the leaves than the symptom does.
+func TestNarrativeQuotesTheCauseBlastRadiusNotTheSymptoms(t *testing.T) {
+	result := &Result{
+		Symptom:     event.Event{ID: "s", Title: "redis stopped serving traffic", IngestedAt: time.Now()},
+		Confidence:  0.63,
+		BlastRadius: BlastRadius{AffectedServices: 3}, // the symptom's
+		Candidates: []Candidate{{
+			Event:            event.Event{Title: "redis scaled from 1 to 0", EntityName: "redis", IngestedAt: time.Now().Add(-time.Second)},
+			Distance:         1,
+			AffectedServices: 2, // the cause's
+		}},
+	}
+	narrative := FallbackNarrative(result)
+	if !strings.Contains(narrative, "affecting 2 downstream service(s)") {
+		t.Fatalf("narrative should quote the cause's blast radius: %s", narrative)
+	}
+	if strings.Contains(narrative, "affecting 3 downstream service(s)") {
+		t.Fatalf("narrative quoted the symptom's blast radius instead: %s", narrative)
+	}
+}
+
+// Scaling a Deployment to zero is why its Pod stopped serving traffic. Ranked
+// as rivals they suppress each other's separation, so Chronicle grew least
+// certain exactly when it had traced the chain most completely.
+func TestLinkedCandidatesDoNotCompeteForConfidence(t *testing.T) {
+	now := time.Now().UTC()
+	at := func(seconds int) time.Time { return now.Add(-time.Duration(seconds) * time.Second) }
+	scale := Candidate{Event: event.Event{ID: "scale", OccurredAt: at(54), IngestedAt: at(54), Namespace: "default", EntityKind: "Deployment", EntityName: "redis"}, Score: 0.229, Distance: 4}
+	unready := Candidate{Event: event.Event{ID: "unready", OccurredAt: at(53), IngestedAt: at(53), Namespace: "default", EntityKind: "Pod", EntityName: "redis-1"}, Score: 0.184, Distance: 3}
+	unrelated := Candidate{Event: event.Event{ID: "noise", OccurredAt: at(15), IngestedAt: at(15), Namespace: "default", EntityKind: "Pod", EntityName: "api-1"}, Score: 0.103, Distance: 1}
+
+	candidates := []Candidate{scale, unready, unrelated}
+	// The Deployment reaches its Pod; nothing reaches the unrelated api pod.
+	linkChains(candidates, func(from, to string) bool {
+		return from == "default/Deployment/redis" && to == "default/Pod/redis-1"
+	})
+	if candidates[0].Chain != candidates[1].Chain {
+		t.Fatalf("the pod going unready is an effect of the scale, not a rival: %q vs %q", candidates[0].Chain, candidates[1].Chain)
+	}
+	if candidates[2].Chain == candidates[0].Chain {
+		t.Fatal("an unrelated candidate must stay a separate explanation")
+	}
+
+	_, _, separation := confidence(candidates)
+	// Separation must be measured against the unrelated candidate at 0.103,
+	// not against the chain link at 0.184.
+	want := 0.5 + 0.5*(0.229-0.103)/0.229
+	if math.Abs(separation-want) > 1e-9 {
+		t.Fatalf("separation %.4f should ignore the chain link and compare with the rival (%.4f)", separation, want)
+	}
+}
+
+// Topology alone is not enough: an effect cannot precede its cause.
+func TestChainLinkingRequiresTimeOrderAsWellAsTopology(t *testing.T) {
+	now := time.Now().UTC()
+	earlier := Candidate{Event: event.Event{ID: "pod", OccurredAt: now.Add(-60 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "redis-1"}, Score: 0.3}
+	later := Candidate{Event: event.Event{ID: "deploy", OccurredAt: now.Add(-10 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis"}, Score: 0.2}
+	candidates := []Candidate{earlier, later}
+	// The Deployment can reach the Pod, but it changed afterwards.
+	linkChains(candidates, func(from, to string) bool {
+		return from == "default/Deployment/redis" && to == "default/Pod/redis-1"
+	})
+	if candidates[0].Chain == candidates[1].Chain {
+		t.Fatal("a change made after the effect cannot be its cause")
+	}
+}
+
+// Over-linking would make separation meaningless: two independent changes must
+// stay rivals. Redis and Postgres are both depended on by the app, but neither
+// can reach the other, so neither explains the other.
+func TestSiblingDependenciesStayIndependent(t *testing.T) {
+	node := func(kind, name string) graph.Node { return graph.Node{Kind: kind, Name: name, Namespace: "default"} }
+	g := graph.New()
+	g.SetEdges([]graph.Edge{
+		{From: node("Pod", "api-1"), To: node("Service", "redis"), Kind: "calls"},
+		{From: node("Service", "redis"), To: node("Pod", "redis-1"), Kind: "routes_to"},
+		{From: node("Pod", "api-1"), To: node("Service", "postgres"), Kind: "calls"},
+		{From: node("Service", "postgres"), To: node("Pod", "postgres-1"), Kind: "routes_to"},
+		{From: node("Deployment", "redis"), To: node("Pod", "redis-1"), Kind: "owns"},
+		{From: node("Deployment", "postgres"), To: node("Pod", "postgres-1"), Kind: "owns"},
+	})
+	reaches := func(from, to string) bool { _, ok := g.Upstream(to, 5)[from]; return ok }
+
+	now := time.Now().UTC()
+	candidates := []Candidate{
+		{Event: event.Event{ID: "redis-scale", OccurredAt: now.Add(-60 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis"}, Score: 0.30},
+		{Event: event.Event{ID: "pg-scale", OccurredAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "postgres"}, Score: 0.28},
+	}
+	linkChains(candidates, reaches)
+	if candidates[0].Chain == candidates[1].Chain {
+		t.Fatal("redis and postgres are siblings; neither explains the other")
+	}
+	if _, _, separation := confidence(candidates); separation > 0.55 {
+		t.Fatalf("two near-tied independent changes must still suppress separation, got %.3f", separation)
+	}
+
+	// But a Deployment really does explain its own Pod going down.
+	linked := []Candidate{
+		{Event: event.Event{ID: "scale", OccurredAt: now.Add(-60 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis"}, Score: 0.30},
+		{Event: event.Event{ID: "unready", OccurredAt: now.Add(-50 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "redis-1"}, Score: 0.28},
+	}
+	linkChains(linked, reaches)
+	if linked[0].Chain != linked[1].Chain {
+		t.Fatal("the pod is downstream of the deployment that scaled it")
+	}
+}
+
+// Collectors stamp simultaneous events with the same second: a Deployment and
+// the Pod it owns are routinely created in one instant. An order-dependent
+// pass split them into two chains depending on which the tie-break put first.
+func TestSimultaneousEventsStillFormOneChain(t *testing.T) {
+	sameInstant := time.Now().UTC().Add(-time.Minute)
+	reaches := func(from, to string) bool {
+		return from == "default/Deployment/redis" && to == "default/Pod/redis-1"
+	}
+	// Deliberately listed pod-first, the order that used to break it.
+	candidates := []Candidate{
+		{Event: event.Event{ID: "pod-created", OccurredAt: sameInstant, Namespace: "default", EntityKind: "Pod", EntityName: "redis-1"}, Score: 0.08},
+		{Event: event.Event{ID: "deploy-created", OccurredAt: sameInstant, Namespace: "default", EntityKind: "Deployment", EntityName: "redis"}, Score: 0.06},
+	}
+	linkChains(candidates, reaches)
+	if candidates[0].Chain != candidates[1].Chain {
+		t.Fatalf("a deployment and the pod it owns are one chain however the tie sorts: %q vs %q", candidates[0].Chain, candidates[1].Chain)
+	}
+	if candidates[0].Chain != "deploy-created" {
+		t.Errorf("the chain should be named for the deployment that owns the pod, got %q", candidates[0].Chain)
 	}
 }

@@ -216,25 +216,43 @@
 .link.rev::after { content: "──"; }
 .path-note { font: 10px var(--mono); color: var(--dim); }
 
-/* --- evidence graph ---------------------------------------------------- */
-.ev-wrap { overflow-x: auto; padding: 4px 16px 10px; }
-.ev-edge { fill: none; stroke: var(--line); stroke-width: 1.2; }
-.ev-edge.on { stroke: var(--blue); stroke-width: 1.6; }
+/* --- evidence graph ----------------------------------------------------
+   Congestion came from three things: every edge left and arrived at the same
+   point on a box, platform plumbing multiplied the edge count, and nothing
+   distinguished the route from the rest. Each is addressed below. */
+.ev-wrap { overflow-x: auto; padding: 6px 16px 12px; }
+.ev-edge { fill: none; stroke: var(--line); stroke-width: 1.1; }
 .ev-head { fill: var(--line); }
-.ev-kind { font: 9px var(--mono); fill: var(--dim); }
+.ev-kind { font: 9px var(--mono); fill: var(--dim); opacity: 0; transition: opacity .12s; }
+.ev-line.on .ev-edge { stroke: var(--blue); stroke-width: 1.9; }
+.ev-line.on .ev-kind { fill: var(--blue); opacity: 1; }
+.ev-head-on { fill: var(--blue); }
+
+/* Hovering a box isolates its edges; everything else recedes rather than
+   disappearing, so the shape of the graph is still legible. */
+#ev-svg.isolating .ev-line { opacity: .12; }
+#ev-svg.isolating .ev-node { opacity: .3; }
+#ev-svg.isolating .ev-line.lit { opacity: 1; }
+#ev-svg.isolating .ev-line.lit .ev-edge { stroke: var(--text); stroke-width: 1.8; }
+#ev-svg.isolating .ev-line.lit .ev-kind { fill: var(--text); opacity: 1; }
+#ev-svg.isolating .ev-node.lit { opacity: 1; }
+.ev-node { cursor: default; transition: opacity .12s; }
 .ev-node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
 .ev-node .ev-name { font: 11px var(--mono); fill: var(--text); }
 .ev-node .ev-meta { font: 9px var(--mono); fill: var(--dim); }
+.ev-node.route rect { stroke: #3f5a7d; }
 .ev-node.sym rect { stroke: var(--red); fill: #1c1113; }
 .ev-node.sym .ev-name { fill: var(--red); }
 .ev-node.cause rect { stroke: var(--blue); fill: #111a26; }
 .ev-node.cause .ev-name { fill: var(--blue); }
+
 .ev-key { display: flex; align-items: center; gap: 6px; padding: 0 16px 11px; font: 10px var(--mono); color: var(--dim); flex-wrap: wrap; }
-.ev-key .sw { width: 9px; height: 9px; border: 1px solid var(--line); background: var(--panel); display: inline-block; }
+.ev-key .sw { width: 9px; height: 9px; border: 1px solid var(--line); background: var(--panel); display: inline-block; margin-left: 8px; }
+.ev-key .sw:first-child { margin-left: 0; }
 .ev-key .sw.sym { border-color: var(--red); background: #1c1113; }
 .ev-key .sw.cause { border-color: var(--blue); background: #111a26; }
-.ev-key .sw { margin-left: 8px; }
-.ev-key .sw:first-child { margin-left: 0; }
+.ev-key .sw.route { border-color: #3f5a7d; }
+.ev-seg { margin-left: 10px; }
 .ev-key .ev-count { margin-left: auto; }
 
 /* --- blast radius ------------------------------------------------------
@@ -278,3 +296,8 @@
 
 .rep { margin-left: 6px; font: 10px var(--mono); color: var(--dim); border: 1px solid var(--line); padding: 0 4px; }
 .provisional { font: 10.5px/1.6 var(--sans); color: var(--amber); border: 1px solid #3a3116; background: #1a1408; padding: 7px 10px; margin-bottom: 11px; }
+
+/* Links of one causal chain are the same answer at different depths, so they
+   are marked rather than read as rival explanations. */
+.cand tr.linked td { color: var(--dim); }
+.chain-tag { margin-left: 6px; font: 9px var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); border: 1px solid var(--line2); padding: 1px 5px; }

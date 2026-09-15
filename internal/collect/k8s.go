@@ -234,7 +234,45 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 	}
 }
 
+// maxSpecChangeAge bounds how old a field-manager timestamp may be and still
+// describe the change being emitted right now.
+const maxSpecChangeAge = 2 * time.Minute
+
+// specChangeTime reports when a Deployment's spec was last mutated and by which
+// client. The API server records this per field manager, so it is the moment
+// the change was made rather than the moment our informer noticed it.
+//
+// Two entries must be ignored. Status writes are the controller reporting
+// progress, not someone changing the deployment. And a timestamp far older
+// than now cannot describe the change we are emitting: "kubectl scale" goes
+// through the /scale subresource, which leaves no managed-field entry of its
+// own, so the newest remaining entry is whatever last applied the manifest —
+// hours earlier. Reporting that would date every scale to the original deploy.
+// In both cases a zero time is returned and the caller falls back to ingestion
+// time, which is late but true.
+func specChangeTime(d *appsv1.Deployment) (time.Time, string) {
+	var at time.Time
+	var manager string
+	for _, field := range d.ManagedFields {
+		if field.Time == nil {
+			continue
+		}
+		if field.Subresource != "" && field.Subresource != "scale" {
+			continue
+		}
+		if field.Time.Time.After(at) {
+			at, manager = field.Time.Time.UTC(), field.Manager
+		}
+	}
+	if at.IsZero() || time.Since(at) > maxSpecChangeAge {
+		return time.Time{}, ""
+	}
+	return at, manager
+}
+
 func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
+	changedAt, changedBy := specChangeTime(new)
+
 	if old.Status.ReadyReplicas != new.Status.ReadyReplicas || old.Status.AvailableReplicas != new.Status.AvailableReplicas {
 		k.emitResourceEvent("Deployment", new.Namespace, new.Name, "resource_status", deploymentStatusSeverity(new),
 			fmt.Sprintf("%s status is %d/%d replicas ready", new.Name, new.Status.ReadyReplicas, deploymentReplicas(new)), map[string]any{
@@ -254,6 +292,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 	if oldImg != newImg {
 		k.Emit(event.Event{
 			Source:     "k8s",
+			OccurredAt: changedAt,
 			EntityKind: "Deployment",
 			EntityName: new.Name,
 			Namespace:  new.Namespace,
@@ -264,6 +303,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 				"old_image":  oldImg,
 				"new_image":  newImg,
 				"commit_sha": extractSHA(newImg),
+				"changed_by": changedBy,
 			}),
 		})
 	}
@@ -276,10 +316,11 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			EntityKind: "Deployment",
 			EntityName: new.Name,
 			Namespace:  new.Namespace,
+			OccurredAt: changedAt,
 			Type:       "resource_change",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s resource limits changed", new.Name),
-			Payload:    mustJSON(map[string]any{"new_mem_limit": memoryLimit(new.Spec.Template.Spec.Containers[0]), "old_mem_limit": memoryLimit(old.Spec.Template.Spec.Containers[0])}),
+			Payload:    mustJSON(map[string]any{"new_mem_limit": memoryLimit(new.Spec.Template.Spec.Containers[0]), "old_mem_limit": memoryLimit(old.Spec.Template.Spec.Containers[0]), "changed_by": changedBy}),
 		})
 	}
 
@@ -289,10 +330,11 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			EntityKind: "Deployment",
 			EntityName: new.Name,
 			Namespace:  new.Namespace,
+			OccurredAt: changedAt,
 			Type:       "scale",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s scaled from %d to %d", new.Name, *old.Spec.Replicas, *new.Spec.Replicas),
-			Payload:    mustJSON(map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas}),
+			Payload:    mustJSON(map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas, "changed_by": changedBy}),
 		})
 	}
 }

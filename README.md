@@ -70,6 +70,7 @@ Kubernetes connections, which fall back to in-cluster and local-kind defaults.
 | `REDIS_ADDR`, `REDIS_PASSWORD` | Recent-event cache backing the console's default view. |
 | `LOKI_URL`, `LOKI_QUERY` | Log source and its LogQL selector. Defaults to every namespace; scope it (e.g. `{namespace="default"}`) or control-plane chatter drowns out application errors. |
 | `GITHUB_TOKEN`, `ARGOCD_*`, `TERRAFORM_*` | Optional collectors; each is skipped when its URL or token is unset. |
+| `RCA_DECAY_DIVISOR` | How sharply causal plausibility decays across the window. The time constant is the symptom's own lookback divided by this; default 3 puts three e-folds across the window. |
 | `CHRONICLE_API_TOKEN` | When set, every `/api/*` request must present `Authorization: Bearer <token>`. |
 | `CHRONICLE_ALLOWED_ORIGIN` | CORS origin. Empty (the default) sends no CORS header; the console is same-origin. |
 | `HEAL_*` | Healing safety gates — see below. |

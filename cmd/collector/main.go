@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -333,7 +334,10 @@ func main() {
 		// service away; 5 reaches the service behind the one that broke, which
 		// is where root causes usually live. Distance already damps the score
 		// (x0.33 at five hops), so the extra reach cannot dominate a ranking.
-		MaxHops: 5,
+		MaxHops:      5,
+		DecayDivisor: floatFromEnv("RCA_DECAY_DIVISOR", 0),
+		// Must match the graph sync ticker below.
+		GraphInterval: 30 * time.Second,
 	}
 	healStore := heal.NewPostgresAuditStore(pool)
 	healer := heal.NewEngine(healStore)
@@ -454,6 +458,17 @@ func newK8sClient() (kubernetes.Interface, error) {
 func valueOrEnv(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
+	}
+	return fallback
+}
+
+// floatFromEnv reads a tuning knob, falling back when unset or unparseable.
+func floatFromEnv(name string, fallback float64) float64 {
+	if raw := os.Getenv(name); raw != "" {
+		if value, err := strconv.ParseFloat(raw, 64); err == nil && value > 0 {
+			return value
+		}
+		slog.Warn("ignoring invalid tuning value", "name", name, "value", raw)
 	}
 	return fallback
 }
