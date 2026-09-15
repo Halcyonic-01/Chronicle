@@ -1,0 +1,40 @@
+# Continuous traffic against the victim app. Without it the frontend -> api ->
+# redis/worker chain is silent, Prometheus records no error rate and Loki no
+# error logs, so RCA has no symptom to explain and the mesh `calls` edges decay.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: default
+  labels:
+    app: loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      containers:
+        - name: loadgen
+          image: curlimages/curl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Keep a steady request rate. --max-time bounds each call so a
+              # hung dependency slows the loop instead of stalling it forever.
+              while true; do
+                curl -s -o /dev/null --max-time 5 http://frontend:8080/ || true
+                sleep 0.5
+              done
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"

@@ -38,10 +38,17 @@ echo "Installing Kafka and PostgreSQL..."
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm repo update
 
+# The chart composes its image as <image.registry>/<image.repository>:<image.tag>
+# and defaults the registry to docker.io, so image.repository must stay
+# registry-less. KAFKA_IMAGE is the fully qualified form the admin pod needs.
+KAFKA_REPOSITORY=bitnamilegacy/kafka
+KAFKA_TAG=4.0.0-debian-12-r10
+KAFKA_IMAGE="docker.io/${KAFKA_REPOSITORY}:${KAFKA_TAG}"
+
 helm upgrade --install kafka bitnami/kafka \
     --namespace chronicle --create-namespace \
-    --set image.repository=bitnamilegacy/kafka \
-    --set image.tag=4.0.0-debian-12-r10 \
+    --set image.repository="$KAFKA_REPOSITORY" \
+    --set image.tag="$KAFKA_TAG" \
     --set controller.replicaCount=1 \
     --set broker.replicaCount=1 \
     --set offsetsTopicReplicationFactor=1 \
@@ -57,23 +64,47 @@ helm upgrade --install kafka bitnami/kafka \
 # newly recreated kind cluster is ready without manual kubectl commands.
 kubectl wait --namespace chronicle --for=condition=ready pod/kafka-broker-0 --timeout=180s
 
-# The broker pod has a deliberately small memory limit for kind. Running
-# kafka-topics.sh with its default JVM heap in that same pod can OOM-kill the
-# container (exit 137), so keep the short-lived admin client bounded.
+# The broker pod is capped at 768Mi for kind, and the broker JVM alone already
+# claims 75% of that as heap. Exec'ing the admin client into that same pod
+# starts a second JVM inside the same cgroup, and the kernel kills the largest
+# RSS -- the broker itself (exit 137). Bounding the client's heap does not help,
+# because the overrun is the sum of two JVMs' total footprints, not one heap.
+# Run it in its own short-lived pod instead, where it has its own memory budget.
 kafka_topics() {
-    kubectl exec --namespace chronicle kafka-broker-0 -- \
-        env KAFKA_HEAP_OPTS='-Xms32m -Xmx128m' kafka-topics.sh "$@"
+    kubectl run "kafka-admin-$RANDOM" \
+        --namespace chronicle \
+        --image="$KAFKA_IMAGE" \
+        --restart=Never \
+        --rm \
+        --attach \
+        --quiet \
+        --command -- kafka-topics.sh "$@"
+}
+
+# The broker restarts after an OOM kill, and readiness can flip green before the
+# client listener accepts metadata requests. Retry rather than abort the run.
+kafka_topics_with_retry() {
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if kafka_topics "$@"; then
+            return 0
+        fi
+        echo "Kafka not ready for admin requests yet; retry $attempt/5..."
+        sleep 10
+    done
+    echo "Failed to provision Kafka topic after 5 attempts." >&2
+    return 1
 }
 
 echo "Provisioning Kafka topics..."
-kafka_topics \
+kafka_topics_with_retry \
     --create \
     --if-not-exists \
     --topic chronicle.events \
     --bootstrap-server kafka:9092 \
     --partitions 1 \
     --replication-factor 1
-kafka_topics \
+kafka_topics_with_retry \
     --create \
     --if-not-exists \
     --topic __consumer_offsets \
