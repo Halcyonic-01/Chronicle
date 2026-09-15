@@ -160,3 +160,39 @@ func TestSpecChangeTimeAcceptsTheScaleSubresource(t *testing.T) {
 		t.Fatalf("expected the scale write, got %v %q", at, manager)
 	}
 }
+
+// An informer delivers its initial list to handlers through a queue that drains
+// independently of HasSynced, so a readiness flag cannot keep the backlog out.
+// The event's own time can: anything older than this collector's start was
+// already recorded by whoever was running then.
+func TestBacklogEventsAreNotReplayedAsLive(t *testing.T) {
+	out := make(chan event.Event, 4)
+	k := &K8sCollector{BaseCollector: BaseCollector{Out: out}, startedAt: time.Now().UTC()}
+
+	backlog := &corev1.Event{
+		Type:           "Warning",
+		Reason:         "Unhealthy",
+		Message:        "Liveness probe failed",
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "old-1"},
+		LastTimestamp:  metav1.NewTime(k.startedAt.Add(-30 * time.Minute)),
+	}
+	k.fromK8sEvent(backlog)
+	select {
+	case e := <-out:
+		t.Fatalf("a warning from before startup was replayed as live: %s", e.Title)
+	default:
+	}
+
+	live := backlog.DeepCopy()
+	live.InvolvedObject.Name = "new-1"
+	live.LastTimestamp = metav1.NewTime(k.startedAt.Add(5 * time.Second))
+	k.fromK8sEvent(live)
+	select {
+	case e := <-out:
+		if e.EntityName != "new-1" {
+			t.Fatalf("unexpected event emitted: %+v", e)
+		}
+	default:
+		t.Fatal("a warning that happened after startup must still be emitted")
+	}
+}

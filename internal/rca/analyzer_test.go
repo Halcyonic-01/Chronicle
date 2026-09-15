@@ -678,3 +678,438 @@ func TestSimultaneousEventsStillFormOneChain(t *testing.T) {
 		t.Errorf("the chain should be named for the deployment that owns the pod, got %q", candidates[0].Chain)
 	}
 }
+
+// A second monitor firing on the failing component is not an explanation for
+// the first. Before the co-symptom damping, latency_spike on api outscored the
+// redis scale that caused both, purely because zero hops earns the maximum
+// distance factor.
+func TestACoSymptomDoesNotOutrankTheUpstreamChange(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike", Title: "api erroring"}
+	coSymptom := event.Event{ID: "co", IngestedAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "latency_spike", Title: "api slow"}
+	cause := event.Event{ID: "cause", IngestedAt: now.Add(-69 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0"}
+
+	got, err := (&Analyzer{
+		Events: fakeEvents{coSymptom, cause},
+		Graph: fakeGraph{
+			"default/Service/api":      0,
+			"default/Deployment/redis": 4,
+		},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) < 2 {
+		t.Fatalf("expected both candidates, got %+v", got.Candidates)
+	}
+	if got.Candidates[0].Event.ID != "cause" {
+		t.Fatalf("co-symptom outranked the real change: top is %q (%s), scores %v/%v",
+			got.Candidates[0].Event.ID, got.Candidates[0].Event.Type,
+			got.Candidates[0].Score, got.Candidates[1].Score)
+	}
+}
+
+// The damping applies only on the symptom's own component. An error on an
+// upstream service is genuine evidence that the failure started there.
+func TestAnUpstreamObservationIsNotDamped(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	upstream := event.Event{ID: "u", IngestedAt: now.Add(-20 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "redis", Type: "log_error"}
+
+	got, err := (&Analyzer{
+		Events: fakeEvents{upstream},
+		Graph:  fakeGraph{"default/Service/api": 0, "default/Service/redis": 1},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 {
+		t.Fatalf("expected the upstream observation to survive: %+v", got.Candidates)
+	}
+	for _, f := range got.Candidates[0].Factors {
+		if f.Label == "Co-symptom" {
+			t.Fatal("an upstream observation was damped as a co-symptom")
+		}
+	}
+}
+
+// In a mesh nearly everything reaches everything, so without a propagation
+// bound one early unrelated event absorbs every later candidate into its
+// chain, and the separation term then skips every rival as "same chain".
+func TestAnEarlyUnrelatedEventDoesNotAbsorbTheChain(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	bootstrap := Candidate{Event: event.Event{ID: "boot", IngestedAt: now.Add(-10 * time.Minute), Namespace: "linkerd", EntityKind: "Pod", EntityName: "linkerd-destination"}}
+	cause := Candidate{Event: event.Event{ID: "cause", IngestedAt: now.Add(-69 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis"}}
+	effect := Candidate{Event: event.Event{ID: "effect", IngestedAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "api"}}
+
+	candidates := []Candidate{bootstrap, cause, effect}
+	linkChains(candidates, func(from, to string) bool { return true }) // everything reaches everything
+
+	if candidates[0].Chain == candidates[1].Chain {
+		t.Fatalf("a 10-minute-old unrelated event absorbed the incident chain: %q == %q",
+			candidates[0].Chain, candidates[1].Chain)
+	}
+	if candidates[1].Chain != candidates[2].Chain {
+		t.Fatalf("cause and effect 39s apart should share a chain: %q vs %q",
+			candidates[1].Chain, candidates[2].Chain)
+	}
+	if candidates[1].Chain != "cause" {
+		t.Fatalf("the chain should be named for its head, got %q", candidates[1].Chain)
+	}
+}
+
+// chainGraph models the real victim topology: frontend calls api, api calls
+// redis, and a Deployment owns each Pod. Upstream of the frontend therefore
+// runs all the way back to the redis Deployment.
+func chainGraph() func(from, to string) bool {
+	node := func(kind, name string) graph.Node { return graph.Node{Kind: kind, Name: name, Namespace: "default"} }
+	g := graph.New()
+	g.SetEdges([]graph.Edge{
+		{From: node("Pod", "frontend-1"), To: node("Service", "api"), Kind: "calls"},
+		{From: node("Service", "api"), To: node("Pod", "api-1"), Kind: "routes_to"},
+		{From: node("Pod", "api-1"), To: node("Service", "redis"), Kind: "calls"},
+		{From: node("Service", "redis"), To: node("Pod", "redis-1"), Kind: "routes_to"},
+		{From: node("Deployment", "redis"), To: node("Pod", "redis-1"), Kind: "owns"},
+	})
+	return func(from, to string) bool { _, ok := g.Upstream(to, 8)[from]; return ok }
+}
+
+func obs(id, typ, kind, name string, dist int, at time.Time) Candidate {
+	return Candidate{
+		Event:    event.Event{ID: id, OccurredAt: at, Namespace: "default", EntityKind: kind, EntityName: name, Type: typ},
+		Distance: dist, Score: 0.20,
+	}
+}
+
+func damped(c Candidate) bool {
+	for _, f := range c.Factors {
+		if f.Label == "Propagation" || f.Label == "Co-symptom" {
+			return true
+		}
+	}
+	return false
+}
+
+// The failure this was built to catch: an error_spike on api ranked as the
+// cause of an error_spike on frontend. api is erroring because redis is down,
+// so the api reading is the failure arriving, not starting.
+func TestAMidChainObservationIsDampedAsPropagation(t *testing.T) {
+	now := time.Now().UTC()
+	c := []Candidate{
+		obs("api-errors", "error_spike", "Service", "api", 1, now.Add(-15*time.Second)),
+		obs("redis-down", "became_unready", "Pod", "redis-1", 4, now.Add(-40*time.Second)),
+	}
+	dampPropagation(c, chainGraph(), 10*time.Minute)
+	if !damped(c[0]) {
+		t.Error("an observation with an implicated dependency upstream is propagation, not origin")
+	}
+	if damped(c[1]) {
+		t.Error("a state transition is not an observation and must not be damped")
+	}
+}
+
+// The other half of the same rule: the observation at the far end of the chain
+// has nothing upstream implicating it, so it survives as the origin. Without
+// this, an incident with no recorded change would have every candidate damped.
+func TestTheObservationAtTheEndOfTheChainSurvives(t *testing.T) {
+	now := time.Now().UTC()
+	c := []Candidate{
+		obs("api-log", "log_error", "Pod", "api-1", 2, now.Add(-15*time.Second)),
+		obs("redis-log", "log_error", "Pod", "redis-1", 4, now.Add(-20*time.Second)),
+	}
+	dampPropagation(c, chainGraph(), 10*time.Minute)
+	if !damped(c[0]) {
+		t.Error("the mid-chain reading should be damped")
+	}
+	if damped(c[1]) {
+		t.Fatal("the end of the propagation chain is the origin and must survive")
+	}
+}
+
+// A change is an intervention: it explains a failure however much monitor noise
+// sits upstream of it. Damping one would hide the event RCA exists to find.
+func TestAChangeIsNeverDampedAsPropagation(t *testing.T) {
+	now := time.Now().UTC()
+	c := []Candidate{
+		{Event: event.Event{ID: "api-deploy", OccurredAt: now.Add(-15 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "deploy"}, Distance: 1, Score: 0.9},
+		obs("redis-log", "log_error", "Pod", "redis-1", 4, now.Add(-20*time.Second)),
+	}
+	dampPropagation(c, chainGraph(), 10*time.Minute)
+	if damped(c[0]) {
+		t.Fatal("a deploy was damped as propagation")
+	}
+}
+
+// Mutually reachable nodes give no direction, so neither can be called the
+// propagation of the other. This is also the degraded path where the graph
+// source cannot hand over edges and reachability collapses to "in scope".
+func TestMutualReachabilityDoesNotDamp(t *testing.T) {
+	now := time.Now().UTC()
+	c := []Candidate{
+		obs("a", "error_spike", "Service", "api", 1, now.Add(-10*time.Second)),
+		obs("b", "error_spike", "Service", "redis", 2, now.Add(-12*time.Second)),
+	}
+	dampPropagation(c, func(from, to string) bool { return true }, 10*time.Minute)
+	if damped(c[0]) || damped(c[1]) {
+		t.Fatal("without a direction neither reading explains the other")
+	}
+}
+
+// An anomaly from an unrelated incident an hour earlier is still upstream in
+// topology. Only a reading close enough in time to be the same failure counts.
+func TestAnOldUpstreamAnomalyDoesNotDamp(t *testing.T) {
+	now := time.Now().UTC()
+	c := []Candidate{
+		obs("api-errors", "error_spike", "Service", "api", 1, now.Add(-15*time.Second)),
+		obs("stale", "log_error", "Pod", "redis-1", 4, now.Add(-1*time.Hour)),
+	}
+	dampPropagation(c, chainGraph(), 10*time.Minute)
+	if damped(c[0]) {
+		t.Fatal("an anomaly an hour old is a different incident and explains nothing here")
+	}
+}
+
+// The case a single global window silently refused to connect: a memory limit
+// lowered half an hour before the OOM it causes. Nothing breaks when the limit
+// changes -- it breaks when the workload next grows into it.
+func TestASlowCauseStillLinksToItsLateSymptom(t *testing.T) {
+	now := time.Now().UTC()
+	reaches := func(from, to string) bool {
+		return from == "default/Deployment/api" && to == "default/Pod/api-1"
+	}
+	candidates := []Candidate{
+		{Event: event.Event{ID: "limit-change", OccurredAt: now.Add(-30 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "resource_change"}, Score: 0.3},
+		{Event: event.Event{ID: "oom", OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "oom_kill"}, Score: 0.2},
+	}
+	linkChains(candidates, reaches)
+	if candidates[0].Chain != candidates[1].Chain {
+		t.Fatalf("a resource change and the OOM it caused 30m later are one chain: %q vs %q", candidates[0].Chain, candidates[1].Chain)
+	}
+	if candidates[0].Chain != "limit-change" {
+		t.Errorf("the chain should be headed by the change, got %q", candidates[0].Chain)
+	}
+}
+
+// The other half: the horizon is per failure mode, not a single wider window.
+// A scale takes effect on the next request, so a scale half an hour earlier is
+// a separate hypothesis rather than the same propagation.
+func TestAFastCauseDoesNotLinkAcrossTheSameGap(t *testing.T) {
+	now := time.Now().UTC()
+	reaches := func(from, to string) bool {
+		return from == "default/Deployment/api" && to == "default/Pod/api-1"
+	}
+	candidates := []Candidate{
+		{Event: event.Event{ID: "old-scale", OccurredAt: now.Add(-30 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "scale"}, Score: 0.3},
+		{Event: event.Event{ID: "oom", OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "oom_kill"}, Score: 0.2},
+	}
+	linkChains(candidates, reaches)
+	if candidates[0].Chain == candidates[1].Chain {
+		t.Fatal("a scale propagates on the next request; 30m later is a different story")
+	}
+}
+
+// A rollout lands over minutes, so a deploy is still the head of the chain for
+// errors that appear well after it started -- but not for ones an hour later.
+func TestADeployLinksAcrossARolloutButNotAnHour(t *testing.T) {
+	now := time.Now().UTC()
+	reaches := func(from, to string) bool {
+		return from == "default/Deployment/api" && to == "default/Pod/api-1"
+	}
+	build := func(gap time.Duration) []Candidate {
+		return []Candidate{
+			{Event: event.Event{ID: "deploy", OccurredAt: now.Add(-gap), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "deploy"}, Score: 0.4},
+			{Event: event.Event{ID: "errors", OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "became_unready"}, Score: 0.2},
+		}
+	}
+	during := build(10 * time.Minute)
+	linkChains(during, reaches)
+	if during[0].Chain != during[1].Chain {
+		t.Error("a deploy 10m before the failure is still the rollout that caused it")
+	}
+	later := build(time.Hour)
+	linkChains(later, reaches)
+	if later[0].Chain == later[1].Chain {
+		t.Error("an hour is past any rollout; that is a separate hypothesis")
+	}
+}
+
+// The horizon must stay short for events whose failure mode is unknown, or the
+// bootstrap noise that absorbed an entire incident comes straight back.
+func TestAnUncharacterisedEventKeepsTheShortHorizon(t *testing.T) {
+	if got := propagationHorizonFor(event.Event{Type: "k8s_event"}); got != defaultPropagationHorizon {
+		t.Fatalf("an unclassified event must keep the short horizon, got %s", got)
+	}
+	if propagationHorizonFor(event.Event{Type: "resource_change"}) <= propagationHorizonFor(event.Event{Type: "scale"}) {
+		t.Fatal("resource pressure must be allowed longer to surface than a scale")
+	}
+}
+
+// propagationFactor is a tuned number, so the property it has to buy is stated
+// here rather than trusted: however far away the cause sits and however close
+// the propagation is, an explained observation must not outrank a real cause.
+// The extremes are read from typeWeight rather than named, so the property
+// keeps holding if those weights are ever retuned.
+//
+// The worst case pits the strongest observation at zero hops -- where the
+// distance factor is at its maximum of 1.0 -- against the weakest non
+// observation at the edge of the hop budget. Undamped the observation wins
+// that comparison, which is precisely the bug; damped it must lose at every
+// distance.
+func TestPropagationNeverOutranksARealCauseAtAnyDistance(t *testing.T) {
+	now := time.Now().UTC()
+	symptom := event.Event{ID: "s", OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "frontend", Type: "error_spike"}
+
+	strongestObservation, weakestCause := "", ""
+	for typ := range typeWeight {
+		if observationTypes[typ] {
+			if strongestObservation == "" || typeWeight[typ] > typeWeight[strongestObservation] {
+				strongestObservation = typ
+			}
+			continue
+		}
+		if weakestCause == "" || typeWeight[typ] < typeWeight[weakestCause] {
+			weakestCause = typ
+		}
+	}
+	if strongestObservation == "" || weakestCause == "" {
+		t.Fatal("typeWeight no longer contains both observations and causes")
+	}
+	t.Logf("worst case: %s (%.2f) damped, against %s (%.2f)",
+		strongestObservation, typeWeight[strongestObservation], weakestCause, typeWeight[weakestCause])
+
+	scored := func(typ string, distance int) float64 {
+		c := Candidate{
+			Event:    event.Event{OccurredAt: now.Add(-10 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "x", Type: typ},
+			Distance: distance,
+		}
+		score(&c, symptom, 200)
+		return c.Score
+	}
+
+	for observationHops := 0; observationHops <= 8; observationHops++ {
+		for causeHops := 0; causeHops <= 8; causeHops++ {
+			propagation := scored(strongestObservation, observationHops) * propagationFactor
+			cause := scored(weakestCause, causeHops)
+			if propagation >= cause {
+				t.Fatalf("damped propagation at %d hops (%.4f) outranked a cause at %d hops (%.4f)",
+					observationHops, propagation, causeHops, cause)
+			}
+		}
+	}
+
+	// Confirm the damping is what buys the property, so this cannot silently
+	// pass if the factor is ever neutralised.
+	if scored(strongestObservation, 0) <= scored(weakestCause, 8) {
+		t.Fatal("without damping the observation already lost; the property proves nothing")
+	}
+}
+
+// A recurring signal arrives as a fresh event each time it fires, and a
+// re-observed one arrives as a fresh event on every collector restart. Either
+// way an earlier copy sits on the symptom's own resource at zero hops, where
+// the distance factor is at its maximum -- so it outranked everything and
+// Chronicle reported a failure as the cause of itself.
+func TestARecurrenceOfTheSymptomIsNotItsCause(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	signal := func(id string, at time.Time) event.Event {
+		return event.Event{
+			ID: id, IngestedAt: at, OccurredAt: at,
+			Namespace: "default", EntityKind: "Pod", EntityName: "probe-1",
+			Type: "k8s_event", Title: `Unhealthy: Liveness probe failed: Get "http://10.244.2.33:4191/live": context deadline exceeded`,
+		}
+	}
+	symptom := signal("now", now)
+	earlier := signal("earlier", now.Add(-412*time.Second))
+	realCause := event.Event{
+		ID: "cause", IngestedAt: now.Add(-60 * time.Second), OccurredAt: now.Add(-60 * time.Second),
+		Namespace: "default", EntityKind: "Deployment", EntityName: "probe", Type: "scale", Title: "probe scaled from 1 to 0",
+	}
+
+	got, err := (&Analyzer{
+		Events: fakeEvents{earlier, realCause},
+		Graph: fakeGraph{
+			"default/Pod/probe-1":      0,
+			"default/Deployment/probe": 1,
+		},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "earlier" {
+			t.Fatal("an earlier firing of the same signal was offered as its own cause")
+		}
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "cause" {
+		t.Fatalf("the real change should be the only candidate left: %+v", got.Candidates)
+	}
+}
+
+// The rule keys on the signal, not the resource: a different kind of event on
+// the same resource is still a legitimate explanation.
+func TestADifferentSignalOnTheSameResourceStillCounts(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "k8s_event", Title: "Unhealthy: probe failed"}
+	other := event.Event{ID: "oom", IngestedAt: now.Add(-30 * time.Second), OccurredAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "oom_kill", Title: "api-1 OOMKilled"}
+
+	got, err := (&Analyzer{Events: fakeEvents{other}, Graph: fakeGraph{"default/Pod/api-1": 0}}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "oom" {
+		t.Fatalf("an OOM kill explains a failing probe on the same pod: %+v", got.Candidates)
+	}
+}
+
+// A recovery is the end of a failure, not the start of one. Left in the
+// running, a resolved metric alert was ranked as the reason a service was
+// erroring.
+func TestARecoveryIsNeverOfferedAsACause(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "frontend", Type: "error_spike"}
+	recoveries := []event.Event{
+		{ID: "resolved", IngestedAt: now.Add(-20 * time.Second), OccurredAt: now.Add(-20 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "latency_spike_resolved"},
+		{ID: "ready", IngestedAt: now.Add(-25 * time.Second), OccurredAt: now.Add(-25 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "became_ready"},
+	}
+	cause := event.Event{ID: "cause", IngestedAt: now.Add(-40 * time.Second), OccurredAt: now.Add(-40 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0"}
+
+	got, err := (&Analyzer{
+		Events: fakeEvents(append(recoveries, cause)),
+		Graph: fakeGraph{
+			"default/Service/frontend": 0, "default/Service/api": 1,
+			"default/Pod/api-1": 2, "default/Deployment/redis": 3,
+		},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got.Candidates {
+		if isRecovery(c.Event) {
+			t.Fatalf("%q is a recovery and cannot have caused a failure", c.Event.Type)
+		}
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "cause" {
+		t.Fatalf("only the real change should remain: %+v", got.Candidates)
+	}
+}
+
+// An outage lasts as long as it lasts. Its hundredth error line is still the
+// failure arriving, even though it arrives long after the propagation delay of
+// the change that caused it -- which is why damping is bounded by the incident
+// window rather than by how fast that kind of cause propagates.
+func TestALateErrorInASustainedOutageIsStillPropagation(t *testing.T) {
+	now := time.Now().UTC()
+	c := []Candidate{
+		// Five minutes of continuous failure after a scale that propagates in
+		// seconds; the propagation horizon for a scale is far shorter than this.
+		obs("late-error", "log_error", "Pod", "api-1", 2, now.Add(-10*time.Second)),
+		{Event: event.Event{ID: "scale", OccurredAt: now.Add(-5 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale"}, Distance: 5, Score: 0.2},
+	}
+	if 5*time.Minute <= propagationHorizonFor(c[1].Event) {
+		t.Fatal("this test needs a gap wider than a scale's propagation horizon")
+	}
+	dampPropagation(c, chainGraph(), 10*time.Minute)
+	if !damped(c[0]) {
+		t.Fatal("an error still flowing during the outage is propagation, not a new origin")
+	}
+}

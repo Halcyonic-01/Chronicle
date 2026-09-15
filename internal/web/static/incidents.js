@@ -43,6 +43,17 @@
   const target = e => `${e.namespace || 'cluster'}/${e.entity_name || '—'}`;
   const isCritical = e => e.severity === 'critical';
   const ts = v => new Date(v).getTime();
+  // Mirrors causalTime in the analyzer: when an event happened, not when we
+  // noticed it. Ingestion lag is real -- Loki delivers a log line about fifteen
+  // seconds after it was written -- so measuring the gap by ingestion made a
+  // cause that genuinely preceded the symptom read as though it followed it.
+  const MAX_CAUSAL_SKEW_MS = 5 * 60 * 1000;
+  const causalMs = e => {
+    const occurred = ts(e.occurred_at), ingested = ts(e.ingested_at);
+    if (!occurred || !isFinite(occurred)) return ingested;
+    if (ingested - occurred > MAX_CAUSAL_SKEW_MS) return ingested;
+    return occurred;
+  };
 
   const clock = v => {
     const d = new Date(v);
@@ -223,7 +234,7 @@
         <p class="note">${esc(r.narrative || 'No upstream cause was found in the dependency graph for this signal.')}</p></div>`;
     }
     const rows = r.candidates.map((c, i) => {
-      const gap = Math.round((ts(r.symptom.ingested_at) - ts(c.event.ingested_at)));
+      const gap = Math.round(causalMs(r.symptom) - causalMs(c.event));
       const linked = i > 0 && c.chain && c.chain === r.candidates[0].chain;
       return `<tr class="${i === focus ? 'top' : ''}${linked ? ' linked' : ''}" data-cand="${i}" title="${linked ? 'An effect of the leading candidate, not a rival explanation' : ''}">
         <td class="num">${i + 1}</td>
@@ -436,7 +447,8 @@
       const oi = outSeen.get(fromKey) || 0; outSeen.set(fromKey, oi + 1);
       const ii = inSeen.get(toKey) || 0; inSeen.set(toKey, ii + 1);
       const x1 = a.x + W, y1 = anchor(a, oi, outTotal.get(fromKey));
-      const x2 = b.x, y2 = anchor(b, ii, inTotal.get(toKey));
+      // Stop just short of the box so the arrowhead reads as pointing at it.
+      const x2 = b.x - 3, y2 = anchor(b, ii, inTotal.get(toKey));
       // Bend within the channel between columns so lines never cross a box.
       const bend = Math.min(52, (x2 - x1) / 2);
       const on = routePairs.has(fromKey + '\u0000' + toKey);
@@ -457,8 +469,8 @@
 
     return `<div class="ev-wrap"><svg id="ev-svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
       <defs>
-        <marker id="ev-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 z" class="ev-head"/></marker>
-        <marker id="ev-arrow-on" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" class="ev-head-on"/></marker>
+        <marker id="ev-arrow" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8.5" refY="4.5" orient="auto"><path d="M0 0.6 L9 4.5 L0 8.4 z" class="ev-head"/></marker>
+        <marker id="ev-arrow-on" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="9.5" refY="5" orient="auto"><path d="M0 0.7 L10 5 L0 9.3 z" class="ev-head-on"/></marker>
       </defs>
       ${lines}${boxes}
     </svg></div>` + evidenceControls(edges.length, all.length, placed.size, hidden);

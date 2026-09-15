@@ -334,7 +334,13 @@ func main() {
 		// service away; 5 reaches the service behind the one that broke, which
 		// is where root causes usually live. Distance already damps the score
 		// (x0.33 at five hops), so the extra reach cannot dominate a ranking.
-		MaxHops:      5,
+		// The walk budget bounds work, not belief: the distance factor already
+		// penalises remote causes smoothly. Set too low it silently truncates
+		// instead -- at 5 the redis Deployment sat 6 hops from the frontend
+		// Service, so the scale that caused the outage was not merely ranked
+		// low, it was never a candidate, and the ranking filled with the
+		// failure's own propagation.
+		MaxHops:      intFromEnv("RCA_MAX_HOPS", 8),
 		DecayDivisor: floatFromEnv("RCA_DECAY_DIVISOR", 0),
 		// Must match the graph sync ticker below.
 		GraphInterval: 30 * time.Second,
@@ -458,6 +464,18 @@ func newK8sClient() (kubernetes.Interface, error) {
 func valueOrEnv(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
+	}
+	return fallback
+}
+
+// intFromEnv reads a whole-number tuning knob, falling back when unset or
+// unparseable.
+func intFromEnv(name string, fallback int) int {
+	if raw := os.Getenv(name); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			return value
+		}
+		slog.Warn("ignoring invalid tuning value", "name", name, "value", raw)
 	}
 	return fallback
 }

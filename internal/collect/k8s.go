@@ -21,6 +21,10 @@ import (
 type K8sCollector struct {
 	BaseCollector
 	client kubernetes.Interface
+	// startedAt bounds which Kubernetes events count as live rather than
+	// backlog. It is set when Run begins, not when the collector is built, so
+	// a collector that waits for leadership does not treat the wait as uptime.
+	startedAt time.Time
 }
 
 func NewK8sCollector(client kubernetes.Interface, out chan<- event.Event) *K8sCollector {
@@ -31,6 +35,7 @@ func NewK8sCollector(client kubernetes.Interface, out chan<- event.Event) *K8sCo
 }
 
 func (k *K8sCollector) Run(ctx context.Context) error {
+	k.startedAt = time.Now().UTC()
 	// Resync every 30s: a safety net in case we miss a watch event.
 	factory := informers.NewSharedInformerFactory(k.client, 30*time.Second)
 	var informersReady atomic.Bool
@@ -114,8 +119,16 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 	})
 
 	factory.Start(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done()) {
-		return ctx.Err()
+	// cache.WaitForCacheSync with no informers to wait on returns true
+	// immediately, so informersReady flipped before the initial list had been
+	// delivered. Every pre-existing Kubernetes warning event then arrived
+	// through AddFunc and was emitted as if it had just happened, replaying the
+	// cluster's whole event backlog on every restart. The factory's own method
+	// waits on the informers actually registered here.
+	for informer, synced := range factory.WaitForCacheSync(ctx.Done()) {
+		if !synced {
+			return fmt.Errorf("informer cache for %s did not sync", informer)
+		}
 	}
 	informersReady.Store(true)
 	<-ctx.Done()
@@ -125,6 +138,18 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 func (k *K8sCollector) fromK8sEvent(ev *corev1.Event) {
 	if ev.Type == "Normal" {
 		return // we mostly care about warnings
+	}
+	// An informer hands its initial list to handlers through a buffered queue
+	// that drains independently of HasSynced, so a readiness flag flipped after
+	// WaitForCacheSync still lets pre-existing objects through behind it. That
+	// replayed the cluster's whole warning backlog on every restart, and RCA
+	// then offered one replayed copy as the cause of another.
+	//
+	// The event's own time settles it without depending on delivery order: a
+	// Kubernetes event that happened before this collector started is history,
+	// already recorded by whichever process was running at the time.
+	if at := k8sEventTime(ev); !at.IsZero() && at.Before(k.startedAt) {
+		return
 	}
 
 	// Create event representation

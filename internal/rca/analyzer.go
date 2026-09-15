@@ -127,6 +127,79 @@ const allowedLateness = 30 * time.Second
 // so ingestion time — which Chronicle controls — is used instead.
 const maxCausalSkew = 5 * time.Minute
 
+// observationTypes report that something looks wrong; they change nothing.
+// On an upstream component that is evidence the failure started there, which
+// is why they stay candidates. On the symptom's own component they only
+// restate the symptom through a second monitor.
+var observationTypes = map[string]bool{
+	"error_spike": true, "latency_spike": true, "log_error": true,
+}
+
+// propagationFactor damps an observation that something else already explains.
+//
+// A failure travels the dependency graph, and every monitor along the way fires:
+// redis stops, so api errors, so frontend errors. Each of those readings is the
+// same failure seen one hop later, and the RCA literature is explicit that the
+// candidate root cause is the end of the propagation chain -- if a directly
+// connected dependency is also anomalous, the anomaly originates there and the
+// nearer reading is propagation, not origin. A root cause is an intervention:
+// something that changed the system, not a monitor reporting that it broke.
+//
+// Damping rather than dropping keeps propagation visible as evidence of the
+// route the failure took, while leaving the ranking to changes and to whichever
+// observation sits at the far end of the chain with nothing upstream of it.
+const propagationFactor = 0.25
+
+// propagationHorizon is how long a cause of a given kind may take to surface
+// downstream. Linking on "reachable and later" alone lets a single early event
+// absorb every later candidate, because in a service mesh nearly everything
+// reaches everything: a Linkerd startup-probe failure during cluster bootstrap
+// became the head of a chain holding an entire unrelated incident, and since
+// every candidate then shared one chain, the separation term skipped them all
+// and reported perfect confidence on a three-percent margin.
+//
+// A single global bound cannot express this, because propagation delay is not
+// one number. Assuming it is one number misaligns causes with symptoms, which
+// dilutes the true upstream culprit and over-ranks the downstream victim --
+// the exact failure this map exists to prevent. The horizon is therefore keyed
+// on the cause's own failure mode, since that is what decides how long it
+// takes to show up somewhere else.
+var propagationHorizon = map[string]time.Duration{
+	// A dependency that vanishes fails its callers on their very next request.
+	"scale": 2 * time.Minute, "resource_deleted": 2 * time.Minute,
+	"container_restart": 2 * time.Minute, "became_unready": 2 * time.Minute,
+	"oom_kill": 2 * time.Minute,
+
+	// A rollout lands progressively: pods cycle under maxSurge, caches warm,
+	// connections drain, and the error rate only moves once enough of the fleet
+	// is carrying the new code.
+	"deploy": 15 * time.Minute, "config_change": 15 * time.Minute,
+
+	// Resource pressure accumulates instead of breaking anything at once.
+	// Lowering a memory limit fails nothing until the workload next grows into
+	// it, so the change and the OOM it causes can sit an hour apart -- the case
+	// a single short window silently refuses to connect.
+	"resource_change": 60 * time.Minute, "node_pressure": 60 * time.Minute,
+}
+
+// defaultPropagationHorizon covers event types with no characterised failure
+// mode, which includes raw Kubernetes events and log lines. It is deliberately
+// the shortest of the set: an unclassified event that is not close in time to
+// the symptom is far likelier to be unrelated noise than a slow-burning cause,
+// and it is exactly that kind of event -- a bootstrap probe failure -- that
+// absorbed a whole incident when every link shared one generous window.
+const defaultPropagationHorizon = 2 * time.Minute
+
+// propagationHorizonFor answers how long this cause may take to reach its
+// effect. It is asked of the cause, never the effect: a deploy is slow to
+// surface whatever it eventually breaks.
+func propagationHorizonFor(cause event.Event) time.Duration {
+	if h, ok := propagationHorizon[cause.Type]; ok {
+		return h
+	}
+	return defaultPropagationHorizon
+}
+
 // causalTime is when an event actually happened. Ingestion time is how the
 // event store is indexed; it is not when the world changed, and using it for
 // ordering makes causality mean "the order we noticed things".
@@ -222,8 +295,25 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	}
 	reverts := revertingChanges(raw, impactOf)
 	candidates := make([]Candidate, 0, len(raw))
+	symptomHypothesis := hypothesisKey(symptom)
 	for _, e := range raw {
 		if e.ID == symptom.ID {
+			continue
+		}
+		// Matching the id alone is not enough. A recurring signal arrives as a
+		// fresh event every time -- a liveness probe failing once a minute, or
+		// one Kubernetes warning re-observed after a restart -- and each copy
+		// then sat at zero hops with the maximum distance factor, so Chronicle
+		// answered "why is this failing?" with an earlier instance of the same
+		// failure. A signal is evidence of the problem, never its explanation.
+		if hypothesisKey(e) == symptomHypothesis {
+			continue
+		}
+		// A recovery says something started working. It is the end of a
+		// failure, not the start of one, so it cannot be what broke the
+		// symptom -- and left in the running it was ranked as a cause, with a
+		// resolved metric alert offered as the reason a service was erroring.
+		if isRecovery(e) {
 			continue
 		}
 		distance, reachable := upstream[key(e)]
@@ -236,15 +326,19 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		score(&c, symptom, decay)
 		candidates = append(candidates, c)
 	}
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
-	linkChains(candidates, func(from, to string) bool {
+	reaches := func(from, to string) bool {
 		if local != nil {
 			_, reachable := local.Upstream(to, hops)[from]
 			return reachable
 		}
 		_, reachable := upstream[from]
 		return reachable
-	})
+	}
+	// Demote propagation before ranking, so the order the user sees is the order
+	// after every candidate has been judged against the others.
+	dampPropagation(candidates, reaches, back)
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+	linkChains(candidates, reaches)
 	result.Candidates = topDistinct(candidates, 5)
 
 	// An answer is provisional while the inputs behind it are still settling:
@@ -403,6 +497,71 @@ func confidence(c []Candidate) (overall, strength, separation float64) {
 	return strength * separation, strength, separation
 }
 
+// dampPropagation demotes observations that another candidate already accounts
+// for. An observation is the origin only when nothing upstream of it is also
+// implicated; anywhere else on the path it is the failure arriving, not
+// starting. Distance zero is always propagation: an observation on the failing
+// component restates the symptom in a second metric.
+//
+// Changes are never damped. An intervention explains a failure no matter how
+// much noise surrounds it, and demoting one because a monitor upstream also
+// fired would hide exactly the event the analysis exists to find.
+func dampPropagation(candidates []Candidate, reaches func(from, to string) bool, window time.Duration) {
+	damp := make([]string, len(candidates))
+	for i := range candidates {
+		c := candidates[i]
+		if !observationTypes[c.Event.Type] {
+			continue
+		}
+		if c.Distance == 0 {
+			damp[i] = "co-symptom"
+			continue
+		}
+		for j := range candidates {
+			if i == j {
+				continue
+			}
+			other := candidates[j]
+			// Bounded by the incident window rather than by how fast this
+			// cause propagates. The two answer different questions: a
+			// propagation horizon asks whether one event directly produced
+			// another, which is what chain linking needs, while damping asks
+			// only whether something upstream in this same incident accounts
+			// for this reading. An outage lasts as long as it lasts, and its
+			// errors keep arriving long after the first of them did, so
+			// judging the hundredth error line by the propagation delay of the
+			// scale that caused it left it looking like an origin.
+			gap := causalTime(c.Event).Sub(causalTime(other.Event))
+			if gap < 0 {
+				continue // a later event cannot account for an earlier one
+			}
+			if gap > window {
+				continue // a different incident says nothing about this one
+			}
+			if !reaches(key(other.Event), key(c.Event)) {
+				continue // not upstream, so it cannot have propagated here
+			}
+			if reaches(key(c.Event), key(other.Event)) {
+				continue // mutually reachable gives no direction
+			}
+			damp[i] = "propagation"
+			break
+		}
+	}
+	for i := range candidates {
+		switch damp[i] {
+		case "co-symptom":
+			candidates[i].Score *= propagationFactor
+			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("on the failing component itself (×%.2f)", propagationFactor))
+			candidates[i].Factors = append(candidates[i].Factors, Factor{Label: "Co-symptom", Detail: "on the failing component itself, so it restates the symptom rather than explaining it", Multiplier: propagationFactor})
+		case "propagation":
+			candidates[i].Score *= propagationFactor
+			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("explained by an anomaly upstream of it (×%.2f)", propagationFactor))
+			candidates[i].Factors = append(candidates[i].Factors, Factor{Label: "Propagation", Detail: "something upstream of this is also implicated, so this is the failure arriving rather than starting", Multiplier: propagationFactor})
+		}
+	}
+}
+
 // sameChain reports whether two candidates are links of one causal chain.
 func sameChain(a, b Candidate) bool {
 	if a.Chain == "" || b.Chain == "" {
@@ -445,6 +604,9 @@ func linkChains(candidates []Candidate, reaches func(from, to string) bool) {
 			from, to := candidates[i].Event, candidates[j].Event
 			if causalTime(to).Before(causalTime(from)) {
 				continue // an effect cannot precede its cause
+			}
+			if causalTime(to).Sub(causalTime(from)) > propagationHorizonFor(from) {
+				continue // slower than this kind of cause can propagate
 			}
 			if !reaches(key(from), key(to)) {
 				continue

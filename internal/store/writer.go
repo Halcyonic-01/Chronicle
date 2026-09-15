@@ -40,7 +40,7 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event, acknowledgement
 		}
 
 		batch := uniqueEvents(buf)
-		err := insertEvents(flushCtx, w.pool, batch)
+		stored, err := insertEvents(flushCtx, w.pool, batch)
 
 		if err != nil {
 			slog.Error("batch insert failed", "n", len(buf), "unique", len(batch), "err", err)
@@ -57,8 +57,16 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event, acknowledgement
 		}
 
 		if w.cache != nil {
-			if err := w.cache.Add(flushCtx, batch...); err != nil {
-				slog.Warn("failed to update recent event cache", "err", err)
+			fresh := batch[:0:0]
+			for _, e := range batch {
+				if _, ok := stored[e.ID]; ok {
+					fresh = append(fresh, e)
+				}
+			}
+			if len(fresh) > 0 {
+				if err := w.cache.Add(flushCtx, fresh...); err != nil {
+					slog.Warn("failed to update recent event cache", "err", err)
+				}
 			}
 		}
 
@@ -95,9 +103,14 @@ INSERT INTO events (
 // insertEvents is deliberately idempotent because Kafka delivery is
 // at-least-once. A replayed message must not poison the whole batch or cause
 // valid events behind it to be retried forever.
-func insertEvents(ctx context.Context, pool *pgxpool.Pool, events []event.Event) error {
+// It reports which events it actually stored. A conflict means the fact was
+// already recorded, and the recent-event cache must not advertise a row the
+// store rejected: the dashboard lists from the cache and analyses from the
+// store, so anything cached but not stored becomes a signal that cannot be
+// opened.
+func insertEvents(ctx context.Context, pool *pgxpool.Pool, events []event.Event) (map[string]struct{}, error) {
 	if len(events) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var query strings.Builder
@@ -116,9 +129,25 @@ func insertEvents(ctx context.Context, pool *pgxpool.Pool, events []event.Event)
 			e.EntityKind, e.EntityName, e.Type, e.Severity, e.Title,
 			e.Payload, e.TraceID, event.CorrelationKey(e))
 	}
-	query.WriteString(" ON CONFLICT (id) DO NOTHING")
-	_, err := pool.Exec(ctx, query.String(), args...)
-	return err
+	// Untargeted so it covers both unique constraints: the id, which absorbs
+	// Kafka redelivering one message, and the content key, which absorbs a
+	// collector re-observing one fact under a new id. RETURNING then names the
+	// rows that were genuinely new.
+	query.WriteString(" ON CONFLICT DO NOTHING RETURNING id")
+	rows, err := pool.Query(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stored := make(map[string]struct{}, len(events))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		stored[id] = struct{}{}
+	}
+	return stored, rows.Err()
 }
 
 func uniqueEvents(events []event.Event) []event.Event {
