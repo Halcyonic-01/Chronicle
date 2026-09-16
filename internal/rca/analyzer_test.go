@@ -2,6 +2,7 @@ package rca
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -1111,5 +1112,212 @@ func TestALateErrorInASustainedOutageIsStillPropagation(t *testing.T) {
 	dampPropagation(c, chainGraph(), 10*time.Minute)
 	if !damped(c[0]) {
 		t.Fatal("an error still flowing during the outage is propagation, not a new origin")
+	}
+}
+
+// Time decay beats a fixed discount. A restore sixteen seconds before the
+// symptom outranked the scale-to-zero it reverted eight minutes earlier, so the
+// recovery was named as the cause of an outage that was still draining. The
+// factor has to be measured against the break, not applied in isolation.
+func TestAFreshFixCannotOutrankAnOldBreak(t *testing.T) {
+	candidates := []Candidate{
+		{Event: event.Event{ID: "fix", Title: "redis scaled from 0 to 1"}, Reverts: "break", Score: 0.088},
+		{Event: event.Event{ID: "break", Title: "redis scaled from 1 to 0"}, Score: 0.048},
+	}
+	capRemediations(candidates)
+	if candidates[0].Score >= candidates[1].Score {
+		t.Fatalf("the fix (%.4f) must stay below the break it undid (%.4f)",
+			candidates[0].Score, candidates[1].Score)
+	}
+	if want := 0.048 * remediationFactor; math.Abs(candidates[0].Score-want) > 1e-9 {
+		t.Fatalf("the fix should be capped at the break's score x the remediation factor: got %.4f want %.4f",
+			candidates[0].Score, want)
+	}
+}
+
+// The cap only applies when the reverted change is itself a candidate; with
+// nothing to measure against, the flat factor in score() stands alone.
+func TestARemediationWithNoVisibleBreakKeepsItsScore(t *testing.T) {
+	candidates := []Candidate{
+		{Event: event.Event{ID: "fix"}, Reverts: "break-outside-the-window", Score: 0.088},
+	}
+	capRemediations(candidates)
+	if candidates[0].Score != 0.088 {
+		t.Fatalf("nothing to compare against, so the score should be untouched: got %.4f", candidates[0].Score)
+	}
+}
+
+// The console renders the derivation as "base x each factor", so every pass
+// that touches a score has to do it through a factor. TestScoreFactors...
+// covers score() alone, which is why a later pass adjusting the score behind
+// the factors went unnoticed: this one asserts the invariant on what Analyze
+// actually returns, after damping and the remediation cap have run.
+func TestEveryReturnedCandidateReproducesItsScoreFromItsFactors(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "frontend-1", Type: "log_error", Title: "frontend erroring"}
+
+	ev := func(id, typ, kind, name string, ago time.Duration, title string) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: kind, EntityName: name, Type: typ, Title: title}
+	}
+	events := []event.Event{
+		ev("break", "scale", "Deployment", "redis", 8*time.Minute, "redis scaled from 1 to 0"),
+		ev("fix", "scale", "Deployment", "redis", 10*time.Second, "redis scaled from 0 to 1"),
+		ev("unready", "became_unready", "Pod", "redis-1", 8*time.Minute, "redis-1 stopped serving traffic"),
+		ev("spike", "error_spike", "Service", "api", 2*time.Minute, "high_error_rate on api"),
+		ev("apilog", "log_error", "Pod", "api-1", 30*time.Second, "api log line"),
+	}
+	got, err := (&Analyzer{
+		Events: fakeEvents(events),
+		Graph: fakeGraph{
+			"default/Pod/frontend-1": 0, "default/Service/api": 1, "default/Pod/api-1": 2,
+			"default/Pod/redis-1": 3, "default/Deployment/redis": 4,
+		},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) == 0 {
+		t.Fatal("expected candidates")
+	}
+	for _, c := range got.Candidates {
+		product := 1.0
+		for _, f := range c.Factors {
+			product *= f.Multiplier
+		}
+		if math.Abs(product-c.Score) > 1e-9 {
+			labels := make([]string, 0, len(c.Factors))
+			for _, f := range c.Factors {
+				labels = append(labels, fmt.Sprintf("%s=%.4f", f.Label, f.Multiplier))
+			}
+			t.Errorf("%s (%s): factors multiply to %.6f but score is %.6f [%s]",
+				c.Event.ID, c.Event.Type, product, c.Score, strings.Join(labels, " "))
+		}
+	}
+}
+
+// A deploy on the failing component with a wide blast radius multiplies past
+// 1, and the clamp used to swallow the difference: the derivation showed
+// factors reaching 1.05 beside a score of 1.00.
+func TestTheScoreCeilingIsShownAsAFactor(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	c := Candidate{
+		Event:            event.Event{OccurredAt: now.Add(-time.Second), Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "deploy"},
+		Distance:         0,
+		AffectedServices: 3,
+	}
+	score(&c, symptom, 300)
+
+	product := 1.0
+	for _, f := range c.Factors {
+		product *= f.Multiplier
+	}
+	if math.Abs(product-c.Score) > 1e-9 {
+		t.Fatalf("factors multiply to %.6f but score is %.6f", product, c.Score)
+	}
+	if c.Score > 1 {
+		t.Fatalf("score must stay within the ceiling, got %.4f", c.Score)
+	}
+}
+
+// The wire format derives the score, so even a future pass that forgets to go
+// through applyFactor cannot ship a score that contradicts its derivation.
+func TestMarshalledScoreIsDerivedFromFactors(t *testing.T) {
+	c := Candidate{Score: 0.99} // deliberately wrong relative to the factors
+	c.Factors = []Factor{
+		{Label: "Event type", Multiplier: 0.75, Base: true},
+		{Label: "Graph distance", Multiplier: 0.50},
+	}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Score float64 `json:"score"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(out.Score-0.375) > 1e-9 {
+		t.Fatalf("marshalled score should be the product of the factors (0.375), got %.6f", out.Score)
+	}
+}
+
+// applyFactor is the only sanctioned way to move a score, and it keeps the
+// cached value equal to the product at every step.
+func TestApplyFactorKeepsTheCachedScoreInStep(t *testing.T) {
+	var c Candidate
+	for _, m := range []float64{0.75, 0.80, 0.50, 1.06} {
+		c.applyFactor(Factor{Label: "f", Multiplier: m})
+		if math.Abs(c.Score-c.derivedScore()) > 1e-12 {
+			t.Fatalf("cached score %.9f drifted from the product %.9f", c.Score, c.derivedScore())
+		}
+	}
+	c.rescaleFactor("f", 0.1, "")
+	if math.Abs(c.Score-c.derivedScore()) > 1e-12 {
+		t.Fatalf("rescale left the cache stale: %.9f vs %.9f", c.Score, c.derivedScore())
+	}
+}
+
+// A pod's own status report does not explain a failure on that same pod: both
+// are the same trouble described twice. Only failure phases get this far --
+// isRecovery drops Running and Completed before ranking.
+func TestAStatusReportOnTheFailingPodIsACoSymptom(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "became_unready", Title: "api-1 stopped serving traffic"}
+	status := event.Event{ID: "status", IngestedAt: now, OccurredAt: now.Add(-time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "resource_status", Title: "api-1 status is Failed", Payload: []byte(`{"phase":"Failed"}`)}
+	cause := event.Event{ID: "cause", IngestedAt: now, OccurredAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0"}
+
+	got, err := (&Analyzer{
+		Events: fakeEvents{status, cause},
+		Graph:  fakeGraph{"default/Pod/api-1": 0, "default/Deployment/redis": 3},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) < 2 {
+		t.Fatalf("expected both candidates, got %+v", got.Candidates)
+	}
+	if got.Candidates[0].Event.ID != "cause" {
+		t.Fatalf("a status report outranked the change that caused it: top is %q", got.Candidates[0].Event.ID)
+	}
+	var damped bool
+	for _, c := range got.Candidates {
+		if c.Event.ID != "status" {
+			continue
+		}
+		for _, f := range c.Factors {
+			if f.Label == "Co-symptom" || f.Label == "Propagation" {
+				damped = true
+			}
+		}
+	}
+	if !damped {
+		t.Error("the status report on the failing pod should be damped")
+	}
+}
+
+// But a status report on an upstream resource, with nothing above it, is still
+// the best available explanation and must survive.
+func TestAnUpstreamStatusReportSurvivesWhenNothingExplainsIt(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	upstream := event.Event{ID: "up", IngestedAt: now, OccurredAt: now.Add(-20 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "redis-1", Type: "resource_status", Title: "redis-1 status is Failed", Payload: []byte(`{"phase":"Failed"}`)}
+
+	got, err := (&Analyzer{
+		Events: fakeEvents{upstream},
+		Graph:  fakeGraph{"default/Service/api": 0, "default/Pod/redis-1": 2},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "up" {
+		t.Fatalf("the only upstream failure report must survive as the origin: %+v", got.Candidates)
+	}
+	for _, f := range got.Candidates[0].Factors {
+		if f.Label == "Co-symptom" || f.Label == "Propagation" {
+			t.Fatal("nothing upstream explains it, so it is the origin and must not be damped")
+		}
 	}
 }

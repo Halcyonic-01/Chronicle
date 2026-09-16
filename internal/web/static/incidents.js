@@ -488,10 +488,12 @@
     </div>`;
   }
 
-  function blastRadius(result) {
-    const radius = result.blast_radius || {};
-    const services = radius.services || [];
-    if (!services.length) return `<div class="none">Nothing downstream of this resource is reachable in the graph.</div>`;
+  // Scoped to the selected cause, not the symptom. The symptom's own blast
+  // radius is empty whenever the symptom is an edge service, so the panel read
+  // as 0 while the narrative beside it said the cause hit three services.
+  function blastRadius(candidate) {
+    const services = (candidate && candidate.affected_service_keys) || [];
+    if (!services.length) return `<div class="none">Nothing downstream of this cause is reachable in the graph.</div>`;
     const byKind = new Map();
     services.forEach(key => { const parsed = parseKey(key); if (!byKind.has(parsed.kind)) byKind.set(parsed.kind, []); byKind.get(parsed.kind).push(parsed); });
     return `<div class="blast">${[...byKind.entries()].map(([kind, items]) => `
@@ -510,8 +512,8 @@
         <div class="sub sub-pad">Upstream dependencies of the symptom \u2014 things whose failure could reach it. This is not the blast radius; effects are listed below.</div>
         ${evidenceGraph(result, candidate)}
       </section>
-      <section class="sec"><div class="sec-h"><b>Blast radius</b><span>IF ${esc((result.symptom.entity_name || 'the symptom')).slice(0, 28)} FAILS</span></div>
-        <div class="sec-body"><div class="sub">${radius.affected_services || 0} service(s) and ${radius.affected_nodes || 0} node(s) depend on the failing resource. Each candidate's own blast radius is the SVC column above.</div>${blastRadius(result)}</div>
+      <section class="sec"><div class="sec-h"><b>Blast radius</b><span>IF ${esc((candidate.event.entity_name || 'the cause')).slice(0, 28)} FAILS</span></div>
+        <div class="sec-body"><div class="sub">${candidate.affected_services || 0} service(s) and ${candidate.affected_nodes || 0} node(s) depend on the selected cause. The symptom itself reaches ${radius.affected_services || 0}.</div>${blastRadius(candidate)}</div>
       </section>`;
   }
 

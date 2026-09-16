@@ -4,6 +4,7 @@ package rca
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -43,6 +44,50 @@ type Narrator interface {
 
 // Factor is one step of a candidate's score, kept as data so the derivation
 // can be rendered as a table rather than read out of a sentence.
+// The ranking is the product of a candidate's factors, and Score is a cache of
+// that product rather than a number of its own. Every influence on the ranking
+// has to arrive as a Factor, so the derivation the console renders cannot
+// disagree with the score beside it -- a pass that adjusted the score directly
+// used to leave the two contradicting each other.
+func (c *Candidate) derivedScore() float64 {
+	product := 1.0
+	for _, f := range c.Factors {
+		product *= f.Multiplier
+	}
+	return product
+}
+
+// applyFactor is the only way to influence a score.
+func (c *Candidate) applyFactor(f Factor) {
+	c.Factors = append(c.Factors, f)
+	c.Score = c.derivedScore()
+}
+
+// rescaleFactor changes a factor already recorded, for the cases where a later
+// pass learns the true size of an effect it has already named.
+func (c *Candidate) rescaleFactor(label string, multiplier float64, detail string) {
+	for i := range c.Factors {
+		if c.Factors[i].Label != label {
+			continue
+		}
+		c.Factors[i].Multiplier = multiplier
+		if detail != "" {
+			c.Factors[i].Detail = detail
+		}
+		c.Score = c.derivedScore()
+		return
+	}
+	c.applyFactor(Factor{Label: label, Detail: detail, Multiplier: multiplier})
+}
+
+// MarshalJSON derives the score on the way out, so no drift inside this package
+// can reach a client even if a future pass forgets the rule above.
+func (c Candidate) MarshalJSON() ([]byte, error) {
+	type wire Candidate
+	c.Score = c.derivedScore()
+	return json.Marshal(wire(c))
+}
+
 type Factor struct {
 	Label      string  `json:"label"`
 	Detail     string  `json:"detail"`
@@ -62,6 +107,10 @@ type Candidate struct {
 	AffectedServices int         `json:"affected_services"`
 	AffectedNodes    int         `json:"affected_nodes"`
 	BlastRadiusScore float64     `json:"blast_radius_score"`
+	// What this candidate takes down, named. The counts alone could not be
+	// rendered as a list, so the console fell back to the symptom's own blast
+	// radius, which for an edge service is empty.
+	AffectedServiceKeys []string `json:"affected_service_keys,omitempty"`
 }
 type BlastRadius struct {
 	AffectedServices int      `json:"affected_services"`
@@ -133,6 +182,10 @@ const maxCausalSkew = 5 * time.Minute
 // restate the symptom through a second monitor.
 var observationTypes = map[string]bool{
 	"error_spike": true, "latency_spike": true, "log_error": true,
+	// Only failure phases reach the ranking; isRecovery drops Running and
+	// Completed. A pod reporting Failed restates the trouble rather than
+	// explaining it.
+	"resource_status": true,
 }
 
 // propagationFactor damps an observation that something else already explains.
@@ -323,6 +376,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		c := Candidate{Event: e, Distance: distance, Reverts: reverts[e.ID]}
 		impact := summarizeImpact(impactOf(key(e)))
 		c.AffectedServices, c.AffectedNodes, c.BlastRadiusScore = impact.AffectedServices, impact.AffectedNodes, impact.Score
+		c.AffectedServiceKeys = impact.Services
 		score(&c, symptom, decay)
 		candidates = append(candidates, c)
 	}
@@ -337,6 +391,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	// Demote propagation before ranking, so the order the user sees is the order
 	// after every candidate has been judged against the others.
 	dampPropagation(candidates, reaches, back)
+	capRemediations(candidates)
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
 	linkChains(candidates, reaches)
 	result.Candidates = topDistinct(candidates, 5)
@@ -424,37 +479,40 @@ func evidenceEdges(edges []graph.Edge, reachable map[string]int, symptom string)
 // form the heal audit trail stores, and Factors keeps the same step as data so
 // a caller can lay the derivation out as a table instead of parsing prose.
 func score(c *Candidate, symptom event.Event, timeConstant float64) {
-	s := typeWeight[c.Event.Type]
-	if s == 0 {
-		s = 0.20
+	base := typeWeight[c.Event.Type]
+	if base == 0 {
+		base = 0.20
 	}
-	c.Reasons = append(c.Reasons, fmt.Sprintf("event type %q (base %.2f)", c.Event.Type, s))
-	c.Factors = append(c.Factors, Factor{Label: "Event type", Detail: c.Event.Type, Multiplier: s, Base: true})
+	c.Reasons = append(c.Reasons, fmt.Sprintf("event type %q (base %.2f)", c.Event.Type, base))
+	c.applyFactor(Factor{Label: "Event type", Detail: c.Event.Type, Multiplier: base, Base: true})
 
 	gap := causalTime(symptom).Sub(causalTime(c.Event)).Seconds()
 	tf := math.Exp(-gap / timeConstant)
-	s *= tf
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%.0fs before symptom (×%.2f)", gap, tf))
-	c.Factors = append(c.Factors, Factor{Label: "Time distance", Detail: fmt.Sprintf("%.0fs before the symptom", gap), Multiplier: tf})
+	c.applyFactor(Factor{Label: "Time distance", Detail: fmt.Sprintf("%.0fs before the symptom", gap), Multiplier: tf})
 
 	df := distanceFactor(c.Distance)
-	s *= df
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%d hops away (×%.2f)", c.Distance, df))
-	c.Factors = append(c.Factors, Factor{Label: "Graph distance", Detail: fmt.Sprintf("%d hop(s) upstream", c.Distance), Multiplier: df})
+	c.applyFactor(Factor{Label: "Graph distance", Detail: fmt.Sprintf("%d hop(s) upstream", c.Distance), Multiplier: df})
 
 	if c.AffectedServices > 0 {
 		affected := float64(c.AffectedServices)
 		impactFactor := 1 + 0.25*affected/(affected+10)
-		s *= impactFactor
 		c.Reasons = append(c.Reasons, fmt.Sprintf("%d affected service(s) (×%.2f)", c.AffectedServices, impactFactor))
-		c.Factors = append(c.Factors, Factor{Label: "Blast radius", Detail: fmt.Sprintf("%d service(s) depend on this cause", c.AffectedServices), Multiplier: impactFactor})
+		c.applyFactor(Factor{Label: "Blast radius", Detail: fmt.Sprintf("%d service(s) depend on this cause", c.AffectedServices), Multiplier: impactFactor})
 	}
 	if c.Reverts != "" {
-		s *= remediationFactor
 		c.Reasons = append(c.Reasons, fmt.Sprintf("undoes an earlier change (×%.2f)", remediationFactor))
-		c.Factors = append(c.Factors, Factor{Label: "Remediation", Detail: "undoes an earlier change in this window", Multiplier: remediationFactor})
+		c.applyFactor(Factor{Label: "Remediation", Detail: "undoes an earlier change in this window", Multiplier: remediationFactor})
 	}
-	c.Score = math.Min(s, 1.0)
+
+	// A heavy change on the failing component with a wide blast radius can
+	// multiply past 1. The ceiling is a factor so the derivation still adds up.
+	if c.Score > 1 {
+		ceiling := 1 / c.Score
+		c.Reasons = append(c.Reasons, fmt.Sprintf("capped at the maximum score (×%.2f)", ceiling))
+		c.applyFactor(Factor{Label: "Ceiling", Detail: "the score is capped at 1.00", Multiplier: ceiling})
+	}
 }
 
 // distanceFactor is the structural penalty for how far a candidate sits from
@@ -495,6 +553,41 @@ func confidence(c []Candidate) (overall, strength, separation float64) {
 		break
 	}
 	return strength * separation, strength, separation
+}
+
+// capRemediations holds a fix below the break it undid. The flat factor in
+// score() is all that can be applied when the reverted change is not itself a
+// candidate, but on its own it is only a fixed discount, and time decay beats a
+// fixed discount: a restore sixteen seconds old outranked the scale-to-zero it
+// reverted eight minutes earlier, so Chronicle named the recovery as the cause
+// of an outage that was still draining. Measured against the break instead, the
+// factor becomes a ratio the decay cannot overturn.
+func capRemediations(candidates []Candidate) {
+	score := make(map[string]float64, len(candidates))
+	for i := range candidates {
+		score[candidates[i].Event.ID] = candidates[i].Score
+	}
+	for i := range candidates {
+		reverted, ok := score[candidates[i].Reverts]
+		if !ok {
+			continue
+		}
+		ceiling := reverted * remediationFactor
+		if candidates[i].Score <= ceiling {
+			continue
+		}
+		rest := 1.0
+		for _, f := range candidates[i].Factors {
+			if f.Label != "Remediation" {
+				rest *= f.Multiplier
+			}
+		}
+		if rest <= 0 {
+			continue
+		}
+		candidates[i].rescaleFactor("Remediation", ceiling/rest,
+			"undoes an earlier change, so it is held below the break it reverted")
+	}
 }
 
 // dampPropagation demotes observations that another candidate already accounts
@@ -551,13 +644,11 @@ func dampPropagation(candidates []Candidate, reaches func(from, to string) bool,
 	for i := range candidates {
 		switch damp[i] {
 		case "co-symptom":
-			candidates[i].Score *= propagationFactor
 			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("on the failing component itself (×%.2f)", propagationFactor))
-			candidates[i].Factors = append(candidates[i].Factors, Factor{Label: "Co-symptom", Detail: "on the failing component itself, so it restates the symptom rather than explaining it", Multiplier: propagationFactor})
+			candidates[i].applyFactor(Factor{Label: "Co-symptom", Detail: "on the failing component itself, so it restates the symptom rather than explaining it", Multiplier: propagationFactor})
 		case "propagation":
-			candidates[i].Score *= propagationFactor
 			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("explained by an anomaly upstream of it (×%.2f)", propagationFactor))
-			candidates[i].Factors = append(candidates[i].Factors, Factor{Label: "Propagation", Detail: "something upstream of this is also implicated, so this is the failure arriving rather than starting", Multiplier: propagationFactor})
+			candidates[i].applyFactor(Factor{Label: "Propagation", Detail: "something upstream of this is also implicated, so this is the failure arriving rather than starting", Multiplier: propagationFactor})
 		}
 	}
 }
