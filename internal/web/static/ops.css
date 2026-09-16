@@ -2,7 +2,13 @@
    cards, monospace for anything an operator would copy or grep for. */
 .content.bleed { max-width: none; padding: 0; }
 
-.ops { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: calc(100vh - 61px); font-size: 12px; }
+/* A column rather than three fixed rows: the views built on this have between
+   two and four bands, and healing's fourth pushed its summary strip into the
+   flexible row, which then collapsed to nothing and spilled its numbers over
+   the table. Only the scrolling region takes the slack. */
+.ops { display: flex; flex-direction: column; height: calc(100vh - 61px); font-size: 12px; }
+.ops > * { flex: none; }
+.ops > .scroll, .ops > .ops-body { flex: 1 1 auto; min-height: 0; }
 
 /* --- command bar ------------------------------------------------------- */
 .ops-bar { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--line2); background: var(--panel); }

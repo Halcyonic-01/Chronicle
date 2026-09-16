@@ -188,11 +188,12 @@ function events(){
 function healing(){
   const actions = state.actions||[];
   const pending = actions.filter(a=>a.approval==='pending');
-  const rules = [
-    ['restart-deadlocked-pod','became_unready','restart_pod','0.80','3/h','approval required'],
-    ['bump-memory-on-oom','oom_kill','bump_memory','0.85','2/h','automatic when live'],
-    ['rollback-bad-deploy','deploy','rollback_deployment','0.90','1/h','approval required']
-  ];
+  const rules = (state.healRules||[]).map(r=>[
+    r.name, r.cause_type, r.action_type,
+    Number(r.min_confidence||0).toFixed(2),
+    `${r.max_per_hour}/h`,
+    r.require_approve ? 'approval required' : 'automatic when live'
+  ]);
   return `<div class="ops">
     <div class="mode"><span>●</span><span>DRY RUN · execution disabled · every decision is recorded before anything runs</span></div>
     <div class="strip">
@@ -218,9 +219,11 @@ function healing(){
         </tr>`).join('')}</tbody></table>`
         : empty('No remediation actions recorded','run RCA on a signal; a matched rule appears here as an audited decision')}
       <div class="sec-h" style="border-top:1px solid var(--line2)"><b>Rules</b><span>CONFIDENCE FLOOR · RATE LIMIT</span></div>
-      <table class="dt"><thead><tr><th>Rule</th><th>Trigger</th><th>Action</th><th class="num">Min conf</th><th>Limit</th><th>Mode</th></tr></thead><tbody>
-        ${rules.map(([n,t,a,c,l,m])=>`<tr style="cursor:default"><td>${n}</td><td class="dim">${t}</td><td>${a}</td><td class="num">${c}</td><td class="dim">${l}</td><td class="sev-warning">${m}</td></tr>`).join('')}
-      </tbody></table>
+      ${state.healRules===null
+        ? empty('Rules unavailable','the healing engine did not answer; this table reports what it would enforce, so nothing is shown rather than a guess')
+        : `<table class="dt"><thead><tr><th>Rule</th><th>Trigger</th><th>Action</th><th class="num">Min conf</th><th>Limit</th><th>Mode</th></tr></thead><tbody>
+        ${rules.map(([n,t,a,c,l,m])=>`<tr style="cursor:default"><td>${esc(n)}</td><td class="dim">${esc(t)}</td><td>${esc(a)}</td><td class="num">${esc(c)}</td><td class="dim">${esc(l)}</td><td class="sev-warning">${esc(m)}</td></tr>`).join('')}
+      </tbody></table>`}
     </div>
     <div class="ops-foot"><span>live execution also requires: live mode on · kill switch off · 30-day observation elapsed · namespace, action and target allowlisted</span></div>
   </div>`;
@@ -329,12 +332,14 @@ async function loadEvents(){
     state.totalEvents=Number.isFinite(d.total)?d.total:state.events.length;
     state.eventError='';
   }catch(e){ state.events=[]; state.totalEvents=0; state.eventError=e.message; }
-  await Promise.all([loadGraph(),loadActions(),loadPosture()]);
+  await Promise.all([loadGraph(),loadActions(),loadHealRules(),loadPosture()]);
   state.loading=false; render();
 }
 async function loadGraph(){ try { const r=await api('/api/graph'); state.graph=r.ok?await r.json():{nodes:[],edges:[]}; } catch (_) { state.graph={nodes:[],edges:[]}; } }
 async function loadPosture(){ state.postureLoading=true; try { const r=await api('/api/posture'); const d=await r.json(); if(!r.ok)throw new Error(d.error||'Live posture unavailable'); state.posture=d; state.postureError=''; } catch (e) { state.posture={resources:[],summary:{total:0,healthy:0,warning:0,critical:0}}; state.postureError=e.message; } state.postureLoading=false; }
 async function loadActions(){ try { const r=await api('/api/heal/actions'); state.actions=r.ok?(await r.json()).actions||[]:[]; } catch (_) { state.actions=[]; } }
+// The rules come from the engine that enforces them, never from a copy here.
+async function loadHealRules(){ try { const r=await api('/api/heal/rules'); state.healRules=r.ok?(await r.json()).rules||[]:null; } catch (_) { state.healRules=null; } }
 async function loadMoreEvents(){
   const button=$('#load-more-events');
   if(button){button.disabled=true;button.textContent='loading…';}
@@ -356,7 +361,7 @@ async function decide(id,approved){
     const r=await api(`/api/heal/actions/${encodeURIComponent(id)}/${approved?'approve':'deny'}`,{method:'POST',headers:{'Content-Type':'application/json','X-Chronicle-Heal-Token':token},body:JSON.stringify({by:'local-reviewer'})});
     if(r.status===401){sessionStorage.removeItem('chronicle_heal_token');throw new Error('Invalid approval token');}
     if(!r.ok)throw new Error('Action is no longer pending');
-    await loadActions(); render();
+    await Promise.all([loadActions(),loadHealRules()]); render();
     showToast(approved?'Approved and recorded':'Denied and recorded');
   }catch(e){ showToast(e.message); }
 }

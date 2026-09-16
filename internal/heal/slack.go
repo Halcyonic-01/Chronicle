@@ -22,6 +22,11 @@ func NewSlackNotifierFromEnv() *SlackNotifier {
 }
 
 func (n *SlackNotifier) Notify(ctx context.Context, action *Action) error {
+	// No webhook configured. This is reached rather than skipped because a nil
+	// *SlackNotifier stored in a Notifier interface is not a nil interface.
+	if n == nil || n.webhook == "" {
+		return nil
+	}
 	body, _ := json.Marshal(map[string]string{"text": "Chronicle healing action " + action.Status + ": " + action.ActionType + " " + action.Namespace + "/" + action.Target + " — " + action.Result})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.webhook, bytes.NewReader(body))
 	if err != nil {

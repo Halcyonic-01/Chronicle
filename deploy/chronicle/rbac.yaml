@@ -21,6 +21,11 @@ rules:
 - apiGroups: ["apps"]
   resources: ["deployments"]
   verbs: ["get", "update", "patch"]
+# Read-only. The replica-restore action refuses to write spec.replicas when an
+# autoscaler already owns that field, and it needs to see the HPAs to know.
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "create", "update"]

@@ -296,6 +296,31 @@ func main() {
 					}
 				}
 			})
+			// Judging decisions is what turns the observation period into
+			// calibration data, so it runs on its own cadence rather than
+			// waiting on the hourly retention pass.
+			leaderGroup.Go(func() error {
+				healAudit := heal.NewPostgresAuditStore(pool)
+				label := func() {
+					if n, err := healAudit.LabelOutcomes(leaderCtx, time.Now().UTC(), 200); err != nil {
+						slog.Error("failed to label healing outcomes", "err", err)
+					} else if n > 0 {
+						slog.Info("labelled healing decisions", "rows", n)
+					}
+				}
+				label()
+				ticker := time.NewTicker(5 * time.Minute)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-leaderCtx.Done():
+						return leaderCtx.Err()
+					case <-ticker.C:
+						label()
+					}
+				}
+			})
+
 			// Closed edge versions are kept for the same year the snapshot
 			// retention policy covers, so historical graph queries and replay
 			// stay answerable over the same period.
@@ -309,6 +334,14 @@ func main() {
 					case <-ticker.C:
 						if err := graphStore.Prune(leaderCtx, time.Now().UTC().AddDate(-1, 0, 0)); err != nil {
 							slog.Error("failed to prune graph edge history", "err", err)
+						}
+						// Skipped decisions are one per analysis and carry nothing
+						// once their window has aged out. Decided or executed
+						// records are kept regardless.
+						if dropped, err := heal.NewPostgresAuditStore(pool).Prune(leaderCtx, time.Now().UTC().AddDate(0, 0, -30)); err != nil {
+							slog.Error("failed to prune healing decisions", "err", err)
+						} else if dropped > 0 {
+							slog.Info("pruned healing decisions", "rows", dropped)
 						}
 					}
 				}
@@ -361,6 +394,8 @@ func main() {
 	apiMux.HandleFunc("/api/analyze", apiHandler.Analyze)
 	apiMux.HandleFunc("/api/graph", apiHandler.Graph)
 	apiMux.HandleFunc("/api/heal/actions", apiHandler.HealingActions)
+	apiMux.HandleFunc("/api/heal/rules", apiHandler.HealingRules)
+	apiMux.HandleFunc("/api/heal/calibration", apiHandler.HealingCalibration)
 	apiMux.HandleFunc("/api/heal/actions/", apiHandler.DecideHealingAction)
 
 	mux := http.NewServeMux()

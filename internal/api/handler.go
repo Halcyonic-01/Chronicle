@@ -542,6 +542,81 @@ func (h *Handler) HealingActions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"actions": actions})
 }
 
+// GET /api/heal/rules reports the rules the engine will actually apply. The
+// console used to carry its own copy, which could disagree with the engine on
+// the one page whose job is to say what will happen to the cluster.
+func (h *Handler) HealingRules(w http.ResponseWriter, r *http.Request) {
+	writeJSONHeaders(w)
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"use GET"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if h.healer == nil {
+		http.Error(w, `{"error":"healing engine unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	rules := make([]map[string]any, 0, len(h.healer.Rules))
+	for _, rule := range h.healer.Rules {
+		rules = append(rules, map[string]any{
+			"name":            rule.Name,
+			"cause_type":      rule.CauseType,
+			"action_type":     rule.ActionType,
+			"min_confidence":  rule.MinConfidence,
+			"max_per_hour":    rule.MaxPerHour,
+			"require_approve": rule.RequireApprove,
+		})
+	}
+	payload := map[string]any{"rules": rules, "dry_run": h.healer.DryRun}
+	if h.execution != nil {
+		remaining, started := h.execution.ObservationRemaining(r.Context())
+		payload["observation_started"] = started
+		payload["observation_days_remaining"] = int(remaining.Hours()/24 + 0.999)
+	}
+	json.NewEncoder(w).Encode(payload)
+}
+
+// GET /api/heal/calibration reports how decisions at each confidence band
+// actually turned out, which is what a threshold should be chosen from.
+func (h *Handler) HealingCalibration(w http.ResponseWriter, r *http.Request) {
+	writeJSONHeaders(w)
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"use GET"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	source, ok := h.actions.(interface {
+		OutcomeSummary(context.Context) ([]map[string]any, error)
+	})
+	if !ok {
+		http.Error(w, `{"error":"calibration data unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	bands, err := source.OutcomeSummary(r.Context())
+	if err != nil {
+		http.Error(w, `{"error":"failed to load calibration data"}`, http.StatusInternalServerError)
+		return
+	}
+	if bands == nil {
+		bands = []map[string]any{}
+	}
+	payload := map[string]any{"bands": bands, "settle_window": heal.SettleWindow.String()}
+	if h.execution != nil {
+		e := h.execution.Evidence(r.Context())
+		remaining, started := h.execution.ObservationRemaining(r.Context())
+		payload["evidence"] = map[string]any{
+			"confirmed": e.Confirmed, "contradicted": e.Contradicted, "unknown": e.Unknown,
+			"missed_by_floor": e.MissedByFloor,
+			"decisive":        e.Decisive(), "precision": e.Precision(),
+			"counted_per":        "outage",
+			"decisive_required":  h.execution.Policy.MinDecisive,
+			"precision_required": h.execution.Policy.MinPrecision,
+			"ready":              e.Decisive() >= h.execution.Policy.MinDecisive && e.Precision() >= h.execution.Policy.MinPrecision,
+		}
+		payload["observation_started"] = started
+		payload["observation_days_remaining"] = int(remaining.Hours()/24 + 0.999)
+	}
+	json.NewEncoder(w).Encode(payload)
+}
+
 // POST /api/heal/actions/{id}/approve or /deny. Approval is authenticated;
 // live execution additionally requires the controller's safety gates.
 func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
