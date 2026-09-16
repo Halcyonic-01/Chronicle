@@ -303,6 +303,24 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The incident view asks for signals directly rather than filtering a page
+	// of whatever happened most recently.
+	if r.URL.Query().Get("signals") == "true" {
+		signals, err := h.rcaDB.RecentSignals(r.Context(), from, to, limit)
+		if err != nil {
+			http.Error(w, `{"error":"failed to load signals"}`, http.StatusInternalServerError)
+			return
+		}
+		if signals == nil {
+			signals = []event.Event{}
+		}
+		total, err := h.rcaDB.CountSignals(r.Context(), from, to)
+		if err != nil {
+			total = len(signals)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"events": signals, "total": total, "shown": len(signals), "offset": 0, "from": from, "to": to})
+		return
+	}
 	items := h.cachedEvents(r.Context(), from, to, limit, offset)
 	if items == nil {
 		loaded, err := h.rcaDB.RecentEvents(r.Context(), from, to, limit, offset)

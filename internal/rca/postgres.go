@@ -33,6 +33,49 @@ func (s *PostgresEventSource) EventsBetween(ctx context.Context, from, to time.T
 // RecentEvents returns the newest events in reverse chronological order for
 // the operations console. Filters are deliberately kept server-side so the
 // UI does not need to load an unbounded event table.
+// CountSignals is how many signals exist in the window, which is not the same
+// as how many were fetched. Reporting the fetched count as the total made a
+// capped page look like the whole story.
+func (s *PostgresEventSource) CountSignals(ctx context.Context, from, to time.Time) (int, error) {
+	var total int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM events
+		WHERE ingested_at >= $1 AND ingested_at <= $2
+		  AND severity IN ('warning','critical')`, from, to).Scan(&total)
+	return total, err
+}
+
+// RecentSignals returns only warning and critical events. The incident view
+// used to filter a generic page of recent events, so a burst of routine ones --
+// an informer relisting fifty Pods -- pushed every real signal out of view and
+// the page reported nothing wrong.
+func (s *PostgresEventSource) RecentSignals(ctx context.Context, from, to time.Time, limit int) ([]event.Event, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, occurred_at, ingested_at, source, namespace, entity_kind,
+		       entity_name, type, severity, title, payload, trace_id, correlation_key
+		FROM events
+		WHERE ingested_at >= $1 AND ingested_at <= $2
+		  AND severity IN ('warning','critical')
+		ORDER BY ingested_at DESC, id DESC
+		LIMIT $3`, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []event.Event
+	for rows.Next() {
+		var e event.Event
+		if err := rows.Scan(&e.ID, &e.OccurredAt, &e.IngestedAt, &e.Source, &e.Namespace, &e.EntityKind, &e.EntityName, &e.Type, &e.Severity, &e.Title, &e.Payload, &e.TraceID, &e.CorrelationKey); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 func (s *PostgresEventSource) RecentEvents(ctx context.Context, from, to time.Time, limit, offset int) ([]event.Event, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

@@ -154,7 +154,7 @@ function now(){
     </div>
     <div class="ops-foot">
       <span>${esc(state.eventError || 'collectors online')}</span>
-      <span style="margin-left:auto">${state.totalEvents||state.events.length} events loaded · last 24h</span>
+      <span style="margin-left:auto">${state.totalSignals??(state.signals||[]).length} signal(s) · ${state.totalEvents||state.events.length} events in the last 24h</span>
     </div>
   </div>`;
 }
@@ -332,6 +332,14 @@ async function loadEvents(){
     state.totalEvents=Number.isFinite(d.total)?d.total:state.events.length;
     state.eventError='';
   }catch(e){ state.events=[]; state.totalEvents=0; state.eventError=e.message; }
+  // Signals are fetched separately. Filtering the page above for them meant a
+  // burst of routine events could hide every real one.
+  try{
+    const r=await api('/api/events?signals=true&limit=200');
+    const d=await r.json();
+    state.signals=r.ok?(d.events||[]):[];
+    state.totalSignals=r.ok&&Number.isFinite(d.total)?d.total:state.signals.length;
+  }catch(_){ state.signals=[]; state.totalSignals=0; }
   await Promise.all([loadGraph(),loadActions(),loadHealRules(),loadPosture()]);
   state.loading=false; render();
 }

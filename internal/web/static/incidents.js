@@ -111,7 +111,9 @@
   const queryFilter = () => (state.opsQuery || '').toLowerCase();
 
   function signals() {
-    return (state.events || []).filter(e => {
+    // state.signals is fetched as signals; state.events is a page of recent
+    // activity and cannot be relied on to contain them.
+    return (state.signals || []).filter(e => {
       if (e.severity !== 'warning' && e.severity !== 'critical') return false;
       if (triageScope() !== 'all' && scopeOf(e) !== triageScope()) return false;
       if (severityFilter() && e.severity !== severityFilter()) return false;
@@ -554,7 +556,7 @@
         <span><kbd>r</kbd> run RCA</span>
         <span><kbd>/</kbd> filter</span>
         <span><kbd>esc</kbd> clear</span>
-        <span style="margin-left:auto">${esc(state.totalEvents || (state.events || []).length)} events loaded · last 24h</span>
+        <span style="margin-left:auto">${esc(state.totalSignals ?? (state.signals || []).length)} signal(s) · ${esc(state.totalEvents || (state.events || []).length)} events in the last 24h</span>
       </div>
     </div>`;
   }

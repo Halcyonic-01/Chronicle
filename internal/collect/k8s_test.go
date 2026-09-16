@@ -196,3 +196,45 @@ func TestBacklogEventsAreNotReplayedAsLive(t *testing.T) {
 		t.Fatal("a warning that happened after startup must still be emitted")
 	}
 }
+
+// An informer relists on restart, so every existing Pod arrives through AddFunc
+// again. Stamped with the moment Chronicle noticed rather than the Pod's own
+// creation time, etcd -- running since morning -- was recorded as created eight
+// times, and the differing timestamps defeated the store's dedupe index.
+func TestExistingResourcesAreNotReportedAsNewlyCreated(t *testing.T) {
+	out := make(chan event.Event, 4)
+	k := &K8sCollector{BaseCollector: BaseCollector{Out: out}, startedAt: time.Now().UTC()}
+
+	k.emitResourceEvent("Pod", "kube-system", "etcd-1", "resource_created", "info",
+		"etcd-1 created", k.startedAt.Add(-8*time.Hour), nil)
+	select {
+	case e := <-out:
+		t.Fatalf("a resource created hours before startup was replayed as news: %s", e.Title)
+	default:
+	}
+
+	k.emitResourceEvent("Pod", "default", "api-1", "resource_created", "info",
+		"api-1 created", k.startedAt.Add(2*time.Second), nil)
+	select {
+	case e := <-out:
+		if e.OccurredAt.IsZero() {
+			t.Fatal("the event must carry when the resource was created, not when it was noticed")
+		}
+	default:
+		t.Fatal("a genuinely new resource should still be reported")
+	}
+}
+
+// The timestamp is what lets the store recognise a replay as the same fact.
+func TestResourceEventsCarryTheResourceOwnTime(t *testing.T) {
+	out := make(chan event.Event, 2)
+	started := time.Now().UTC().Add(-time.Hour)
+	k := &K8sCollector{BaseCollector: BaseCollector{Out: out}, startedAt: started}
+
+	created := started.Add(30 * time.Minute)
+	k.emitResourceEvent("Deployment", "default", "api", "resource_created", "info", "api created", created, nil)
+	e := <-out
+	if !e.OccurredAt.Equal(created) {
+		t.Fatalf("expected the creation time %v, got %v", created, e.OccurredAt)
+	}
+}

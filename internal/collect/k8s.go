@@ -70,7 +70,7 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 				return
 			}
 			if pod, ok := obj.(*corev1.Pod); ok {
-				k.emitResourceEvent("Pod", pod.Namespace, pod.Name, "resource_created", "info", fmt.Sprintf("%s created", pod.Name), podLifecyclePayload(pod))
+				k.emitResourceEvent("Pod", pod.Namespace, pod.Name, "resource_created", "info", fmt.Sprintf("%s created", pod.Name), pod.CreationTimestamp.Time, podLifecyclePayload(pod))
 			}
 		},
 		UpdateFunc: func(old, new interface{}) {
@@ -85,7 +85,7 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 				return
 			}
 			if pod, ok := deletedPod(obj); ok {
-				k.emitResourceEvent("Pod", pod.Namespace, pod.Name, "resource_deleted", "info", fmt.Sprintf("%s deleted", pod.Name), podLifecyclePayload(pod))
+				k.emitResourceEvent("Pod", pod.Namespace, pod.Name, "resource_deleted", "info", fmt.Sprintf("%s deleted", pod.Name), time.Now().UTC(), podLifecyclePayload(pod))
 			}
 		},
 	})
@@ -98,7 +98,7 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 				return
 			}
 			if deployment, ok := obj.(*appsv1.Deployment); ok {
-				k.emitResourceEvent("Deployment", deployment.Namespace, deployment.Name, "resource_created", "info", fmt.Sprintf("%s created", deployment.Name), deploymentLifecyclePayload(deployment))
+				k.emitResourceEvent("Deployment", deployment.Namespace, deployment.Name, "resource_created", "info", fmt.Sprintf("%s created", deployment.Name), deployment.CreationTimestamp.Time, deploymentLifecyclePayload(deployment))
 			}
 		},
 		UpdateFunc: func(old, new interface{}) {
@@ -113,7 +113,7 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 				return
 			}
 			if deployment, ok := deletedDeployment(obj); ok {
-				k.emitResourceEvent("Deployment", deployment.Namespace, deployment.Name, "resource_deleted", "info", fmt.Sprintf("%s deleted", deployment.Name), deploymentLifecyclePayload(deployment))
+				k.emitResourceEvent("Deployment", deployment.Namespace, deployment.Name, "resource_deleted", "info", fmt.Sprintf("%s deleted", deployment.Name), time.Now().UTC(), deploymentLifecyclePayload(deployment))
 			}
 		},
 	})
@@ -231,7 +231,7 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 	newReady := isPodReady(new)
 	if old.Status.Phase != new.Status.Phase || oldReady != newReady {
 		k.emitResourceEvent("Pod", new.Namespace, new.Name, "resource_status", podStatusSeverity(new),
-			fmt.Sprintf("%s status is %s", new.Name, podReplayPhase(new)), map[string]any{
+			fmt.Sprintf("%s status is %s", new.Name, podReplayPhase(new)), time.Now().UTC(), map[string]any{
 				"phase":       podReplayPhase(new),
 				"ready_count": podReadyCount(new),
 				"reason":      new.Status.Reason,
@@ -300,7 +300,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 
 	if old.Status.ReadyReplicas != new.Status.ReadyReplicas || old.Status.AvailableReplicas != new.Status.AvailableReplicas {
 		k.emitResourceEvent("Deployment", new.Namespace, new.Name, "resource_status", deploymentStatusSeverity(new),
-			fmt.Sprintf("%s status is %d/%d replicas ready", new.Name, new.Status.ReadyReplicas, deploymentReplicas(new)), map[string]any{
+			fmt.Sprintf("%s status is %d/%d replicas ready", new.Name, new.Status.ReadyReplicas, deploymentReplicas(new)), time.Now().UTC(), map[string]any{
 				"phase":       deploymentReplayPhase(new),
 				"ready_count": new.Status.ReadyReplicas,
 				"reason":      deploymentStatusReason(new),
@@ -364,12 +364,25 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 	}
 }
 
-func (k *K8sCollector) emitResourceEvent(kind, namespace, name, eventType, severity, title string, payload map[string]any) {
+// emitResourceEvent records a change to a resource at the time it happened.
+//
+// occurredAt matters twice. Without it the event was stamped with the moment
+// Chronicle noticed, so an informer relisting on restart reported every
+// existing Pod as newly created -- etcd, running since morning, was recorded as
+// created eight times. The false timestamps also differed each run, so the
+// store's dedupe index could not recognise them as the same fact.
+func (k *K8sCollector) emitResourceEvent(kind, namespace, name, eventType, severity, title string, occurredAt time.Time, payload map[string]any) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
+	// Anything that happened before this collector started is backlog the
+	// informer is replaying, not news.
+	if !occurredAt.IsZero() && occurredAt.Before(k.startedAt) {
+		return
+	}
 	k.Emit(event.Event{
 		Source:     "k8s",
+		OccurredAt: occurredAt,
 		Namespace:  namespace,
 		EntityKind: kind,
 		EntityName: name,
