@@ -119,12 +119,15 @@ type BlastRadius struct {
 	Services         []string `json:"services"`
 }
 type Result struct {
-	Symptom     event.Event  `json:"symptom"`
-	Candidates  []Candidate  `json:"candidates"`
-	Confidence  float64      `json:"confidence"`
-	Strength    float64      `json:"strength"`
-	Provisional bool         `json:"provisional"`
-	Separation  float64      `json:"separation"`
+	Symptom     event.Event `json:"symptom"`
+	Candidates  []Candidate `json:"candidates"`
+	Confidence  float64     `json:"confidence"`
+	Strength    float64     `json:"strength"`
+	Provisional bool        `json:"provisional"`
+	Separation  float64     `json:"separation"`
+	// Contested is false when no genuine rival exists, so Separation is 1 by
+	// default rather than by margin.
+	Contested   bool         `json:"contested"`
 	Scanned     int          `json:"scanned"`
 	Narrative   string       `json:"narrative"`
 	BlastRadius BlastRadius  `json:"blast_radius"`
@@ -362,6 +365,10 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		if hypothesisKey(e) == symptomHypothesis {
 			continue
 		}
+		// Being created is how a resource starts existing, not a fault in it.
+		if e.Type == "resource_created" && key(e) == key(symptom) {
+			continue
+		}
 		// A recovery says something started working. It is the end of a
 		// failure, not the start of one, so it cannot be what broke the
 		// symptom -- and left in the running it was ranked as a cause, with a
@@ -410,6 +417,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	}
 	result.Provisional = time.Since(symptomAt) < settleFor
 	result.Confidence, result.Strength, result.Separation = confidence(result.Candidates)
+	result.Contested = contested(result.Candidates)
 	if a.Narrator != nil {
 		result.Narrative, err = a.Narrator.Narrate(ctx, result)
 		if err != nil {
@@ -553,6 +561,17 @@ func confidence(c []Candidate) (overall, strength, separation float64) {
 		break
 	}
 	return strength * separation, strength, separation
+}
+
+// contested reports whether any candidate is a rival of the leader rather than
+// a link of its chain.
+func contested(c []Candidate) bool {
+	for i := 1; i < len(c); i++ {
+		if !sameChain(c[0], c[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // capRemediations holds a fix below the break it undid. The flat factor in
@@ -747,7 +766,10 @@ func FallbackNarrative(r *Result) string {
 	if c.AffectedServices > 0 {
 		impact = fmt.Sprintf(", affecting %d downstream service(s)", c.AffectedServices)
 	}
-	return fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom%s), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, c.Event.IngestedAt.Format(time.RFC3339), c.Distance, r.Symptom.IngestedAt.Sub(c.Event.IngestedAt).Seconds(), impact, r.Confidence, r.Scanned, len(r.Candidates))
+	// Same clock as the score's time factor, so the two cannot disagree.
+	at := causalTime(c.Event)
+	gap := causalTime(r.Symptom).Sub(at).Seconds()
+	return fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom%s), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, at.Format(time.RFC3339), c.Distance, gap, impact, r.Confidence, r.Scanned, len(r.Candidates))
 }
 
 // remediationFactor damps a change that undoes an earlier one. It is a

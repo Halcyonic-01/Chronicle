@@ -1321,3 +1321,61 @@ func TestAnUpstreamStatusReportSurvivesWhenNothingExplainsIt(t *testing.T) {
 		}
 	}
 }
+
+// Creation is how a pod comes to be Pending; naming it the cause says nothing.
+func TestAResourcesOwnCreationIsNotItsSymptomsCause(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "resource_status", Title: "api-1 status is Pending", Payload: []byte(`{"phase":"Pending"}`)}
+	own := event.Event{ID: "own", IngestedAt: now, OccurredAt: now.Add(-3 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "resource_created", Title: "api-1 created"}
+	parent := event.Event{ID: "parent", IngestedAt: now, OccurredAt: now.Add(-4 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "resource_created", Title: "api created"}
+
+	got, err := (&Analyzer{
+		Events: fakeEvents{own, parent},
+		Graph:  fakeGraph{"default/Pod/api-1": 0, "default/Deployment/api": 1},
+	}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "parent" {
+		t.Fatalf("only the upstream creation should remain: %+v", got.Candidates)
+	}
+}
+
+// The narrative and the score's time factor must read the same clock.
+func TestNarrativeGapMatchesTheScoredGap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "became_unready", Title: "api-1 stopped serving traffic"}
+	// Observed 2s late, but it happened 3s before the symptom.
+	cause := event.Event{ID: "c", IngestedAt: now.Add(-2 * time.Second), OccurredAt: now.Add(-3 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "scale", Title: "api scaled from 1 to 0"}
+
+	got, err := (&Analyzer{Events: fakeEvents{cause}, Graph: fakeGraph{"default/Pod/api-1": 0, "default/Deployment/api": 1}}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detail string
+	for _, f := range got.Candidates[0].Factors {
+		if f.Label == "Time distance" {
+			detail = f.Detail
+		}
+	}
+	if !strings.Contains(detail, "3s") || !strings.Contains(got.Narrative, "3s before the symptom") {
+		t.Fatalf("score says %q, narrative says %q", detail, got.Narrative)
+	}
+}
+
+// A lone candidate is uncontested, which the console must not show as a margin.
+func TestContestedMeansAGenuineRivalExists(t *testing.T) {
+	now := time.Now().UTC()
+	mk := func(id, chain string) Candidate {
+		return Candidate{Event: event.Event{ID: id, OccurredAt: now, IngestedAt: now}, Chain: chain}
+	}
+	if contested(nil) || contested([]Candidate{mk("a", "a")}) {
+		t.Error("no candidate or a lone one has no rival")
+	}
+	if contested([]Candidate{mk("a", "a"), mk("b", "a")}) {
+		t.Error("links of one chain are not rivals")
+	}
+	if !contested([]Candidate{mk("a", "a"), mk("b", "b")}) {
+		t.Error("a different chain is a rival")
+	}
+}

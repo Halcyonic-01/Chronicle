@@ -253,7 +253,7 @@
         <span class="conf-n">${pct}%</span>
         <span class="conf-t"><i style="width:${pct}%"></i></span>
         <span class="conf-l">${confidence < 0.5 ? 'INCONCLUSIVE' : 'CONFIDENCE'}</span>
-        <span class="conf-split" title="Evidence strength of the leading candidate, multiplied by how clearly it beats the runner-up">EVIDENCE ${Math.round((r.strength || 0) * 100)}% × SEPARATION ${Math.round((r.separation || 0) * 100)}%</span>
+        <span class="conf-split" title="Evidence strength of the leading candidate, multiplied by how clearly it beats the runner-up">EVIDENCE ${Math.round((r.strength || 0) * 100)}%${r.contested === false ? ' · UNCONTESTED' : ` × SEPARATION ${Math.round((r.separation || 0) * 100)}%`}</span>
       </div>
       <table class="cand"><thead><tr><th>#</th><th>Score</th><th>Cause · target</th><th class="num">Gap</th><th class="num">Hops</th><th class="num" title="Services affected if this candidate fails">Svc</th></tr></thead><tbody>${rows}</tbody></table>
       ${derivation(r.candidates[focus] || r.candidates[0])}

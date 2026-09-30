@@ -10,8 +10,8 @@
   const namespaceFor = n => n?.Namespace ?? n?.namespace ?? '';
   const nameFor = n => n?.Name ?? n?.name ?? '';
   const kindFor = n => n?.Kind ?? n?.kind ?? 'Resource';
-  const platformNamespaces = new Set(['kube-system','kube-public','kube-node-lease','monitoring','linkerd','local-path-storage']);
-  const categoryFor = n => kindFor(n)==='Node' || platformNamespaces.has(namespaceFor(n)) ? 'platform' : 'application';
+  // Nodes are cluster-scoped, so they have no namespace for the shared rule to judge.
+  const categoryFor = n => kindFor(n)==='Node' ? 'platform' : window.chronicleScopeOf(namespaceFor(n));
   const graphScope = () => state.replayGraphScope || 'application';
   const graphNamespace = () => state.replayGraphNamespace || '';
   const matchesGraphFilter = n => (graphScope()==='all' || categoryFor(n)===graphScope()) && (!graphNamespace() || namespaceFor(n)===graphNamespace());
