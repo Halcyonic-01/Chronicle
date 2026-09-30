@@ -2,6 +2,7 @@ package rca
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
@@ -45,35 +46,62 @@ func (s *PostgresEventSource) CountSignals(ctx context.Context, from, to time.Ti
 	return total, err
 }
 
-// RecentSignals returns only warning and critical events. The incident view
-// used to filter a generic page of recent events, so a burst of routine ones --
-// an informer relisting fifty Pods -- pushed every real signal out of view and
-// the page reported nothing wrong.
-func (s *PostgresEventSource) RecentSignals(ctx context.Context, from, to time.Time, limit int) ([]event.Event, error) {
+// Signal is an event plus what its whole entity/type series looks like, so a
+// capped page can still report how often the signal fired and when it began.
+type Signal struct {
+	event.Event
+	Occurrences int       `json:"occurrences"`
+	FirstSeen   time.Time `json:"first_seen"`
+}
+
+// signalsPerSeries bounds how many rows one entity/type series contributes.
+const signalsPerSeries = 40
+
+// RecentSignals returns warning and critical events. A chatty series -- a pod
+// logging the same error every second -- used to fill the whole page and push
+// every other incident out of view. Rows are now taken newest-first from each
+// series in turn, so each series is represented before any one fills the page.
+func (s *PostgresEventSource) RecentSignals(ctx context.Context, from, to time.Time, limit int) ([]Signal, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, occurred_at, ingested_at, source, namespace, entity_kind,
-		       entity_name, type, severity, title, payload, trace_id, correlation_key
-		FROM events
-		WHERE ingested_at >= $1 AND ingested_at <= $2
-		  AND severity IN ('warning','critical')
-		ORDER BY ingested_at DESC, id DESC
-		LIMIT $3`, from, to, limit)
+		       entity_name, type, severity, title, payload, trace_id, correlation_key,
+		       total, first_seen
+		FROM (
+			SELECT id, occurred_at, ingested_at, source, namespace, entity_kind,
+			       entity_name, type, severity, title, payload, trace_id, correlation_key,
+			       row_number() OVER w AS rn,
+			       count(*) OVER p AS total,
+			       min(ingested_at) OVER p AS first_seen
+			FROM events
+			WHERE ingested_at >= $1 AND ingested_at <= $2
+			  AND severity IN ('warning','critical')
+			WINDOW p AS (PARTITION BY namespace, entity_kind, entity_name, type),
+			       w AS (p ORDER BY ingested_at DESC, id DESC)
+		) ranked
+		WHERE rn <= $4
+		ORDER BY rn ASC, ingested_at DESC
+		LIMIT $3`, from, to, limit, signalsPerSeries)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var events []event.Event
+	var signals []Signal
 	for rows.Next() {
-		var e event.Event
-		if err := rows.Scan(&e.ID, &e.OccurredAt, &e.IngestedAt, &e.Source, &e.Namespace, &e.EntityKind, &e.EntityName, &e.Type, &e.Severity, &e.Title, &e.Payload, &e.TraceID, &e.CorrelationKey); err != nil {
+		var sig Signal
+		e := &sig.Event
+		if err := rows.Scan(&e.ID, &e.OccurredAt, &e.IngestedAt, &e.Source, &e.Namespace, &e.EntityKind, &e.EntityName, &e.Type, &e.Severity, &e.Title, &e.Payload, &e.TraceID, &e.CorrelationKey, &sig.Occurrences, &sig.FirstSeen); err != nil {
 			return nil, err
 		}
-		events = append(events, e)
+		signals = append(signals, sig)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(signals, func(i, j int) bool { return signals[i].IngestedAt.After(signals[j].IngestedAt) })
+	return signals, nil
 }
 
 func (s *PostgresEventSource) RecentEvents(ctx context.Context, from, to time.Time, limit, offset int) ([]event.Event, error) {

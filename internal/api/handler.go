@@ -312,7 +312,7 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if signals == nil {
-			signals = []event.Event{}
+			signals = []rca.Signal{}
 		}
 		total, err := h.rcaDB.CountSignals(r.Context(), from, to)
 		if err != nil {

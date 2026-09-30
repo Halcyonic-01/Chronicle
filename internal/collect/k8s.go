@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -349,6 +350,20 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 		})
 	}
 
+	if changed := configChanges(old, new); len(changed) > 0 {
+		k.Emit(event.Event{
+			Source:     "k8s",
+			EntityKind: "Deployment",
+			EntityName: new.Name,
+			Namespace:  new.Namespace,
+			OccurredAt: changedAt,
+			Type:       "config_change",
+			Severity:   "info",
+			Title:      fmt.Sprintf("%s configuration changed (%s)", new.Name, strings.Join(changed, ", ")),
+			Payload:    mustJSON(map[string]any{"changed": changed, "changed_by": changedBy}),
+		})
+	}
+
 	if (old.Spec.Replicas != nil && new.Spec.Replicas != nil) && *old.Spec.Replicas != *new.Spec.Replicas {
 		k.Emit(event.Event{
 			Source:     "k8s",
@@ -362,6 +377,56 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Payload:    mustJSON(map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas, "changed_by": changedBy}),
 		})
 	}
+}
+
+// configChanges names changed container settings, never values: env values hold credentials.
+func configChanges(old, new *appsv1.Deployment) []string {
+	var changed []string
+	was := make(map[string]corev1.Container)
+	for _, c := range old.Spec.Template.Spec.Containers {
+		was[c.Name] = c
+	}
+	for _, c := range new.Spec.Template.Spec.Containers {
+		before, ok := was[c.Name]
+		if !ok {
+			continue
+		}
+		changed = append(changed, envChanges(c.Name, before.Env, c.Env)...)
+		if !reflect.DeepEqual(before.Command, c.Command) {
+			changed = append(changed, c.Name+" command")
+		}
+		if !reflect.DeepEqual(before.Args, c.Args) {
+			changed = append(changed, c.Name+" args")
+		}
+		if !reflect.DeepEqual(before.EnvFrom, c.EnvFrom) {
+			changed = append(changed, c.Name+" envFrom")
+		}
+	}
+	if !reflect.DeepEqual(old.Spec.Template.Spec.Volumes, new.Spec.Template.Spec.Volumes) {
+		changed = append(changed, "volumes")
+	}
+	sort.Strings(changed)
+	return changed
+}
+
+// envChanges lists the variables added, removed or altered, by name.
+func envChanges(container string, before, after []corev1.EnvVar) []string {
+	sig := func(v corev1.EnvVar) string { return fmt.Sprintf("%s|%v", v.Value, v.ValueFrom) }
+	prev := make(map[string]string, len(before))
+	for _, v := range before {
+		prev[v.Name] = sig(v)
+	}
+	var changed []string
+	for _, v := range after {
+		if old, ok := prev[v.Name]; !ok || old != sig(v) {
+			changed = append(changed, container+" env "+v.Name)
+		}
+		delete(prev, v.Name)
+	}
+	for name := range prev {
+		changed = append(changed, container+" env "+name)
+	}
+	return changed
 }
 
 // emitResourceEvent records a change to a resource at the time it happened.

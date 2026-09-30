@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -236,5 +237,60 @@ func TestResourceEventsCarryTheResourceOwnTime(t *testing.T) {
 	e := <-out
 	if !e.OccurredAt.Equal(created) {
 		t.Fatalf("expected the creation time %v, got %v", created, e.OccurredAt)
+	}
+}
+
+func deployment(image string, env ...corev1.EnvVar) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "api", Image: image, Env: env}},
+		}}},
+	}
+}
+
+func emittedBy(old, new *appsv1.Deployment) []event.Event {
+	out := make(chan event.Event, 8)
+	(&K8sCollector{BaseCollector: BaseCollector{Out: out}}).diffDeployments(old, new)
+	return drain(out)
+}
+
+// A wrong environment variable takes an app down as surely as a bad image, and
+// was invisible: nothing recorded it, so the outage had no cause to find.
+func TestAChangedEnvironmentVariableIsAConfigChange(t *testing.T) {
+	old := deployment("api:1", corev1.EnvVar{Name: "REDIS_URL", Value: "redis:6379"}, corev1.EnvVar{Name: "TOKEN", Value: "hunter2"})
+	new := deployment("api:1", corev1.EnvVar{Name: "REDIS_URL", Value: "redis-typo:6379"}, corev1.EnvVar{Name: "TOKEN", Value: "hunter2"})
+
+	events := emittedBy(old, new)
+	if len(events) != 1 || events[0].Type != "config_change" {
+		t.Fatalf("expected one config_change, got %+v", events)
+	}
+	if got := gjsonString(events[0], "changed.0"); got != "api env REDIS_URL" {
+		t.Fatalf("the changed setting should be named, got %q", got)
+	}
+	if string(events[0].Payload) != "" && (contains(events[0].Payload, "redis-typo") || contains(events[0].Payload, "hunter2") || contains([]byte(events[0].Title), "redis-typo")) {
+		t.Fatalf("values must never be recorded: %s %s", events[0].Title, events[0].Payload)
+	}
+}
+
+func contains(b []byte, s string) bool { return strings.Contains(string(b), s) }
+
+func TestAnUnchangedOrImageOnlyDeploymentIsNotAConfigChange(t *testing.T) {
+	env := corev1.EnvVar{Name: "REDIS_URL", Value: "redis:6379"}
+	if events := emittedBy(deployment("api:1", env), deployment("api:1", env)); len(events) != 0 {
+		t.Fatalf("a resync must not emit: %+v", events)
+	}
+	events := emittedBy(deployment("api:1", env), deployment("api:2", env))
+	if len(events) != 1 || events[0].Type != "deploy" {
+		t.Fatalf("an image change is a deploy, not a config change: %+v", events)
+	}
+}
+
+func TestAnAddedAndARemovedVariableAreBothReported(t *testing.T) {
+	old := deployment("api:1", corev1.EnvVar{Name: "OLD", Value: "1"})
+	new := deployment("api:1", corev1.EnvVar{Name: "NEW", Value: "1"})
+	events := emittedBy(old, new)
+	if len(events) != 1 || gjsonString(events[0], "changed.#") != "2" {
+		t.Fatalf("expected both names, got %+v", events)
 	}
 }

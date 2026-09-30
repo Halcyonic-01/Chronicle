@@ -121,7 +121,7 @@ func TestScoreFactorsExplainTheScoreTheyProduce(t *testing.T) {
 		Distance:         2,
 		AffectedServices: 3,
 	}
-	score(&candidate, symptom, 300)
+	score(&candidate, symptom, time.Time{}, 300)
 
 	if len(candidate.Factors) != 4 {
 		t.Fatalf("expected a factor per scoring step, got %d: %+v", len(candidate.Factors), candidate.Factors)
@@ -153,7 +153,7 @@ func TestBlastRadiusFactorKeepsDiscriminatingAtScale(t *testing.T) {
 			Event:            event.Event{IngestedAt: now.Add(-time.Second), Namespace: "default", EntityKind: "Service", EntityName: "redis", Type: "deploy"},
 			AffectedServices: affected,
 		}
-		score(&c, symptom, 300)
+		score(&c, symptom, time.Time{}, 300)
 		for _, f := range c.Factors {
 			if f.Label == "Blast radius" {
 				return f.Multiplier
@@ -515,7 +515,7 @@ func TestDefaultWindowKeepsItsOriginalDecay(t *testing.T) {
 	c := Candidate{Event: event.Event{IngestedAt: now.Add(-300 * time.Second), Type: "deploy"}, Distance: 0}
 	symptom := event.Event{IngestedAt: now}
 	// 15-minute default window / 3 = the 300s constant the code used to hardcode.
-	score(&c, symptom, (15*time.Minute).Seconds()/defaultDecayDivisor)
+	score(&c, symptom, time.Time{}, (15*time.Minute).Seconds()/defaultDecayDivisor)
 	var timeFactor float64
 	for _, f := range c.Factors {
 		if f.Label == "Time distance" {
@@ -983,7 +983,7 @@ func TestPropagationNeverOutranksARealCauseAtAnyDistance(t *testing.T) {
 			Event:    event.Event{OccurredAt: now.Add(-10 * time.Second), Namespace: "default", EntityKind: "Service", EntityName: "x", Type: typ},
 			Distance: distance,
 		}
-		score(&c, symptom, 200)
+		score(&c, symptom, time.Time{}, 200)
 		return c.Score
 	}
 
@@ -1207,7 +1207,7 @@ func TestTheScoreCeilingIsShownAsAFactor(t *testing.T) {
 		Distance:         0,
 		AffectedServices: 3,
 	}
-	score(&c, symptom, 300)
+	score(&c, symptom, time.Time{}, 300)
 
 	product := 1.0
 	for _, f := range c.Factors {
@@ -1377,5 +1377,580 @@ func TestContestedMeansAGenuineRivalExists(t *testing.T) {
 	}
 	if !contested([]Candidate{mk("a", "a"), mk("b", "b")}) {
 		t.Error("a different chain is a rival")
+	}
+}
+
+// A sustained outage keeps repeating its signal; the newest copy must not make
+// the cause look older than it was when the problem began.
+func TestAnOngoingOutageIsJudgedFromItsOnset(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	errLine := func(id string, ago time.Duration) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "log_error", Severity: "warning", Title: "redis INCR failed: EOF"}
+	}
+	cause := event.Event{ID: "cause", IngestedAt: now.Add(-310 * time.Second), OccurredAt: now.Add(-310 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0"}
+	graph := fakeGraph{"default/Pod/api-1": 0, "default/Deployment/redis": 2}
+
+	got, err := (&Analyzer{Events: fakeEvents{cause, errLine("first", 300*time.Second), errLine("a", 240*time.Second), errLine("b", 180*time.Second), errLine("c", 120*time.Second), errLine("d", 60*time.Second)}, Graph: graph}).Analyze(context.Background(), errLine("now", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Candidates[0].Gap != 10 {
+		t.Fatalf("the gap should run to the onset (10s), not the newest copy: %.0fs", got.Candidates[0].Gap)
+	}
+	onsetOnly, _ := (&Analyzer{Events: fakeEvents{cause}, Graph: graph}).Analyze(context.Background(), errLine("now", 0))
+	if got.Candidates[0].Score <= onsetOnly.Candidates[0].Score {
+		t.Fatalf("a recurring signal should not lower confidence: %.3f vs %.3f", got.Candidates[0].Score, onsetOnly.Candidates[0].Score)
+	}
+}
+
+// Something that happened after the problem began is an effect; it is still
+// judged against the symptom, never pulled back to the onset.
+func TestAnEventAfterTheOnsetIsNotMeasuredFromIt(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sig := func(id string, ago time.Duration) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "log_error", Severity: "warning", Title: "redis INCR failed: EOF"}
+	}
+	late := event.Event{ID: "late", IngestedAt: now.Add(-60 * time.Second), OccurredAt: now.Add(-60 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0"}
+
+	got, err := (&Analyzer{Events: fakeEvents{sig("first", 300*time.Second), late}, Graph: fakeGraph{"default/Pod/api-1": 0, "default/Deployment/redis": 2}}).Analyze(context.Background(), sig("now", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Candidates[0].Gap != 60 {
+		t.Fatalf("an event after the onset keeps its gap to the symptom (60s): %.0fs", got.Candidates[0].Gap)
+	}
+}
+
+// A Service fronting the cause's own workload goes down with it but does not
+// depend on it.
+func TestTheCausesOwnServiceIsNotItsBlastRadius(t *testing.T) {
+	node := func(kind, name string) graph.Node { return graph.Node{Namespace: "default", Kind: kind, Name: name} }
+	edges := []graph.Edge{
+		{From: node("Deployment", "redis"), To: node("Pod", "redis-1"), Kind: "owns"},
+		{From: node("Service", "redis"), To: node("Pod", "redis-1"), Kind: "routes_to"},
+		{From: node("Pod", "api-1"), To: node("Service", "redis"), Kind: "calls"},
+		{From: node("Service", "api"), To: node("Pod", "api-1"), Kind: "routes_to"},
+	}
+	g := graph.New()
+	g.SetEdges(edges)
+
+	got := summarizeImpact(g.Impact("default/Deployment/redis", 4), frontDoors(edges, "default/Deployment/redis"))
+	if len(got.Services) != 1 || got.Services[0] != "default/Service/api" {
+		t.Fatalf("only the dependent service should count, got %v", got.Services)
+	}
+}
+
+// rangedEvents honours the requested range, like the real event store does, and
+// counts reads so a test can see how far an analysis had to reach.
+type rangedEvents struct {
+	all   []event.Event
+	reads int
+}
+
+func (r *rangedEvents) EventsBetween(_ context.Context, from, to time.Time) ([]event.Event, error) {
+	r.reads++
+	var out []event.Event
+	for _, e := range r.all {
+		if !e.IngestedAt.Before(from) && e.IngestedAt.Before(to) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+var outageGraph = fakeGraph{"default/Pod/api-1": 0, "default/Deployment/redis": 2}
+
+// outage builds a cause followed by the same error repeating every interval
+// until `length` has passed, and returns the newest copy as the symptom.
+func outage(causeType string, length, every time.Duration, now time.Time) (*rangedEvents, event.Event, event.Event) {
+	start := now.Add(-length)
+	cause := event.Event{ID: "cause", IngestedAt: start.Add(-time.Second), OccurredAt: start.Add(-time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: causeType, Title: "redis scaled from 1 to 0", Payload: []byte(`{"old_replicas":1,"new_replicas":0}`)}
+	source := &rangedEvents{all: []event.Event{cause}}
+	var newest event.Event
+	for at, i := start, 0; !at.After(now); at, i = at.Add(every), i+1 {
+		newest = event.Event{ID: fmt.Sprintf("err-%d", i), IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "log_error", Severity: "warning", Title: "redis INCR failed: EOF"}
+		source.all = append(source.all, newest)
+	}
+	return source, newest, cause
+}
+
+// The outage screenshots: the cause is older than the lookback by the time the
+// newest error is analysed, yet it is still the cause.
+func TestACauseOlderThanTheLookbackIsFoundThroughTheEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, length := range []time.Duration{5 * time.Minute, 14 * time.Minute, 23 * time.Minute, 50 * time.Minute, 100 * time.Minute} {
+		source, newest, _ := outage("scale", length, 15*time.Second, now)
+		got, err := (&Analyzer{Events: source, Graph: outageGraph}).Analyze(context.Background(), newest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Candidates) == 0 || got.Candidates[0].Event.ID != "cause" {
+			t.Fatalf("a %v outage lost its cause: %+v", length, got.Candidates)
+		}
+		if got.Confidence < 0.5 {
+			t.Errorf("a %v outage scored %.2f; confidence must not fall as an outage lasts", length, got.Confidence)
+		}
+	}
+}
+
+// Confidence must be the same however long the outage has run.
+func TestConfidenceDoesNotDependOnHowLongTheOutageHasRun(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	score := func(length time.Duration) float64 {
+		source, newest, _ := outage("scale", length, 15*time.Second, now)
+		got, _ := (&Analyzer{Events: source, Graph: outageGraph}).Analyze(context.Background(), newest)
+		return got.Confidence
+	}
+	short, long := score(2*time.Minute), score(90*time.Minute)
+	if math.Abs(short-long) > 0.02 {
+		t.Fatalf("confidence moved from %.3f to %.3f as the outage aged", short, long)
+	}
+}
+
+// Alerts re-notify rather than fire continuously: two copies 21 minutes apart
+// are one outage.
+func TestASparselyRepeatingAlertIsOneEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	alert := func(id string, ago time.Duration) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike", Severity: "critical", Title: "high_error_rate on api: 1.000"}
+	}
+	cause := event.Event{ID: "cause", IngestedAt: now.Add(-22 * time.Minute), OccurredAt: now.Add(-22 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0"}
+	source := &rangedEvents{all: []event.Event{cause, alert("first", 21*time.Minute), alert("second", 0)}}
+
+	got, err := (&Analyzer{Events: source, Graph: fakeGraph{"default/Service/api": 0, "default/Deployment/redis": 2}}).Analyze(context.Background(), alert("second", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) == 0 || got.Candidates[0].Event.ID != "cause" {
+		t.Fatalf("the cause behind a re-notifying alert was lost: %+v", got.Candidates)
+	}
+}
+
+// A long silence means the earlier copies were a different episode.
+func TestAnEarlierEpisodeIsNotFollowed(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	alert := func(id string, ago time.Duration) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike", Severity: "critical", Title: "high_error_rate on api: 1.000"}
+	}
+	oldCause := event.Event{ID: "old", IngestedAt: now.Add(-92 * time.Minute), OccurredAt: now.Add(-92 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0"}
+	source := &rangedEvents{all: []event.Event{oldCause, alert("earlier", 90*time.Minute), alert("now", 0)}}
+
+	got, err := (&Analyzer{Events: source, Graph: fakeGraph{"default/Service/api": 0, "default/Deployment/redis": 2}}).Analyze(context.Background(), alert("now", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "old" {
+			t.Fatal("a cause from an earlier, separate episode was offered for this one")
+		}
+	}
+}
+
+// A signal that never stops is followed only so far.
+func TestAnEpisodeIsFollowedOnlyToTheCap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	source, newest, _ := outage("scale", 6*time.Hour, time.Minute, now)
+	got, err := (&Analyzer{Events: source, Graph: outageGraph}).Analyze(context.Background(), newest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.reads > maxEpisodeLoads+1 {
+		t.Fatalf("followed the episode with %d reads, cap is %d", source.reads, maxEpisodeLoads+1)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "cause" {
+			t.Fatal("a cause beyond the episode cap should not be reached")
+		}
+	}
+}
+
+// Thousands of repeats must not make the analysis quadratic.
+func TestAManyThousandEventOutageStaysFast(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	source, newest, _ := outage("scale", 100*time.Minute, time.Second, now)
+	// A second, different signal from the same pod, repeating as densely.
+	for i := 0; i < 6000; i++ {
+		at := now.Add(-100*time.Minute + time.Duration(i)*time.Second)
+		source.all = append(source.all, event.Event{ID: fmt.Sprintf("other-%d", i), IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "log_error", Severity: "warning", Title: "worker call failed: timeout"})
+	}
+	begin := time.Now()
+	got, err := (&Analyzer{Events: source, Graph: outageGraph}).Analyze(context.Background(), newest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(begin); took > 3*time.Second {
+		t.Fatalf("analysing %d events took %v", len(source.all), took)
+	}
+	if got.Candidates[0].Event.ID != "cause" {
+		t.Fatalf("the cause was buried by repeats: %+v", got.Candidates[0].Event)
+	}
+	total := 0
+	for _, c := range got.Candidates {
+		if c.Event.Type == "log_error" {
+			total += c.Occurrences
+		}
+	}
+	if total < 5000 {
+		t.Fatalf("repeat counts should survive collapsing, got %d", total)
+	}
+}
+
+// The logs stop when a failure is fixed; identical errors after a quiet spell
+// are a different outage and must not inherit the first one's causes.
+func TestALogStreamThatWentQuietStartsANewEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	line := func(id string, ago time.Duration) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Pod", EntityName: "web-1", Type: "log_error", Severity: "warning", Title: "api returned HTTP 500"}
+	}
+	old := event.Event{ID: "old", IngestedAt: now.Add(-40 * time.Minute), OccurredAt: now.Add(-40 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0", Payload: []byte(`{"old_replicas":1,"new_replicas":0}`)}
+	fresh := event.Event{ID: "fresh", IngestedAt: now.Add(-95 * time.Second), OccurredAt: now.Add(-95 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "scale", Title: "worker scaled from 1 to 0", Payload: []byte(`{"old_replicas":1,"new_replicas":0}`)}
+	all := []event.Event{old, fresh}
+	for i := 0; i < 50; i++ { // the first outage's errors, every 15s, then silence
+		all = append(all, line(fmt.Sprintf("a%d", i), 39*time.Minute-time.Duration(i)*15*time.Second))
+	}
+	for i := 0; i < 6; i++ { // the second outage
+		all = append(all, line(fmt.Sprintf("b%d", i), 90*time.Second-time.Duration(i)*15*time.Second))
+	}
+	graph := fakeGraph{"default/Pod/web-1": 0, "default/Deployment/redis": 2, "default/Deployment/worker": 2}
+
+	got, err := (&Analyzer{Events: &rangedEvents{all: all}, Graph: graph}).Analyze(context.Background(), line("now", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Candidates[0].Event.ID != "fresh" {
+		t.Fatalf("the current outage's cause should lead: %+v", got.Candidates[0].Event)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "old" {
+			t.Fatal("the first outage's cause was offered for the second")
+		}
+	}
+}
+
+// An explicit resolution ends an episode even when the next alert is soon after.
+func TestAResolvedAlertEndsTheEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	alert := func(id string, ago time.Duration) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike", Severity: "critical", Title: "high_error_rate on api: 1.000"}
+	}
+	resolved := event.Event{ID: "resolved", IngestedAt: now.Add(-8 * time.Minute), OccurredAt: now.Add(-8 * time.Minute), Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike_resolved", Title: "high_error_rate resolved on api"}
+	old := event.Event{ID: "old", IngestedAt: now.Add(-21 * time.Minute), OccurredAt: now.Add(-21 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 1 to 0", Payload: []byte(`{"old_replicas":1,"new_replicas":0}`)}
+	source := &rangedEvents{all: []event.Event{old, alert("first", 20*time.Minute), resolved, alert("again", 0)}}
+
+	got, err := (&Analyzer{Events: source, Graph: fakeGraph{"default/Service/api": 0, "default/Deployment/redis": 2}}).Analyze(context.Background(), alert("again", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "old" {
+			t.Fatal("a cause from before the alert resolved was offered for the new alert")
+		}
+	}
+}
+
+// Bringing a workload up from zero is the end of an outage, never its start.
+func TestScalingUpFromZeroIsNotACause(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	restore := event.Event{ID: "restore", IngestedAt: now.Add(-30 * time.Second), OccurredAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Title: "redis scaled from 0 to 1", Payload: []byte(`{"old_replicas":0,"new_replicas":1}`)}
+	cut := event.Event{ID: "cut", IngestedAt: now.Add(-40 * time.Second), OccurredAt: now.Add(-40 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "scale", Title: "worker scaled from 2 to 1", Payload: []byte(`{"old_replicas":2,"new_replicas":1}`)}
+
+	got, err := (&Analyzer{Events: fakeEvents{restore, cut}, Graph: fakeGraph{"default/Service/api": 0, "default/Deployment/redis": 2, "default/Deployment/worker": 2}}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "cut" {
+		t.Fatalf("only the capacity cut should remain: %+v", got.Candidates)
+	}
+}
+
+// Replacement pods appear because their owner changed; naming the pod as a
+// cause splits the answer between the owner and its own side effect.
+func TestAControllersPodCreationIsNotACause(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	owned := event.Event{ID: "pod", IngestedAt: now.Add(-50 * time.Second), OccurredAt: now.Add(-50 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "redis-abc", Type: "resource_created", Payload: []byte(`{"owner":"redis"}`)}
+	bare := event.Event{ID: "bare", IngestedAt: now.Add(-40 * time.Second), OccurredAt: now.Add(-40 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "debug-1", Type: "resource_created", Payload: []byte(`{"owner":""}`)}
+
+	got, err := (&Analyzer{Events: fakeEvents{owned, bare}, Graph: fakeGraph{"default/Service/api": 0, "default/Pod/redis-abc": 2, "default/Pod/debug-1": 2}}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "bare" {
+		t.Fatalf("only a pod with no owner can be a cause of its own: %+v", got.Candidates)
+	}
+}
+
+// A scale-down that was later undone is no longer what is breaking anything.
+func TestAChangeReplacedBeforeTheEpisodeIsHistory(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	change := func(id string, ago time.Duration, name, payload string) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Deployment", EntityName: name, Type: "scale", Payload: []byte(payload)}
+	}
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike"}
+	events := fakeEvents{
+		change("down", 8*time.Minute, "worker", `{"old_replicas":1,"new_replicas":0}`),
+		change("up", 6*time.Minute, "worker", `{"old_replicas":0,"new_replicas":1}`),
+		change("api-down", 40*time.Second, "api2", `{"old_replicas":1,"new_replicas":0}`),
+	}
+	graph := fakeGraph{"default/Service/api": 0, "default/Deployment/worker": 2, "default/Deployment/api2": 2}
+
+	got, err := (&Analyzer{Events: events, Graph: graph}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "api-down" {
+		t.Fatalf("a replaced change should not compete: %+v", got.Candidates)
+	}
+}
+
+// A repair attempt made during the outage does not erase the break.
+func TestAChangeMadeDuringTheEpisodeDoesNotReplaceTheCause(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	alert := func(id string, ago time.Duration) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "error_spike", Title: "high_error_rate"}
+	}
+	scale := func(id string, ago time.Duration, payload string) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Payload: []byte(payload)}
+	}
+	source := &rangedEvents{all: []event.Event{
+		scale("break", 12*time.Minute, `{"old_replicas":1,"new_replicas":0}`),
+		alert("first", 10*time.Minute),
+		scale("attempt", 2*time.Minute, `{"old_replicas":0,"new_replicas":1}`),
+	}}
+	got, err := (&Analyzer{Events: source, Graph: fakeGraph{"default/Service/api": 0, "default/Deployment/redis": 2}}).Analyze(context.Background(), alert("now", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) == 0 || got.Candidates[0].Event.ID != "break" {
+		t.Fatalf("the break must stay the cause: %+v", got.Candidates)
+	}
+}
+
+// Warning events from the failing pod restate the symptom and must not compete
+// with the release that caused it.
+func TestAKubernetesWarningOnTheFailingPodIsACoSymptom(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-2", Type: "became_unready", Title: "api-2 stopped serving traffic"}
+	warning := event.Event{ID: "warn", IngestedAt: now.Add(-5 * time.Second), OccurredAt: now.Add(-5 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "api-2", Type: "k8s_event", Severity: "warning", Title: "Failed: ErrImageNeverPull"}
+	deploy := event.Event{ID: "deploy", IngestedAt: now.Add(-20 * time.Second), OccurredAt: now.Add(-20 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "deploy", Title: "api deployed: latest -> broken", Payload: []byte(`{"old_image":"latest","new_image":"broken"}`)}
+
+	got, err := (&Analyzer{Events: fakeEvents{warning, deploy}, Graph: fakeGraph{"default/Pod/api-2": 0, "default/Deployment/api": 1}}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Candidates[0].Event.ID != "deploy" {
+		t.Fatalf("the release should lead: %+v", got.Candidates[0].Event)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID != "warn" {
+			continue
+		}
+		damped := false
+		for _, f := range c.Factors {
+			damped = damped || f.Label == "Co-symptom"
+		}
+		if !damped {
+			t.Error("the warning on the failing pod should be damped as a co-symptom")
+		}
+	}
+}
+
+// A workload that reported itself healthy between two identical failures had two
+// outages, not one.
+func TestAHealthyReportBetweenFailuresSplitsTheEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	status := func(id string, ago time.Duration, phase, title string) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "resource_status", Severity: "warning", Title: title, Payload: []byte(`{"phase":"` + phase + `"}`)}
+	}
+	change := func(id string, ago time.Duration, old, new int) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "scale", Payload: []byte(fmt.Sprintf(`{"old_replicas":%d,"new_replicas":%d}`, old, new))}
+	}
+	source := &rangedEvents{all: []event.Event{
+		change("first-break", 20*time.Minute, 1, 0),
+		status("down1", 19*time.Minute, "Degraded", "api status is 0/1 replicas ready"),
+		status("up", 12*time.Minute, "Running", "api status is 1/1 replicas ready"),
+		change("second-break", 2*time.Minute, 1, 0),
+	}}
+	got, err := (&Analyzer{Events: source, Graph: fakeGraph{"default/Deployment/api": 0, "default/Deployment/redis": 2}}).Analyze(context.Background(), status("down2", 0, "Degraded", "api status is 0/1 replicas ready"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) == 0 || got.Candidates[0].Event.ID != "second-break" {
+		t.Fatalf("the current outage's break should lead: %+v", got.Candidates)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "first-break" {
+			t.Fatal("the earlier outage's break was offered for this one")
+		}
+	}
+}
+
+// A crash-looping workload reports healthy for a moment between failures. That is
+// one outage, and its cause is the change made when it began.
+func TestAFlappingWorkloadIsOneEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	status := func(id string, ago time.Duration, phase, title string) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "resource_status", Severity: "warning", Title: title, Payload: []byte(`{"phase":"` + phase + `"}`)}
+	}
+	change := event.Event{ID: "limit", IngestedAt: now.Add(-6*time.Minute - time.Second), OccurredAt: now.Add(-6*time.Minute - time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "resource_change", Title: "api resource limits changed"}
+	all := []event.Event{change}
+	for i := 0; i < 8; i++ { // fails, is briefly "ready", fails again
+		down := 6*time.Minute - time.Duration(i)*45*time.Second
+		all = append(all, status(fmt.Sprintf("down%d", i), down, "Degraded", "api status is 0/1 replicas ready"))
+		all = append(all, status(fmt.Sprintf("up%d", i), down-3*time.Second, "Running", "api status is 1/1 replicas ready"))
+	}
+	got, err := (&Analyzer{Events: &rangedEvents{all: all}, Graph: fakeGraph{"default/Deployment/api": 0}}).Analyze(context.Background(), status("now", 0, "Degraded", "api status is 0/1 replicas ready"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) == 0 || got.Candidates[0].Event.ID != "limit" {
+		t.Fatalf("the limit change should lead: %+v", got.Candidates)
+	}
+	if got.Candidates[0].Gap > 5 {
+		t.Fatalf("the gap should run to when the crashing began, got %.0fs", got.Candidates[0].Gap)
+	}
+}
+
+// An alert that clears and fires again half a minute later is one flapping
+// outage, and another signal's resolution does not end it.
+func TestAFlappingAlertAndAnotherSignalsResolutionStayOneEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration) time.Time { return now.Add(-ago) }
+	mk := func(id, typ string, ago time.Duration) event.Event {
+		return event.Event{ID: id, IngestedAt: at(ago), OccurredAt: at(ago), Namespace: "default", EntityKind: "Service", EntityName: "frontend", Type: typ, Severity: "critical", Title: "high_error_rate on frontend: 1.000"}
+	}
+	cause := event.Event{ID: "cause", IngestedAt: at(10 * time.Minute), OccurredAt: at(10 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "resource_change", Title: "api resource limits changed"}
+	source := &rangedEvents{all: []event.Event{
+		cause,
+		mk("e1", "error_spike", 8*time.Minute),
+		mk("r1", "error_spike_resolved", 7*time.Minute+30*time.Second), // flap: back 30s later
+		mk("e2", "error_spike", 7*time.Minute),
+		mk("lat", "latency_spike_resolved", 4*time.Minute), // someone else's resolution
+		mk("e3", "error_spike", 3*time.Minute),
+	}}
+	graph := fakeGraph{"default/Service/frontend": 0, "default/Deployment/api": 2}
+	got, err := (&Analyzer{Events: source, Graph: graph}).Analyze(context.Background(), mk("now", "error_spike", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) == 0 || got.Candidates[0].Event.ID != "cause" || got.Candidates[0].Gap > 125 {
+		t.Fatalf("the whole flapping episode should be followed to its first alert: %+v", got.Candidates)
+	}
+}
+
+// A crash loop is quiet in the caller's logs between failures but keeps
+// restarting the pod behind it, so trouble on the path keeps the episode whole.
+func TestTroubleOnTheCausalPathKeepsAnEpisodeAlive(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration) time.Time { return now.Add(-ago) }
+	weblog := func(id string, ago time.Duration) event.Event {
+		return event.Event{ID: id, IngestedAt: at(ago), OccurredAt: at(ago), Namespace: "default", EntityKind: "Pod", EntityName: "web-1", Type: "log_error", Severity: "warning", Title: "api returned HTTP 503"}
+	}
+	oom := func(id string, ago time.Duration) event.Event {
+		return event.Event{ID: id, IngestedAt: at(ago), OccurredAt: at(ago), Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "oom_kill", Severity: "critical", Title: "api restarted (OOMKilled)"}
+	}
+	cause := event.Event{ID: "limit", IngestedAt: at(8 * time.Minute), OccurredAt: at(8 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "resource_change", Title: "api resource limits changed"}
+	all := []event.Event{cause, weblog("w1", 7*time.Minute), weblog("w2", 3*time.Minute)} // 4 quiet minutes in the web logs
+	for i := 0; i < 8; i++ {
+		all = append(all, oom(fmt.Sprintf("oom%d", i), 7*time.Minute-time.Duration(i)*50*time.Second))
+	}
+	graph := fakeGraph{"default/Pod/web-1": 0, "default/Pod/api-1": 1, "default/Deployment/api": 2}
+
+	got, err := (&Analyzer{Events: &rangedEvents{all: all}, Graph: graph}).Analyze(context.Background(), weblog("now", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limit *Candidate
+	for i := range got.Candidates {
+		if got.Candidates[i].Event.ID == "limit" {
+			limit = &got.Candidates[i]
+		}
+	}
+	if limit == nil {
+		t.Fatalf("the limit change was lost: %+v", got.Candidates)
+	}
+	if limit.Gap > 70 {
+		t.Fatalf("the gap should run to where the trouble began, got %.0fs", limit.Gap)
+	}
+	if limit.Chain != got.Candidates[0].Chain {
+		t.Fatal("the restarts are effects of the change, so they belong to its chain")
+	}
+}
+
+// Quiet on the whole path is a recovery, so the same error text afterwards is a
+// different outage.
+func TestQuietOnTheWholePathStartsANewEpisode(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration) time.Time { return now.Add(-ago) }
+	weblog := func(id string, ago time.Duration) event.Event {
+		return event.Event{ID: id, IngestedAt: at(ago), OccurredAt: at(ago), Namespace: "default", EntityKind: "Pod", EntityName: "web-1", Type: "log_error", Severity: "warning", Title: "api returned HTTP 503"}
+	}
+	first := event.Event{ID: "first", IngestedAt: at(20 * time.Minute), OccurredAt: at(20 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "scale", Payload: []byte(`{"old_replicas":1,"new_replicas":0}`)}
+	second := event.Event{ID: "second", IngestedAt: at(3 * time.Minute), OccurredAt: at(3 * time.Minute), Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "scale", Payload: []byte(`{"old_replicas":1,"new_replicas":0}`)}
+	all := []event.Event{first, second, weblog("a", 19*time.Minute), weblog("b", 18*time.Minute+30*time.Second), weblog("c", 170*time.Second), weblog("d", 150*time.Second)}
+	graph := fakeGraph{"default/Pod/web-1": 0, "default/Deployment/api": 2, "default/Deployment/worker": 2}
+
+	got, err := (&Analyzer{Events: &rangedEvents{all: all}, Graph: graph}).Analyze(context.Background(), weblog("now", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Candidates[0].Event.ID != "second" {
+		t.Fatalf("the current outage's cause should lead: %+v", got.Candidates[0].Event)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "first" {
+			t.Fatal("the earlier outage's cause was offered")
+		}
+	}
+}
+
+// edgesByWindow serves edges only inside the requested window, like the store.
+type edgesByWindow struct {
+	fakeGraph
+	edges []graph.Edge
+	at    []time.Time // when each edge was first recorded
+}
+
+func (g edgesByWindow) EdgesBetween(_ context.Context, _, to time.Time) ([]graph.Edge, error) {
+	var out []graph.Edge
+	for i, e := range g.edges {
+		if !g.at[i].After(to) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// A pod created seconds before it fails is recorded in the graph on the next
+// sync, a little after the symptom; its owner must still be reachable.
+func TestAFreshPodStillReachesItsOwner(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	node := func(kind, name string) graph.Node { return graph.Node{Namespace: "default", Kind: kind, Name: name} }
+	source := edgesByWindow{
+		edges: []graph.Edge{{From: node("Deployment", "worker"), To: node("Pod", "worker-new"), Kind: "owns"}},
+		at:    []time.Time{now.Add(12 * time.Second)}, // the next sync, after the symptom
+	}
+	deploy := event.Event{ID: "deploy", IngestedAt: now.Add(-19 * time.Second), OccurredAt: now.Add(-19 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "deploy", Title: "worker deployed: latest -> broken", Payload: []byte(`{"old_image":"latest","new_image":"broken"}`)}
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "worker-new", Type: "container_restart", Severity: "warning", Title: "worker restarted (Error, exit 1)"}
+
+	got, err := (&Analyzer{Events: fakeEvents{deploy}, Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Event.ID != "deploy" {
+		t.Fatalf("the owner's release should be reachable: %+v", got.Candidates)
 	}
 }

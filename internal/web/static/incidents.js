@@ -97,6 +97,21 @@
         groups.set(id, {id, latest: e, first: e, events: [e], critical: isCritical(e)});
       }
     });
+    // The server samples each entity/type series, so a chatty one arrives
+    // truncated. Its own totals are trusted only when that series holds a single
+    // group; otherwise they would be shared across unrelated messages.
+    const series = e => [e.namespace, e.entity_kind, e.entity_name, e.type].join('|');
+    const perSeries = new Map();
+    groups.forEach(g => { const k = series(g.latest); perSeries.set(k, (perSeries.get(k) || 0) + 1); });
+    groups.forEach(g => {
+      g.total = g.events.length;
+      g.firstAt = g.first.ingested_at;
+      if (perSeries.get(series(g.latest)) !== 1) return;
+      const counted = g.events.map(e => e.occurrences).filter(Number.isFinite);
+      if (counted.length) g.total = Math.max(g.total, ...counted);
+      const began = g.events.map(e => e.first_seen).filter(Boolean).sort()[0];
+      if (began && ts(began) < ts(g.firstAt)) g.firstAt = began;
+    });
     return [...groups.values()].sort((a, b) => {
       if (a.critical !== b.critical) return a.critical ? -1 : 1;
       return ts(b.latest.ingested_at) - ts(a.latest.ingested_at);
@@ -168,7 +183,7 @@
     const e = g.latest;
     const detail = descriptor(e);
     return `<button type="button" class="sig${g.critical ? ' crit' : ''}${active ? ' on' : ''}" data-sig="${esc(e.id)}">
-      <span class="sig-top"><span class="sig-type">${esc(e.type)}</span>${g.events.length > 1 ? `<span class="sig-n">×${g.events.length}</span>` : ''}</span>
+      <span class="sig-top"><span class="sig-type">${esc(e.type)}</span>${g.total > 1 ? `<span class="sig-n">×${g.total}</span>` : ''}</span>
       <div class="sig-msg">${esc(detail || readable(e))}</div>
       <div class="sig-meta"><b>${esc(target(e))}</b><span>${esc(e.source)}</span><span>${since(e.latest || e.ingested_at)} ago</span></div>
     </button>`;
@@ -182,8 +197,8 @@
       ['Severity', e.severity],
       ['Source', e.source],
       ['Kind', e.entity_kind || '—'],
-      ['Occurrences', g.events.length],
-      ['First seen', stamp(g.first.ingested_at)],
+      ['Occurrences', g.total],
+      ['First seen', stamp(g.firstAt)],
       ['Last seen', stamp(g.latest.ingested_at)],
     ];
     if (p.reason) cells.push(['Reason', p.reason]);
@@ -194,10 +209,10 @@
   }
 
   function occurrences(g) {
-    if (g.events.length < 2) return '';
+    if (g.total < 2) return '';
     const shown = g.events.slice().sort((a, b) => ts(b.ingested_at) - ts(a.ingested_at)).slice(0, 40);
-    return `<section class="sec"><div class="sec-h"><b>Occurrences</b><span>${g.events.length} IN WINDOW</span></div>
-      <div class="sec-body"><div class="occ">${shown.map(e => `<span class="${isCritical(e) ? 'crit' : ''}">${clock(e.ingested_at)}</span>`).join('')}${g.events.length > shown.length ? `<span>+${g.events.length - shown.length} more</span>` : ''}</div></div></section>`;
+    return `<section class="sec"><div class="sec-h"><b>Occurrences</b><span>${g.total} IN WINDOW</span></div>
+      <div class="sec-body"><div class="occ">${shown.map(e => `<span class="${isCritical(e) ? 'crit' : ''}">${clock(e.ingested_at)}</span>`).join('')}${g.total > shown.length ? `<span>+${g.total - shown.length} more</span>` : ''}</div></div></section>`;
   }
 
   function remediation(g) {
@@ -236,7 +251,8 @@
         <p class="note">${esc(r.narrative || 'No upstream cause was found in the dependency graph for this signal.')}</p></div>`;
     }
     const rows = r.candidates.map((c, i) => {
-      const gap = Math.round(causalMs(r.symptom) - causalMs(c.event));
+      // The analyzer's own gap, so this column matches the score derivation.
+      const gap = Number.isFinite(c.gap_seconds) ? c.gap_seconds * 1000 : Math.round(causalMs(r.symptom) - causalMs(c.event));
       const linked = i > 0 && c.chain && c.chain === r.candidates[0].chain;
       return `<tr class="${i === focus ? 'top' : ''}${linked ? ' linked' : ''}" data-cand="${i}" title="${linked ? 'An effect of the leading candidate, not a rival explanation' : ''}">
         <td class="num">${i + 1}</td>
