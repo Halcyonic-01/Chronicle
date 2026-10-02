@@ -674,8 +674,8 @@ func confidence(c []Candidate) (overall, strength, separation float64) {
 	// least certain exactly when it had traced the chain most completely.
 	separation = 1
 	for _, rival := range c[1:] {
-		if sameChain(c[0], rival) {
-			continue
+		if sameChain(c[0], rival) || rival.Reverts != "" {
+			continue // a repair is not a competing explanation
 		}
 		if c[0].Score > 0 {
 			margin := (c[0].Score - rival.Score) / c[0].Score
@@ -687,7 +687,7 @@ func confidence(c []Candidate) (overall, strength, separation float64) {
 }
 
 // settleAfterChange: a fix seconds before the symptom has not taken effect yet.
-const settleAfterChange = 2 * time.Minute
+const settleAfterChange = 20 * time.Second
 
 // changeTypes alter what a workload is, as opposed to reporting how it is doing.
 var changeTypes = map[string]bool{"deploy": true, "scale": true, "resource_change": true, "config_change": true}
@@ -820,7 +820,7 @@ func collapseRepeats(candidates []Candidate, hypothesis hypothesisCache) []Candi
 // a link of its chain.
 func contested(c []Candidate) bool {
 	for i := 1; i < len(c); i++ {
-		if !sameChain(c[0], c[i]) {
+		if !sameChain(c[0], c[i]) && c[i].Reverts == "" {
 			return true
 		}
 	}
@@ -1160,6 +1160,12 @@ func changeSignature(e event.Event) (from, to string, ok bool) {
 	case "scale":
 		from = gjson.GetBytes(e.Payload, "old_replicas").String()
 		to = gjson.GetBytes(e.Payload, "new_replicas").String()
+	case "config_change":
+		from = gjson.GetBytes(e.Payload, "from_hash").String()
+		to = gjson.GetBytes(e.Payload, "to_hash").String()
+	case "resource_change":
+		from = gjson.GetBytes(e.Payload, "old_mem_limit").String()
+		to = gjson.GetBytes(e.Payload, "new_mem_limit").String()
 	default:
 		return "", "", false
 	}

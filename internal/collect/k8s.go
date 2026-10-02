@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -26,12 +27,20 @@ type K8sCollector struct {
 	// backlog. It is set when Run begins, not when the collector is built, so
 	// a collector that waits for leadership does not treat the wait as uptime.
 	startedAt time.Time
+	// checkpoints remembers what was last seen, so a new leader can report
+	// what changed while no one was watching. Nil disables it.
+	checkpoints checkpointStore
 }
 
 func NewK8sCollector(client kubernetes.Interface, out chan<- event.Event) *K8sCollector {
+	namespace := os.Getenv("CHRONICLE_NAMESPACE")
+	if namespace == "" {
+		namespace = "chronicle"
+	}
 	return &K8sCollector{
 		BaseCollector: BaseCollector{Out: out},
 		client:        client,
+		checkpoints:   configMapCheckpoint{client: client, namespace: namespace},
 	}
 }
 
@@ -132,6 +141,7 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 		}
 	}
 	informersReady.Store(true)
+	go k.keepCheckpoint(ctx, factory)
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -296,17 +306,21 @@ func specChangeTime(d *appsv1.Deployment) (time.Time, string) {
 	return at, manager
 }
 
+func (k *K8sCollector) emitDeploymentStatus(d *appsv1.Deployment) {
+	k.emitResourceEvent("Deployment", d.Namespace, d.Name, "resource_status", deploymentStatusSeverity(d),
+		fmt.Sprintf("%s status is %d/%d replicas ready", d.Name, d.Status.ReadyReplicas, deploymentReplicas(d)), time.Now().UTC(), map[string]any{
+			"phase":       deploymentReplayPhase(d),
+			"ready_count": d.Status.ReadyReplicas,
+			"reason":      deploymentStatusReason(d),
+			"message":     fmt.Sprintf("%d/%d replicas ready", d.Status.ReadyReplicas, deploymentReplicas(d)),
+		})
+}
+
 func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 	changedAt, changedBy := specChangeTime(new)
 
 	if old.Status.ReadyReplicas != new.Status.ReadyReplicas || old.Status.AvailableReplicas != new.Status.AvailableReplicas {
-		k.emitResourceEvent("Deployment", new.Namespace, new.Name, "resource_status", deploymentStatusSeverity(new),
-			fmt.Sprintf("%s status is %d/%d replicas ready", new.Name, new.Status.ReadyReplicas, deploymentReplicas(new)), time.Now().UTC(), map[string]any{
-				"phase":       deploymentReplayPhase(new),
-				"ready_count": new.Status.ReadyReplicas,
-				"reason":      deploymentStatusReason(new),
-				"message":     fmt.Sprintf("%d/%d replicas ready", new.Status.ReadyReplicas, deploymentReplicas(new)),
-			})
+		k.emitDeploymentStatus(new)
 	}
 	if len(old.Spec.Template.Spec.Containers) == 0 || len(new.Spec.Template.Spec.Containers) == 0 {
 		return
@@ -360,7 +374,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "config_change",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s configuration changed (%s)", new.Name, strings.Join(changed, ", ")),
-			Payload:    mustJSON(map[string]any{"changed": changed, "changed_by": changedBy}),
+			Payload:    mustJSON(map[string]any{"changed": changed, "changed_by": changedBy, "from_hash": configFingerprint(old), "to_hash": configFingerprint(new)}),
 		})
 	}
 
@@ -445,6 +459,11 @@ func (k *K8sCollector) emitResourceEvent(kind, namespace, name, eventType, sever
 	if !occurredAt.IsZero() && occurredAt.Before(k.startedAt) {
 		return
 	}
+	k.emitResource(kind, namespace, name, eventType, severity, title, occurredAt, payload)
+}
+
+// emitResource emits without the backlog filter, for events known to be news.
+func (k *K8sCollector) emitResource(kind, namespace, name, eventType, severity, title string, occurredAt time.Time, payload map[string]any) {
 	k.Emit(event.Event{
 		Source:     "k8s",
 		OccurredAt: occurredAt,

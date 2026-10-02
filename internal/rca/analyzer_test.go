@@ -1954,3 +1954,96 @@ func TestAFreshPodStillReachesItsOwner(t *testing.T) {
 		t.Fatalf("the owner's release should be reachable: %+v", got.Candidates)
 	}
 }
+
+// A restored config or limit undoes the change before it, so it is a repair and
+// must not compete with the break.
+func TestARestoredConfigOrLimitDoesNotOutrankTheBreak(t *testing.T) {
+	cases := map[string][2]string{
+		"config_change":   {`{"from_hash":"aaa","to_hash":"bbb"}`, `{"from_hash":"bbb","to_hash":"aaa"}`},
+		"resource_change": {`{"old_mem_limit":0,"new_mem_limit":8388608}`, `{"old_mem_limit":8388608,"new_mem_limit":0}`},
+	}
+	for kind, payloads := range cases {
+		now := time.Now().UTC()
+		symptom := event.Event{ID: "s", IngestedAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "resource_status"}
+		node := func(k, n string) graph.Node { return graph.Node{Kind: k, Name: n, Namespace: "default"} }
+		source := &countingGraph{edges: []graph.Edge{{From: node("Deployment", "api"), To: node("Pod", "api-1"), Kind: "owns", Weight: 1, Source: "static"}}}
+		change := func(id string, ago time.Duration, payload string) event.Event {
+			return event.Event{ID: id, IngestedAt: now.Add(-ago), OccurredAt: now.Add(-ago), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: kind, Payload: []byte(payload)}
+		}
+		window := []event.Event{
+			change("broke", 50*time.Second, payloads[0]),
+			failureOn("failing", now.Add(-20*time.Second), "api-1"),
+			change("fixed", 1*time.Second, payloads[1]),
+		}
+		got, err := (&Analyzer{Events: fakeEvents(window), Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Candidates) < 2 || got.Candidates[0].Event.ID != "broke" {
+			t.Fatalf("%s: the break must lead: %+v", kind, got.Candidates)
+		}
+		if got.Candidates[1].Reverts != "broke" {
+			t.Errorf("%s: the restore should be marked as undoing the break, got %q", kind, got.Candidates[1].Reverts)
+		}
+	}
+}
+
+// Two different config changes are two hypotheses, not one repeated event.
+func TestDifferentConfigChangesAreDifferentHypotheses(t *testing.T) {
+	mk := func(payload string) event.Event {
+		return event.Event{Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "config_change", Payload: []byte(payload)}
+	}
+	if hypothesisKey(mk(`{"from_hash":"a","to_hash":"b"}`)) == hypothesisKey(mk(`{"from_hash":"b","to_hash":"c"}`)) {
+		t.Fatal("distinct transitions must not collapse into one candidate")
+	}
+}
+
+// A break that was restored, with a new failure starting after the restore had
+// time to take effect, is history and must not outrank the real cause.
+func TestARestoredBreakDoesNotExplainALaterFailure(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	config := func(id string, ago time.Duration, from, to string) event.Event {
+		at := now.Add(-ago)
+		return event.Event{ID: id, IngestedAt: at, OccurredAt: at, Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "config_change", Payload: []byte(`{"from_hash":"` + from + `","to_hash":"` + to + `"}`)}
+	}
+	worker := event.Event{ID: "worker", IngestedAt: now.Add(-30 * time.Second), OccurredAt: now.Add(-30 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "scale", Payload: []byte(`{"old_replicas":1,"new_replicas":0}`)}
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-1", Type: "became_unready", Severity: "warning"}
+	// The break caused failures, which is what makes the restore a repair.
+	events := fakeEvents{config("break", 100*time.Second, "good", "bad"), failureOn("failing", now.Add(-80*time.Second), "api-1"), config("restore", 50*time.Second, "bad", "good"), worker}
+	node := func(kind, name string) graph.Node { return graph.Node{Kind: kind, Name: name, Namespace: "default"} }
+	source := &countingGraph{edges: []graph.Edge{
+		{From: node("Deployment", "api"), To: node("Pod", "api-1"), Kind: "owns", Weight: 1, Source: "static"},
+		{From: node("Pod", "api-1"), To: node("Deployment", "worker"), Kind: "calls", Weight: 1, Source: "static"},
+	}}
+
+	got, err := (&Analyzer{Events: events, Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Candidates[0].Event.ID != "worker" {
+		t.Fatalf("the live cause should lead, got %q", got.Candidates[0].Event.ID)
+	}
+	for _, c := range got.Candidates {
+		if c.Event.ID == "break" {
+			t.Fatal("a break that was already restored should not be offered")
+		}
+	}
+}
+
+// Undoing a change is not a rival theory of the failure it undid.
+func TestARepairIsNotARivalForConfidence(t *testing.T) {
+	cause := candidateAt(0.64, 1)
+	cause.Event.ID = "cause"
+	repair := candidateAt(0.60, 1)
+	repair.Event.ID = "repair"
+	repair.Reverts = "earlier-break"
+
+	_, _, separation := confidence([]Candidate{cause, repair})
+	if separation != 1 || contested([]Candidate{cause, repair}) {
+		t.Fatalf("a repair must not count as a rival: separation %.2f", separation)
+	}
+	repair.Reverts = ""
+	if _, _, separation := confidence([]Candidate{cause, repair}); separation >= 0.9 {
+		t.Fatal("a real rival should still lower separation")
+	}
+}

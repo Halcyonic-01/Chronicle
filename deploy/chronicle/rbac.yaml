@@ -42,3 +42,30 @@ subjects:
 - kind: ServiceAccount
   name: chronicle
   namespace: chronicle
+---
+# The collector saves what it last saw in one ConfigMap, so a new leader can
+# report changes made while nobody was watching. Namespaced: it never writes
+# ConfigMaps anywhere else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chronicle-collector-state
+  namespace: chronicle
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chronicle-collector-state
+  namespace: chronicle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chronicle-collector-state
+subjects:
+- kind: ServiceAccount
+  name: chronicle
+  namespace: chronicle
