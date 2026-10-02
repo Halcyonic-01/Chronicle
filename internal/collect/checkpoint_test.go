@@ -6,6 +6,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -151,5 +152,39 @@ func TestConfigChangeEventsCarryFingerprintsNotValues(t *testing.T) {
 	}
 	if from != configFingerprint(old) || to != configFingerprint(new) {
 		t.Error("fingerprints should match the deployments they describe")
+	}
+}
+
+func TestCatchUpReportsChangesToRelatedObjects(t *testing.T) {
+	k, out := collectorWithOut()
+	svcBefore := service(map[string]string{"app": "redis"}, 6379)
+	cmBefore := configMap("api-config", map[string]string{"A": "1"})
+	hpaBefore := hpa(5)
+	cp := &checkpoint{At: time.Now().Add(-time.Minute)}
+	cp.related([]*corev1.Service{svcBefore}, []*corev1.ConfigMap{cmBefore}, []*autoscalingv2.HorizontalPodAutoscaler{hpaBefore},
+		[]*corev1.Node{node(corev1.ConditionTrue)}, []*corev1.Pod{podUsing("api-config")})
+
+	k.catchUpRelated(cp,
+		[]*corev1.Service{service(map[string]string{"app": "elsewhere"}, 6379)},
+		[]*corev1.ConfigMap{configMap("api-config", map[string]string{"A": "2"})},
+		[]*autoscalingv2.HorizontalPodAutoscaler{hpa(1)},
+		[]*corev1.Node{node(corev1.ConditionFalse)})
+
+	got := types(drain(out))
+	for _, want := range []string{"service_change", "config_change", "hpa_change", "node_not_ready"} {
+		if got[want] != 1 {
+			t.Errorf("a missed %s was not reported once: %v", want, got)
+		}
+	}
+}
+
+func TestCatchUpIsSilentForUnchangedRelatedObjects(t *testing.T) {
+	k, out := collectorWithOut()
+	svc, cm, h, n := service(map[string]string{"app": "redis"}, 6379), configMap("api-config", map[string]string{"A": "1"}), hpa(5), node(corev1.ConditionTrue)
+	cp := &checkpoint{}
+	cp.related([]*corev1.Service{svc}, []*corev1.ConfigMap{cm}, []*autoscalingv2.HorizontalPodAutoscaler{h}, []*corev1.Node{n}, []*corev1.Pod{podUsing("api-config")})
+	k.catchUpRelated(cp, []*corev1.Service{svc}, []*corev1.ConfigMap{cm}, []*autoscalingv2.HorizontalPodAutoscaler{h}, []*corev1.Node{n})
+	if events := drain(out); len(events) != 0 {
+		t.Fatalf("nothing changed: %+v", events)
 	}
 }

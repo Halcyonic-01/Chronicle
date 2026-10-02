@@ -1,0 +1,1617 @@
+{
+  "incidents": [
+    {
+      "Name": "holdout/batch_deploy_unrelated/K",
+      "Group": "holdout-unknown",
+      "Fault": "batch_deploy_unrelated",
+      "Truths": null,
+      "Top": [
+        "log_error:payments-a"
+      ],
+      "Confidence": 0.15469528652330752,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/batch_deploy_unrelated/L",
+      "Group": "holdout-unknown",
+      "Fault": "batch_deploy_unrelated",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/batch_deploy_unrelated/W",
+      "Group": "holdout-unknown",
+      "Fault": "batch_deploy_unrelated",
+      "Truths": null,
+      "Top": [
+        "log_error:payments-a",
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.15012334986755052,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/cart_pod_not_ready/K",
+      "Group": "holdout-known",
+      "Fault": "cart_pod_not_ready",
+      "Truths": [
+        "became_unready:cart-a"
+      ],
+      "Top": [
+        "became_unready:cart-a",
+        "k8s_event:cart-a",
+        "log_error:checkout-a"
+      ],
+      "Confidence": 0.42642226722811555,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/cart_pod_not_ready/L",
+      "Group": "holdout-known",
+      "Fault": "cart_pod_not_ready",
+      "Truths": [
+        "became_unready:cart-a"
+      ],
+      "Top": [
+        "became_unready:cart-a",
+        "k8s_event:cart-a"
+      ],
+      "Confidence": 0.5004111662251685,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/cart_pod_not_ready/P",
+      "Group": "holdout-known",
+      "Fault": "cart_pod_not_ready",
+      "Truths": [
+        "became_unready:cart-a"
+      ],
+      "Top": [
+        "became_unready:cart-a"
+      ],
+      "Confidence": 0.5173726595078305,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/cart_pod_not_ready/W",
+      "Group": "holdout-known",
+      "Fault": "cart_pod_not_ready",
+      "Truths": [
+        "became_unready:cart-a"
+      ],
+      "Top": [
+        "became_unready:cart-a",
+        "k8s_event:cart-a",
+        "latency_spike:checkout",
+        "log_error:checkout-a"
+      ],
+      "Confidence": 0.33209799563634024,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/cart_pod_not_ready/X",
+      "Group": "holdout-known",
+      "Fault": "cart_pod_not_ready",
+      "Truths": [
+        "became_unready:cart-a"
+      ],
+      "Top": [
+        "became_unready:cart-a",
+        "k8s_event:cart-a"
+      ],
+      "Confidence": 0.5004111662251685,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/checkout_configmap_edited/K",
+      "Group": "holdout-newly-observable",
+      "Fault": "checkout_configmap_edited",
+      "Truths": [
+        "config_change:checkout-config"
+      ],
+      "Top": [
+        "container_restart:checkout-a",
+        "became_unready:checkout-a"
+      ],
+      "Confidence": 0.66973795519309,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/checkout_configmap_edited/L",
+      "Group": "holdout-newly-observable",
+      "Fault": "checkout_configmap_edited",
+      "Truths": [
+        "config_change:checkout-config"
+      ],
+      "Top": [
+        "container_restart:checkout-a",
+        "became_unready:checkout-a",
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.6265445352239283,
+      "Candidates": 3,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/checkout_configmap_edited/P",
+      "Group": "holdout-newly-observable",
+      "Fault": "checkout_configmap_edited",
+      "Truths": [
+        "config_change:checkout-config"
+      ],
+      "Top": [
+        "container_restart:checkout-a"
+      ],
+      "Confidence": 0.7087856764340635,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/checkout_configmap_edited/W",
+      "Group": "holdout-newly-observable",
+      "Fault": "checkout_configmap_edited",
+      "Truths": [
+        "config_change:checkout-config"
+      ],
+      "Top": [
+        "container_restart:checkout-a",
+        "became_unready:checkout-a",
+        "log_error:web-a",
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.4572910823656876,
+      "Candidates": 4,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/db_down_and_search_config/L",
+      "Group": "holdout-competing",
+      "Fault": "db_down_and_search_config",
+      "Truths": [
+        "scale:db",
+        "config_change:search"
+      ],
+      "Top": [
+        "config_change:search",
+        "container_restart:search-b",
+        "became_unready:search-a",
+        "scale:db",
+        "became_unready:db-a"
+      ],
+      "Confidence": 0.730820071512682,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": true
+    },
+    {
+      "Name": "holdout/db_down_and_search_config/W",
+      "Group": "holdout-competing",
+      "Fault": "db_down_and_search_config",
+      "Truths": [
+        "scale:db",
+        "config_change:search"
+      ],
+      "Top": [
+        "config_change:search",
+        "container_restart:search-b",
+        "scale:db",
+        "became_unready:search-a",
+        "resource_status:search"
+      ],
+      "Confidence": 0.8954120282647516,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": true
+    },
+    {
+      "Name": "holdout/db_scaled_to_zero/K",
+      "Group": "holdout-known",
+      "Fault": "db_scaled_to_zero",
+      "Truths": [
+        "scale:db"
+      ],
+      "Top": [
+        "scale:db",
+        "became_unready:db-a",
+        "resource_deleted:db-a",
+        "log_error:inventory-a",
+        "resource_status:db-a"
+      ],
+      "Confidence": 0.6977818918278254,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/db_scaled_to_zero/L",
+      "Group": "holdout-known",
+      "Fault": "db_scaled_to_zero",
+      "Truths": [
+        "scale:db"
+      ],
+      "Top": [
+        "scale:db",
+        "became_unready:db-a",
+        "resource_deleted:db-a",
+        "resource_status:db-a"
+      ],
+      "Confidence": 0.8188546356411844,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/db_scaled_to_zero/P",
+      "Group": "holdout-known",
+      "Fault": "db_scaled_to_zero",
+      "Truths": [
+        "scale:db"
+      ],
+      "Top": [
+        "scale:db"
+      ],
+      "Confidence": 0.8353965965682572,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/db_scaled_to_zero/W",
+      "Group": "holdout-known",
+      "Fault": "db_scaled_to_zero",
+      "Truths": [
+        "scale:db"
+      ],
+      "Top": [
+        "scale:db",
+        "latency_spike:checkout",
+        "log_error:inventory-a"
+      ],
+      "Confidence": 0.5434330837685567,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/db_scaled_to_zero/X",
+      "Group": "holdout-known",
+      "Fault": "db_scaled_to_zero",
+      "Truths": [
+        "scale:db"
+      ],
+      "Top": [
+        "scale:db",
+        "became_unready:db-a",
+        "resource_deleted:db-a",
+        "resource_status:db-a"
+      ],
+      "Confidence": 0.8188546356411844,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/index_memory_leak/L",
+      "Group": "holdout-known",
+      "Fault": "index_memory_leak",
+      "Truths": [
+        "oom_kill:index-a"
+      ],
+      "Top": [
+        "oom_kill:index-a",
+        "became_unready:index-a"
+      ],
+      "Confidence": 0.7011522201940255,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/index_memory_leak/P",
+      "Group": "holdout-known",
+      "Fault": "index_memory_leak",
+      "Truths": [
+        "oom_kill:index-a"
+      ],
+      "Top": [
+        "oom_kill:index-a"
+      ],
+      "Confidence": 0.876606623632076,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/index_memory_leak/W",
+      "Group": "holdout-known",
+      "Fault": "index_memory_leak",
+      "Truths": [
+        "oom_kill:index-a"
+      ],
+      "Top": [
+        "oom_kill:index-a",
+        "latency_spike:checkout",
+        "became_unready:index-a",
+        "log_error:search-a"
+      ],
+      "Confidence": 0.36258688199693784,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/index_memory_leak/X",
+      "Group": "holdout-known",
+      "Fault": "index_memory_leak",
+      "Truths": [
+        "oom_kill:index-a"
+      ],
+      "Top": [
+        "oom_kill:index-a",
+        "became_unready:index-a"
+      ],
+      "Confidence": 0.32284445413117224,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_limit_oom/K",
+      "Group": "holdout-known",
+      "Fault": "inventory_limit_oom",
+      "Truths": [
+        "resource_change:inventory"
+      ],
+      "Top": [
+        "resource_change:inventory",
+        "oom_kill:inventory-b",
+        "became_unready:inventory-a",
+        "resource_status:inventory",
+        "resource_deleted:inventory-a"
+      ],
+      "Confidence": 0.8906993333791475,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_limit_oom/L",
+      "Group": "holdout-known",
+      "Fault": "inventory_limit_oom",
+      "Truths": [
+        "resource_change:inventory"
+      ],
+      "Top": [
+        "resource_change:inventory",
+        "oom_kill:inventory-b",
+        "became_unready:inventory-a",
+        "resource_status:inventory",
+        "resource_deleted:inventory-a"
+      ],
+      "Confidence": 0.945777104165568,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_limit_oom/P",
+      "Group": "holdout-known",
+      "Fault": "inventory_limit_oom",
+      "Truths": [
+        "resource_change:inventory"
+      ],
+      "Top": [
+        "resource_change:inventory",
+        "resource_status:inventory"
+      ],
+      "Confidence": 0.96007069465289,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_limit_oom/W",
+      "Group": "holdout-known",
+      "Fault": "inventory_limit_oom",
+      "Truths": [
+        "resource_change:inventory"
+      ],
+      "Top": [
+        "resource_change:inventory",
+        "oom_kill:inventory-b",
+        "became_unready:inventory-a",
+        "resource_status:inventory",
+        "resource_deleted:inventory-a"
+      ],
+      "Confidence": 0.8472594142934161,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_limit_oom/X",
+      "Group": "holdout-known",
+      "Fault": "inventory_limit_oom",
+      "Truths": [
+        "resource_change:inventory"
+      ],
+      "Top": [
+        "resource_change:inventory",
+        "oom_kill:inventory-b",
+        "became_unready:inventory-a",
+        "resource_status:inventory",
+        "resource_deleted:inventory-a"
+      ],
+      "Confidence": 0.945777104165568,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_service_port_changed/K",
+      "Group": "holdout-newly-observable",
+      "Fault": "inventory_service_port_changed",
+      "Truths": [
+        "service_change:inventory"
+      ],
+      "Top": [
+        "log_error:cart-a"
+      ],
+      "Confidence": 0.15469528652330752,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_service_port_changed/L",
+      "Group": "holdout-newly-observable",
+      "Fault": "inventory_service_port_changed",
+      "Truths": [
+        "service_change:inventory"
+      ],
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/inventory_service_port_changed/W",
+      "Group": "holdout-newly-observable",
+      "Fault": "inventory_service_port_changed",
+      "Truths": [
+        "service_change:inventory"
+      ],
+      "Top": [
+        "log_error:cart-a",
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.15012334986755052,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_bad_deploy/K",
+      "Group": "holdout-known",
+      "Fault": "ledger_bad_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger",
+        "resource_deleted:ledger-a"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_bad_deploy/L",
+      "Group": "holdout-known",
+      "Fault": "ledger_bad_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger",
+        "resource_deleted:ledger-a"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_bad_deploy/P",
+      "Group": "holdout-known",
+      "Fault": "ledger_bad_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "resource_status:ledger"
+      ],
+      "Confidence": 1,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_bad_deploy/W",
+      "Group": "holdout-known",
+      "Fault": "ledger_bad_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger",
+        "resource_deleted:ledger-a"
+      ],
+      "Confidence": 0.9652309872019013,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_bad_deploy/X",
+      "Group": "holdout-known",
+      "Fault": "ledger_bad_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger",
+        "resource_deleted:ledger-a"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_deploy_beside_search_deploy/K",
+      "Group": "holdout-competing",
+      "Fault": "ledger_deploy_beside_search_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger",
+        "resource_deleted:ledger-a"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_deploy_beside_search_deploy/L",
+      "Group": "holdout-competing",
+      "Fault": "ledger_deploy_beside_search_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger",
+        "resource_deleted:ledger-a"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/ledger_deploy_beside_search_deploy/W",
+      "Group": "holdout-competing",
+      "Fault": "ledger_deploy_beside_search_deploy",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:search",
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger"
+      ],
+      "Confidence": 0.5205163679938939,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/node_n3_lost/K",
+      "Group": "holdout-newly-observable",
+      "Fault": "node_n3_lost",
+      "Truths": [
+        "node_not_ready:n3"
+      ],
+      "Top": [
+        "became_unready:ledger-a",
+        "became_unready:db-a",
+        "resource_status:db-a",
+        "resource_status:ledger-a",
+        "log_error:inventory-a"
+      ],
+      "Confidence": 0.4446841397119163,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/node_n3_lost/L",
+      "Group": "holdout-newly-observable",
+      "Fault": "node_n3_lost",
+      "Truths": [
+        "node_not_ready:n3"
+      ],
+      "Top": [
+        "became_unready:db-a",
+        "resource_status:db-a"
+      ],
+      "Confidence": 0.42759390344978465,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/node_n3_lost/P",
+      "Group": "holdout-newly-observable",
+      "Fault": "node_n3_lost",
+      "Truths": [
+        "node_not_ready:n3"
+      ],
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/node_n3_lost/W",
+      "Group": "holdout-newly-observable",
+      "Fault": "node_n3_lost",
+      "Truths": [
+        "node_not_ready:n3"
+      ],
+      "Top": [
+        "became_unready:index-a",
+        "became_unready:ledger-a",
+        "resource_status:index-a",
+        "log_error:inventory-a",
+        "resource_status:ledger-a"
+      ],
+      "Confidence": 0.20711082367614556,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payment_gateway_outage/K",
+      "Group": "holdout-unknown",
+      "Fault": "payment_gateway_outage",
+      "Truths": null,
+      "Top": [
+        "log_error:payments-a"
+      ],
+      "Confidence": 0.15469528652330752,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payment_gateway_outage/L",
+      "Group": "holdout-unknown",
+      "Fault": "payment_gateway_outage",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payment_gateway_outage/W",
+      "Group": "holdout-unknown",
+      "Fault": "payment_gateway_outage",
+      "Truths": null,
+      "Top": [
+        "log_error:payments-a",
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.15012334986755052,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_bad_config/K",
+      "Group": "holdout-known",
+      "Fault": "payments_bad_config",
+      "Truths": [
+        "config_change:payments"
+      ],
+      "Top": [
+        "config_change:payments",
+        "container_restart:payments-b",
+        "became_unready:payments-a",
+        "resource_status:payments",
+        "resource_deleted:payments-a"
+      ],
+      "Confidence": 0.9364737791762754,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_bad_config/L",
+      "Group": "holdout-known",
+      "Fault": "payments_bad_config",
+      "Truths": [
+        "config_change:payments"
+      ],
+      "Top": [
+        "config_change:payments",
+        "container_restart:payments-b",
+        "became_unready:payments-a",
+        "resource_status:payments",
+        "resource_deleted:payments-a"
+      ],
+      "Confidence": 0.9779463934229005,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_bad_config/P",
+      "Group": "holdout-known",
+      "Fault": "payments_bad_config",
+      "Truths": [
+        "config_change:payments"
+      ],
+      "Top": [
+        "container_restart:payments-b",
+        "config_change:payments",
+        "resource_status:payments"
+      ],
+      "Confidence": 0.6275995661432713,
+      "Candidates": 3,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_bad_config/W",
+      "Group": "holdout-known",
+      "Fault": "payments_bad_config",
+      "Truths": [
+        "config_change:payments"
+      ],
+      "Top": [
+        "config_change:payments",
+        "container_restart:payments-b",
+        "became_unready:payments-a",
+        "resource_status:payments",
+        "resource_deleted:payments-a"
+      ],
+      "Confidence": 0.8982557758450347,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_bad_config/X",
+      "Group": "holdout-known",
+      "Fault": "payments_bad_config",
+      "Truths": [
+        "config_change:payments"
+      ],
+      "Top": [
+        "config_change:payments",
+        "container_restart:payments-b",
+        "became_unready:payments-a",
+        "resource_status:payments",
+        "resource_deleted:payments-a"
+      ],
+      "Confidence": 0.9779463934229005,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_crash_loop/K",
+      "Group": "holdout-known",
+      "Fault": "payments_crash_loop",
+      "Truths": [
+        "container_restart:payments-a"
+      ],
+      "Top": [
+        "container_restart:payments-a",
+        "became_unready:payments-a",
+        "log_error:checkout-a"
+      ],
+      "Confidence": 0.6597772839845537,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_crash_loop/L",
+      "Group": "holdout-known",
+      "Fault": "payments_crash_loop",
+      "Truths": [
+        "container_restart:payments-a"
+      ],
+      "Top": [
+        "container_restart:payments-a",
+        "became_unready:payments-a"
+      ],
+      "Confidence": 0.5774194754539034,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_crash_loop/P",
+      "Group": "holdout-known",
+      "Fault": "payments_crash_loop",
+      "Truths": [
+        "container_restart:payments-a"
+      ],
+      "Top": [
+        "container_restart:payments-a"
+      ],
+      "Confidence": 0.7219113371087684,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_crash_loop/W",
+      "Group": "holdout-known",
+      "Fault": "payments_crash_loop",
+      "Truths": [
+        "container_restart:payments-a"
+      ],
+      "Top": [
+        "container_restart:payments-a",
+        "became_unready:payments-a",
+        "latency_spike:checkout",
+        "log_error:checkout-a"
+      ],
+      "Confidence": 0.5538546731848728,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/payments_crash_loop/X",
+      "Group": "holdout-known",
+      "Fault": "payments_crash_loop",
+      "Truths": [
+        "container_restart:payments-a"
+      ],
+      "Top": [
+        "container_restart:payments-a",
+        "became_unready:payments-a"
+      ],
+      "Confidence": 0.24290799171627755,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/regional_network_partition/K",
+      "Group": "holdout-unknown",
+      "Fault": "regional_network_partition",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/regional_network_partition/L",
+      "Group": "holdout-unknown",
+      "Fault": "regional_network_partition",
+      "Truths": null,
+      "Top": [
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.17719788581755608,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/regional_network_partition/W",
+      "Group": "holdout-unknown",
+      "Fault": "regional_network_partition",
+      "Truths": null,
+      "Top": [
+        "latency_spike:checkout",
+        "log_error:web-a"
+      ],
+      "Confidence": 0.22006738033595227,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/search_autoscaler_capped/L",
+      "Group": "holdout-newly-observable",
+      "Fault": "search_autoscaler_capped",
+      "Truths": [
+        "hpa_change:search"
+      ],
+      "Top": [
+        "scale:search",
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.6467790650851443,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/search_autoscaler_capped/W",
+      "Group": "holdout-newly-observable",
+      "Fault": "search_autoscaler_capped",
+      "Truths": [
+        "hpa_change:search"
+      ],
+      "Top": [
+        "scale:search",
+        "latency_spike:checkout",
+        "log_error:web-a"
+      ],
+      "Confidence": 0.5082102302525912,
+      "Candidates": 3,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/tls_certificate_expired/K",
+      "Group": "holdout-unknown",
+      "Fault": "tls_certificate_expired",
+      "Truths": null,
+      "Top": [
+        "log_error:checkout-a"
+      ],
+      "Confidence": 0.15188264495015646,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/tls_certificate_expired/L",
+      "Group": "holdout-unknown",
+      "Fault": "tls_certificate_expired",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/tls_certificate_expired/W",
+      "Group": "holdout-unknown",
+      "Fault": "tls_certificate_expired",
+      "Truths": null,
+      "Top": [
+        "log_error:checkout-a",
+        "latency_spike:checkout"
+      ],
+      "Confidence": 0.14739383441541318,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/two_ledger_deploys/L",
+      "Group": "holdout-competing",
+      "Fault": "two_ledger_deploys",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": true,
+      "AllRequired": false
+    },
+    {
+      "Name": "holdout/two_ledger_deploys/W",
+      "Group": "holdout-competing",
+      "Fault": "two_ledger_deploys",
+      "Truths": [
+        "deploy:ledger"
+      ],
+      "Top": [
+        "deploy:ledger",
+        "container_restart:ledger-b",
+        "became_unready:ledger-a",
+        "resource_status:ledger",
+        "resource_deleted:ledger-a"
+      ],
+      "Confidence": 0.9652309872019013,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": true,
+      "AllRequired": false
+    }
+  ],
+  "summary": {
+    "Profile": "baseline (held-out set)",
+    "Incidents": 66,
+    "Known": 54,
+    "Unknown": 12,
+    "Top1N": 39,
+    "Top3N": 41,
+    "Top1Pct": 72.22222222222223,
+    "Top3Pct": 75.92592592592592,
+    "UnknownStrictN": 4,
+    "UnknownDeclaredN": 4,
+    "UnknownAbstainN": 12,
+    "UnknownStrictPct": 33.333333333333336,
+    "UnknownDeclaredPct": 33.333333333333336,
+    "UnknownAbstainPct": 100,
+    "NCorrect": 39,
+    "NWrong": 15,
+    "ConfCorrect": 0.7678717206763372,
+    "ConfWrong": 0.4099781321280249,
+    "ConfUnknownGuess": 0.16327237728759925,
+    "UnknownWithCandidates": 8,
+    "MultiCause": 2,
+    "MultiCauseAll": 1,
+    "ByGroup": {
+      "holdout-competing": {
+        "N": 7,
+        "Top1": 6,
+        "Top3": 7,
+        "AllFound": 6
+      },
+      "holdout-known": {
+        "N": 34,
+        "Top1": 33,
+        "Top3": 34,
+        "AllFound": 34
+      },
+      "holdout-newly-observable": {
+        "N": 13,
+        "Top1": 0,
+        "Top3": 0,
+        "AllFound": 0
+      }
+    },
+    "Failed": [
+      "holdout/checkout_configmap_edited/K          truth=[config_change:checkout-config] got=[container_restart:checkout-a became_unready:checkout-a] conf=0.67",
+      "holdout/checkout_configmap_edited/L          truth=[config_change:checkout-config] got=[container_restart:checkout-a became_unready:checkout-a latency_spike:checkout] conf=0.63",
+      "holdout/checkout_configmap_edited/P          truth=[config_change:checkout-config] got=[container_restart:checkout-a] conf=0.71",
+      "holdout/checkout_configmap_edited/W          truth=[config_change:checkout-config] got=[container_restart:checkout-a became_unready:checkout-a log_error:web-a] conf=0.46",
+      "holdout/inventory_service_port_changed/K     truth=[service_change:inventory] got=[log_error:cart-a] conf=0.15",
+      "holdout/inventory_service_port_changed/L     truth=[service_change:inventory] got=[] conf=0.00",
+      "holdout/inventory_service_port_changed/W     truth=[service_change:inventory] got=[log_error:cart-a latency_spike:checkout] conf=0.15",
+      "holdout/ledger_deploy_beside_search_deploy/W truth=[deploy:ledger] got=[deploy:search deploy:ledger container_restart:ledger-b] conf=0.52",
+      "holdout/node_n3_lost/K                       truth=[node_not_ready:n3] got=[became_unready:ledger-a became_unready:db-a resource_status:db-a] conf=0.44",
+      "holdout/node_n3_lost/L                       truth=[node_not_ready:n3] got=[became_unready:db-a resource_status:db-a] conf=0.43",
+      "holdout/node_n3_lost/P                       truth=[node_not_ready:n3] got=[] conf=0.00",
+      "holdout/node_n3_lost/W                       truth=[node_not_ready:n3] got=[became_unready:index-a became_unready:ledger-a resource_status:index-a] conf=0.21",
+      "holdout/payments_bad_config/P                truth=[config_change:payments] got=[container_restart:payments-b config_change:payments resource_status:payments] conf=0.63",
+      "holdout/search_autoscaler_capped/L           truth=[hpa_change:search] got=[scale:search latency_spike:checkout] conf=0.65",
+      "holdout/search_autoscaler_capped/W           truth=[hpa_change:search] got=[scale:search latency_spike:checkout log_error:web-a] conf=0.51"
+    ]
+  }
+}

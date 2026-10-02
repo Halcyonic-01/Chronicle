@@ -1,4 +1,4 @@
-.PHONY: setup teardown migrate build-chronicle deploy-chronicle deploy-ui test-phase4 test-phase5-kind
+.PHONY: rca-benchmark rca-benchmark-baseline setup teardown migrate build-chronicle deploy-chronicle deploy-ui test-phase4 test-phase5-kind
 
 POSTGRES_URL ?= postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable
 
@@ -43,3 +43,13 @@ test-phase4:
 test-phase5-kind:
 	@chmod +x scripts/test-phase5-kind.sh
 	@./scripts/test-phase5-kind.sh
+
+# RCA accuracy on the controlled benchmark (not production accuracy).
+# See internal/rca/benchdata for what the incidents are and what the numbers mean.
+rca-benchmark:
+	@RCA_BENCH_PROFILE=improved go test ./internal/rca ./internal/heal -run 'TestRCABenchmark|TestRCAHoldout|TestHealingBenchmark' -v -count=1 | grep -vE '^(=== RUN|--- PASS|PASS|ok)'
+
+# The same incidents with only the events the collectors emitted before the
+# Service, Node, ConfigMap and HPA collectors existed.
+rca-benchmark-baseline:
+	@RCA_BENCH_PROFILE=baseline go test ./internal/rca ./internal/heal -run 'TestRCABenchmark|TestRCAHoldout|TestHealingBenchmark' -v -count=1 | grep -vE '^(=== RUN|--- PASS|PASS|ok)'

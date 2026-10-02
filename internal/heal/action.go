@@ -176,6 +176,18 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 		action.Result = "no actionable RCA candidate"
 		return action, e.Store.RecordAction(ctx, action)
 	}
+	// Acting on one of several causes the record cannot tell apart is a guess.
+	switch result.Verdict {
+	case rca.VerdictAmbiguous:
+		action.Result = fmt.Sprintf("ambiguous: %d causes are about equally plausible", 1+len(result.Alternatives))
+		return action, e.Store.RecordAction(ctx, action)
+	case rca.VerdictNoRootCause:
+		action.Result = "no root cause observed"
+		return action, e.Store.RecordAction(ctx, action)
+	}
+	// The root cause leads. A rule fires on a root, never on one of its effects:
+	// a node failure restarts no pod, and an autoscaler limit is not undone by
+	// restoring replicas.
 	top := result.Candidates[0]
 	var rule *Rule
 	for i := range e.Rules {

@@ -93,7 +93,7 @@ func remediates(a *Action, e event.Event) bool {
 // restart is matched by remediates instead.
 func isRemediationShaped(e event.Event) bool {
 	switch e.Type {
-	case "deploy", "config_change", "resource_change":
+	case "deploy", "config_change", "resource_change", "service_change", "hpa_change":
 		return true
 	case "scale":
 		return gjson.GetBytes(e.Payload, "new_replicas").Int() >

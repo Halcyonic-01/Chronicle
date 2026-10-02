@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,17 @@ type checkpoint struct {
 	At          time.Time                  `json:"at"`
 	Deployments map[string]deploymentState `json:"deployments"`
 	Pods        map[string]podState        `json:"pods"`
+	// Fingerprints of the objects that can break a dependency from outside a
+	// Deployment; see watchRelated.
+	Services   map[string]string   `json:"services,omitempty"`
+	ConfigMaps map[string]string   `json:"configmaps,omitempty"`
+	HPAs       map[string]hpaState `json:"hpas,omitempty"`
+	Nodes      map[string]bool     `json:"nodes,omitempty"` // name -> Ready
+}
+
+type hpaState struct {
+	Target string `json:"target"`
+	Hash   string `json:"hash"`
 }
 
 type deploymentState struct {
@@ -158,6 +170,64 @@ func configFingerprint(d *appsv1.Deployment) string {
 		Containers []container
 		Volumes    []corev1.Volume
 	}{cs, d.Spec.Template.Spec.Volumes})
+}
+
+// related records the Services, used ConfigMaps, HPAs and Nodes.
+func (cp *checkpoint) related(services []*corev1.Service, configMaps []*corev1.ConfigMap, hpas []*autoscalingv2.HorizontalPodAutoscaler, nodes []*corev1.Node, pods []*corev1.Pod) {
+	cp.Services, cp.ConfigMaps = map[string]string{}, map[string]string{}
+	cp.HPAs, cp.Nodes = map[string]hpaState{}, map[string]bool{}
+	for _, s := range services {
+		cp.Services[s.Namespace+"/"+s.Name] = serviceFingerprint(s)
+	}
+	for _, c := range configMaps {
+		if !ignoredConfigMap(c) && usedByAPod(c, pods) {
+			cp.ConfigMaps[c.Namespace+"/"+c.Name] = configMapFingerprint(c)
+		}
+	}
+	for _, h := range hpas {
+		cp.HPAs[h.Namespace+"/"+h.Name] = hpaState{Target: h.Spec.ScaleTargetRef.Name, Hash: hpaFingerprint(h)}
+	}
+	for _, n := range nodes {
+		ready, _, _ := nodeCondition(n, corev1.NodeReady)
+		cp.Nodes[n.Name] = ready == corev1.ConditionTrue
+	}
+}
+
+// catchUpRelated reports changes to the objects recorded by related.
+func (k *K8sCollector) catchUpRelated(prior *checkpoint, services []*corev1.Service, configMaps []*corev1.ConfigMap, hpas []*autoscalingv2.HorizontalPodAutoscaler, nodes []*corev1.Node) {
+	for _, s := range services {
+		if was, ok := prior.Services[s.Namespace+"/"+s.Name]; ok && was != serviceFingerprint(s) {
+			k.emitResource("Service", s.Namespace, s.Name, "service_change", "info", fmt.Sprintf("%s service changed", s.Name), time.Now().UTC(),
+				missed(map[string]any{"changed": []string{"service"}, "from_hash": was, "to_hash": serviceFingerprint(s)}))
+		}
+	}
+	for _, c := range configMaps {
+		if was, ok := prior.ConfigMaps[c.Namespace+"/"+c.Name]; ok && was != configMapFingerprint(c) {
+			k.emitResource("ConfigMap", c.Namespace, c.Name, "config_change", "info", fmt.Sprintf("%s changed", c.Name), time.Now().UTC(),
+				missed(map[string]any{"changed": []string{"configuration"}, "from_hash": was, "to_hash": configMapFingerprint(c)}))
+		}
+	}
+	for _, h := range hpas {
+		if was, ok := prior.HPAs[h.Namespace+"/"+h.Name]; ok && was.Hash != hpaFingerprint(h) && h.Spec.ScaleTargetRef.Kind == "Deployment" {
+			k.Emit(event.Event{Source: "k8s", Namespace: h.Namespace, EntityKind: "Deployment", EntityName: h.Spec.ScaleTargetRef.Name,
+				Type: "hpa_change", Severity: "info", Title: fmt.Sprintf("%s autoscaler changed", h.Spec.ScaleTargetRef.Name),
+				Payload: mustJSON(missed(map[string]any{"changed": []string{"autoscaler"}, "autoscaler": h.Name, "from_hash": was.Hash, "to_hash": hpaFingerprint(h)}))})
+		}
+	}
+	for _, n := range nodes {
+		was, ok := prior.Nodes[n.Name]
+		if !ok {
+			continue
+		}
+		ready, reason, message := nodeCondition(n, corev1.NodeReady)
+		switch {
+		case was && ready != corev1.ConditionTrue:
+			k.emitResource("Node", "", n.Name, "node_not_ready", "critical", fmt.Sprintf("%s is NotReady", n.Name), time.Now().UTC(),
+				missed(map[string]any{"reason": reason, "message": message, "status": string(ready)}))
+		case !was && ready == corev1.ConditionTrue:
+			k.emitResource("Node", "", n.Name, "became_ready", "info", fmt.Sprintf("%s is Ready", n.Name), time.Now().UTC(), missed(map[string]any{}))
+		}
+	}
 }
 
 // catchUp reports what changed between the last checkpoint and now. Without it
@@ -297,15 +367,27 @@ func (k *K8sCollector) keepCheckpoint(ctx context.Context, factory informers.Sha
 		ps, _ := factory.Core().V1().Pods().Lister().List(labels.Everything())
 		return ds, ps
 	}
+	relatedObjects := func() ([]*corev1.Service, []*corev1.ConfigMap, []*autoscalingv2.HorizontalPodAutoscaler, []*corev1.Node) {
+		svcs, _ := factory.Core().V1().Services().Lister().List(labels.Everything())
+		cms, _ := factory.Core().V1().ConfigMaps().Lister().List(labels.Everything())
+		hpas, _ := factory.Autoscaling().V2().HorizontalPodAutoscalers().Lister().List(labels.Everything())
+		nodes, _ := factory.Core().V1().Nodes().Lister().List(labels.Everything())
+		return svcs, cms, hpas, nodes
+	}
 	if prior, err := k.checkpoints.Load(ctx); err != nil {
 		slog.Warn("could not read the collector checkpoint; changes made while Chronicle was down will be missed", "err", err)
 	} else if prior != nil {
 		ds, ps := list()
 		k.catchUp(prior, ds, ps)
+		svcs, cms, hpas, nodes := relatedObjects()
+		k.catchUpRelated(prior, svcs, cms, hpas, nodes)
 	}
 	save := func() {
 		ds, ps := list()
-		if err := k.checkpoints.Save(ctx, snapshotOf(ds, ps, time.Now().UTC())); err != nil && ctx.Err() == nil {
+		cp := snapshotOf(ds, ps, time.Now().UTC())
+		svcs, cms, hpas, nodes := relatedObjects()
+		cp.related(svcs, cms, hpas, nodes, ps)
+		if err := k.checkpoints.Save(ctx, cp); err != nil && ctx.Err() == nil {
 			slog.Warn("could not save the collector checkpoint", "err", err)
 		}
 	}

@@ -128,6 +128,8 @@ func (k *K8sCollector) Run(ctx context.Context) error {
 		},
 	})
 
+	k.watchRelated(factory)
+
 	factory.Start(ctx.Done())
 	// cache.WaitForCacheSync with no informers to wait on returns true
 	// immediately, so informersReady flipped before the initial list had been

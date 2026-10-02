@@ -32,4 +32,10 @@ vendor/
 
 # User requested exclusions
 docs/
-collector
+/collector
+
+# Intermediate benchmark runs; the kept results are before_*, after_*, holdout_*,
+# independent_first_run.json and sensitivity.json
+internal/rca/testdata/ambig_*.json
+internal/rca/testdata/end_*.json
+internal/rca/testdata/start_*

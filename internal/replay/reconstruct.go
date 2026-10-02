@@ -213,9 +213,17 @@ func applyEvent(s *Snapshot, e event.Event) {
 		obj.StatusMessage = e.Title
 		s.Objects[key] = obj
 
-	case "config_change", "terraform_run":
+	case "config_change", "terraform_run", "service_change", "hpa_change":
 		if exists {
 			obj.Phase = "Changed"
+			s.Objects[key] = obj
+		}
+
+	case "node_not_ready":
+		if exists {
+			obj.Phase = "NotReady"
+			obj.StatusReason = e.Type
+			obj.StatusMessage = e.Title
 			s.Objects[key] = obj
 		}
 

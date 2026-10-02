@@ -265,12 +265,13 @@
     }).join('');
     return `<div class="sec-body">
       ${r.provisional ? `<div class="provisional">Provisional — this symptom is too recent for its inputs to have settled: events explaining it may still be arriving, and a resource created since the last graph sync has no dependencies yet. Re-run in a minute to confirm.</div>` : ''}
-      <div class="conf${confidence < 0.5 ? ' low' : ''}">
+      <div class="conf${confidence < 0.5 || r.verdict === 'no_root_cause' ? ' low' : ''}">
         <span class="conf-n">${pct}%</span>
         <span class="conf-t"><i style="width:${pct}%"></i></span>
-        <span class="conf-l">${confidence < 0.5 ? 'INCONCLUSIVE' : 'CONFIDENCE'}</span>
+        <span class="conf-l">${r.verdict === 'no_root_cause' ? 'NO ROOT CAUSE OBSERVED' : (r.verdict === 'ambiguous' ? 'AMBIGUOUS' : (confidence < 0.5 ? 'INCONCLUSIVE' : 'CONFIDENCE'))}</span>
         <span class="conf-split" title="Evidence strength of the leading candidate, multiplied by how clearly it beats the runner-up">EVIDENCE ${Math.round((r.strength || 0) * 100)}%${r.contested === false ? ' · UNCONTESTED' : ` × SEPARATION ${Math.round((r.separation || 0) * 100)}%`}</span>
       </div>
+      ${r.verdict === 'no_root_cause' ? `<p class="note">Nothing Chronicle recorded explains this failure. The rows below show where it first surfaces, not what caused it.</p>` : ''}
       <table class="cand"><thead><tr><th>#</th><th>Score</th><th>Cause · target</th><th class="num">Gap</th><th class="num">Hops</th><th class="num" title="Services affected if this candidate fails">Svc</th></tr></thead><tbody>${rows}</tbody></table>
       ${derivation(r.candidates[focus] || r.candidates[0])}
       ${r.narrative ? `<div class="narr"><span class="narr-l">Narrative</span><p class="note">${esc(r.narrative)}</p></div>` : ''}

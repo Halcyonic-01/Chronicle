@@ -1,0 +1,1891 @@
+{
+  "parameters": {
+    "AmbiguityRatio (separation)": {
+      "driver": "ambiguity recognised",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "HIGHLY SENSITIVE",
+      "ranking": "HIGHLY SENSITIVE",
+      "values": [
+        "0.6",
+        "0.7",
+        "0.8",
+        "0.9",
+        "0.95"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 8,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 7,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 2,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 0,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "BlastMax": {
+      "driver": "heal coverage",
+      "healing": "HIGHLY SENSITIVE",
+      "non_monotonic": false,
+      "overall": "HIGHLY SENSITIVE",
+      "ranking": "STABLE",
+      "values": [
+        "0",
+        "0.25",
+        "0.5"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 22,
+          "WrongHeal": 0,
+          "Unsafe": 0,
+          "Ambiguous": 5,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7079158873524205
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 31,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7816408501403102
+        }
+      ]
+    },
+    "BlastSaturation": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "5",
+        "10",
+        "20"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 29,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7684994707524857
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7325010652745753
+        }
+      ]
+    },
+    "DecayDivisor": {
+      "driver": "heal coverage",
+      "healing": "HIGHLY SENSITIVE",
+      "non_monotonic": false,
+      "overall": "HIGHLY SENSITIVE",
+      "ranking": "STABLE",
+      "values": [
+        "1.5",
+        "2",
+        "3",
+        "4",
+        "6"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7796153755291325
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7692421545625169
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 27,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7266391917469943
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 23,
+          "WrongHeal": 0,
+          "Unsafe": 0,
+          "Ambiguous": 4,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.6874206665887346
+        }
+      ]
+    },
+    "DefaultWeight": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.1",
+        "0.2",
+        "0.3"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7495063108922013
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7463060177628983
+        }
+      ]
+    },
+    "DistanceSlope": {
+      "driver": "heal coverage",
+      "healing": "SENSITIVE",
+      "non_monotonic": false,
+      "overall": "SENSITIVE",
+      "ranking": "SENSITIVE",
+      "values": [
+        "0.2",
+        "0.3",
+        "0.4",
+        "0.6",
+        "0.8"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 31,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 5,
+          "ConfCorrect": 0.7541392090127529
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 29,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7501404765485278
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7486585489456321
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 4,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.746492023070908
+        }
+      ]
+    },
+    "EpisodeGap": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "10m0s",
+        "30m0s",
+        "1h0m0s"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "FlapWindow": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "30s",
+        "1m0s",
+        "2m0s"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "InconclusiveBelow (confidence)": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.3",
+        "0.4",
+        "0.5",
+        "0.6",
+        "0.7"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "LogEpisodeGap": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "45s",
+        "1m30s",
+        "3m0s",
+        "5m0s"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "Lookback scale (all windows)": {
+      "driver": "heal coverage",
+      "healing": "HIGHLY SENSITIVE",
+      "non_monotonic": false,
+      "overall": "HIGHLY SENSITIVE",
+      "ranking": "STABLE",
+      "values": [
+        "0.5",
+        "0.75",
+        "1",
+        "1.5",
+        "2"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 23,
+          "WrongHeal": 0,
+          "Unsafe": 0,
+          "Ambiguous": 4,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.6874206665887346
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 27,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7266391917469943
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7692421545625169
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 27,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 3,
+          "ConfCorrect": 0.7787289313616041
+        }
+      ]
+    },
+    "MaxEpisode": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "1h0m0s",
+        "2h0m0s",
+        "4h0m0s"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "Propagation-horizon scale": {
+      "driver": "heal coverage",
+      "healing": "SENSITIVE",
+      "non_monotonic": false,
+      "overall": "SENSITIVE",
+      "ranking": "STABLE",
+      "values": [
+        "0.5",
+        "1",
+        "2",
+        "4"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 26,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7374502591887357
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 29,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7535872888999621
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 29,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7540204074322339
+        }
+      ]
+    },
+    "PropagationFactor": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.1",
+        "0.25",
+        "0.5",
+        "1"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.748395786563691
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7480190239648096
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 29,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7467126653305435
+        }
+      ]
+    },
+    "RemediationFactor": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.15",
+        "0.35",
+        "0.6",
+        "1"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "RestartGap": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "3m0s",
+        "6m0s",
+        "12m0s"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "SettleAfterChange": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "5s",
+        "20s",
+        "1m0s",
+        "2m0s"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "heal floor: bump-memory-on-oom": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.7",
+        "0.75",
+        "0.8",
+        "0.85",
+        "0.9",
+        "0.95"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 30,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 29,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 25,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 25,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "heal floor: restart-deadlocked-pod": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.6",
+        "0.7",
+        "0.8",
+        "0.9",
+        "0.95"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "heal floor: restore-scaled-down-workload": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.5",
+        "0.55",
+        "0.65",
+        "0.75",
+        "0.85"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 32,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 31,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 26,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 19,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "heal floor: rollback-bad-deploy": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.7",
+        "0.75",
+        "0.8",
+        "0.85",
+        "0.9",
+        "0.95"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 30,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 27,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "weight[became_unready]": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.3",
+        "0.5",
+        "0.7"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7326663975759444
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7628108904630401
+        }
+      ]
+    },
+    "weight[config_change]": {
+      "driver": "over-ambiguous",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "SENSITIVE",
+      "ranking": "SENSITIVE",
+      "values": [
+        "0.55",
+        "0.75",
+        "0.95"
+      ],
+      "vectors": [
+        {
+          "Top1": 116,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 3,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 3,
+          "OverAmbiguous": 7,
+          "ConfCorrect": 0.71405140349345
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 3,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7201222948136312
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "weight[container_restart]": {
+      "driver": "heal coverage",
+      "healing": "SENSITIVE",
+      "non_monotonic": false,
+      "overall": "SENSITIVE",
+      "ranking": "STABLE",
+      "values": [
+        "0.5",
+        "0.7",
+        "0.9"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 30,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7439370096684
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 29,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 5,
+          "ConfCorrect": 0.7674957406519484
+        }
+      ]
+    },
+    "weight[deploy]": {
+      "driver": "heal coverage",
+      "healing": "HIGHLY SENSITIVE",
+      "non_monotonic": false,
+      "overall": "HIGHLY SENSITIVE",
+      "ranking": "SENSITIVE",
+      "values": [
+        "0.6",
+        "0.8",
+        "1"
+      ],
+      "vectors": [
+        {
+          "Top1": 114,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 0,
+          "Coverage": 12,
+          "WrongHeal": 0,
+          "Unsafe": 0,
+          "Ambiguous": 3,
+          "OverAmbiguous": 7,
+          "ConfCorrect": 0.7066822639788033
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 12,
+          "WrongHeal": 0,
+          "Unsafe": 0,
+          "Ambiguous": 5,
+          "OverAmbiguous": 7,
+          "ConfCorrect": 0.7166779046648232
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "weight[hpa_change]": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.5",
+        "0.7",
+        "0.9"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7475187313556538
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7539929490209218
+        }
+      ]
+    },
+    "weight[node_not_ready]": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.45",
+        "0.65",
+        "0.85"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7244363880288034
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7354764895795509
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "weight[oom_kill]": {
+      "driver": "heal coverage",
+      "healing": "SENSITIVE",
+      "non_monotonic": false,
+      "overall": "SENSITIVE",
+      "ranking": "STABLE",
+      "values": [
+        "0.45",
+        "0.65",
+        "0.85"
+      ],
+      "vectors": [
+        {
+          "Top1": 116,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 25,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7300204526965611
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 25,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7362109502487612
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "weight[resource_change]": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.5",
+        "0.7",
+        "0.9"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.730425177347042
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.733596011037727
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    },
+    "weight[scale]": {
+      "driver": "heal coverage",
+      "healing": "HIGHLY SENSITIVE",
+      "non_monotonic": false,
+      "overall": "HIGHLY SENSITIVE",
+      "ranking": "STABLE",
+      "values": [
+        "0.55",
+        "0.75",
+        "0.95"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 19,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.723283167265488
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 32,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7773964067730611
+        }
+      ]
+    },
+    "weight[service_change]": {
+      "driver": "",
+      "healing": "STABLE",
+      "non_monotonic": false,
+      "overall": "STABLE",
+      "ranking": "STABLE",
+      "values": [
+        "0.5",
+        "0.7",
+        "0.9"
+      ],
+      "vectors": [
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.726894451166922
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7376693098463541
+        },
+        {
+          "Top1": 117,
+          "Top3": 118,
+          "Declared": 27,
+          "FalseConfident": 1,
+          "Coverage": 28,
+          "WrongHeal": 0,
+          "Unsafe": 1,
+          "Ambiguous": 5,
+          "OverAmbiguous": 4,
+          "ConfCorrect": 0.7484441685257862
+        }
+      ]
+    }
+  },
+  "shipped": {
+    "Top1": 117,
+    "Top3": 118,
+    "Declared": 27,
+    "FalseConfident": 1,
+    "Coverage": 28,
+    "WrongHeal": 0,
+    "Unsafe": 1,
+    "Ambiguous": 5,
+    "OverAmbiguous": 4,
+    "ConfCorrect": 0.7484441685257862
+  }
+}

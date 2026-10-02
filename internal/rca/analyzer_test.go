@@ -2047,3 +2047,226 @@ func TestARepairIsNotARivalForConfidence(t *testing.T) {
 		t.Fatal("a real rival should still lower separation")
 	}
 }
+
+func chainCand(id, typ, name, chain string, at time.Time, score float64) Candidate {
+	return Candidate{
+		Event: event.Event{ID: id, Type: typ, EntityKind: "Deployment", EntityName: name, Namespace: "default", OccurredAt: at, IngestedAt: at},
+		Score: score, Chain: chain,
+	}
+}
+
+// A restart is the effect of the deploy before it; the answer names the deploy.
+func TestTheRootOfTheLeadingChainIsReportedFirst(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	deploy := chainCand("deploy", "deploy", "api", "deploy", t0, 0.4)
+	restart := chainCand("restart", "container_restart", "api-2", "deploy", t0.Add(15*time.Second), 0.7)
+	got := promoteChainRoot([]Candidate{restart, deploy})
+	if got[0].Event.ID != "deploy" || got[1].Event.ID != "restart" {
+		t.Fatalf("the root should lead: %v %v", got[0].Event.ID, got[1].Event.ID)
+	}
+}
+
+// Two changes on different components do not explain each other just because
+// one is upstream of the other.
+func TestAChangeIsNotDemotedBehindAnUnrelatedEarlierChange(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	benign := chainCand("benign", "config_change", "worker", "benign", t0, 0.3)
+	benign.Chain = "benign"
+	deploy := chainCand("deploy", "deploy", "api", "benign", t0.Add(20*time.Second), 0.8)
+	if got := promoteChainRoot([]Candidate{deploy, benign}); got[0].Event.ID != "deploy" {
+		t.Fatalf("a deploy leading its own evidence must stay first, got %s", got[0].Event.ID)
+	}
+}
+
+// An autoscaler limit and the scale it caused are one target and one story.
+func TestAChangeAndItsOwnScaleAreOneStory(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	hpa := chainCand("hpa", "hpa_change", "worker", "hpa", t0, 0.3)
+	scale := chainCand("scale", "scale", "worker", "hpa", t0.Add(3*time.Second), 0.6)
+	if got := promoteChainRoot([]Candidate{scale, hpa}); got[0].Event.ID != "hpa" {
+		t.Fatalf("the autoscaler change is the root of its scale, got %s", got[0].Event.ID)
+	}
+}
+
+// The representative of a repeating signal is its newest copy; which signal came
+// first is decided by when each began.
+func TestTheRootIsChosenByWhenASignalBeganNotByItsNewestCopy(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	restart := chainCand("restart", "container_restart", "api-1", "restart", t0.Add(85*time.Second), 0.7)
+	restart.FirstAt = t0
+	unready := chainCand("unready", "became_unready", "api-1", "restart", t0.Add(time.Second), 0.6)
+	if got := promoteChainRoot([]Candidate{restart, unready}); got[0].Event.ID != "restart" {
+		t.Fatalf("the restart began first, got %s", got[0].Event.ID)
+	}
+}
+
+func TestMeasurementsAloneAreNeverARootCause(t *testing.T) {
+	only := func(types ...string) *Result {
+		r := &Result{Confidence: 0.9}
+		for _, ty := range types {
+			r.Candidates = append(r.Candidates, Candidate{Event: event.Event{Type: ty}})
+		}
+		return r
+	}
+	for _, c := range []struct {
+		name string
+		r    *Result
+		want string
+	}{
+		{"nothing", only(), VerdictNoRootCause},
+		{"logs and alerts", only("log_error", "error_spike", "latency_spike"), VerdictNoRootCause},
+		{"a change among them", only("log_error", "deploy"), VerdictRootCause},
+		{"a pod failure fact", only("became_unready"), VerdictRootCause},
+	} {
+		if got := verdictOf(c.r); got != c.want {
+			t.Errorf("%s: verdict %q, want %q", c.name, got, c.want)
+		}
+	}
+	weak := only("deploy")
+	weak.Confidence = 0.3
+	if verdictOf(weak) != VerdictInconclusive {
+		t.Error("a real candidate with low confidence is inconclusive, not absent")
+	}
+}
+
+func TestANoRootCauseNarrativeSaysSoAndStillPointsAtTheOrigin(t *testing.T) {
+	r := &Result{Verdict: VerdictNoRootCause, Symptom: event.Event{Title: "high_error_rate on frontend"}, Scanned: 40,
+		Candidates: []Candidate{{Event: event.Event{Type: "log_error", EntityName: "api-1"}}}}
+	got := FallbackNarrative(r)
+	if !strings.Contains(got, "No root cause was observed") || !strings.Contains(got, "api-1") {
+		t.Fatalf("narrative should refuse a cause but name where it surfaced: %s", got)
+	}
+}
+
+// Only a change of the same kind overwrites an earlier one; the scale an
+// autoscaler change causes must not erase it.
+func TestAScaleDoesNotReplaceTheLimitChangeThatCausedIt(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration) time.Time { return now.Add(-ago) }
+	hpa := event.Event{ID: "hpa", IngestedAt: at(90 * time.Second), OccurredAt: at(90 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "hpa_change", Payload: []byte(`{"from_hash":"a","to_hash":"b"}`)}
+	scale := event.Event{ID: "scale", IngestedAt: at(87 * time.Second), OccurredAt: at(87 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "worker", Type: "scale", Payload: []byte(`{"old_replicas":3,"new_replicas":1}`)}
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Service", EntityName: "api", Type: "latency_spike"}
+
+	got, err := (&Analyzer{Events: fakeEvents{hpa, scale}, Graph: fakeGraph{"default/Service/api": 0, "default/Deployment/worker": 2}}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range got.Candidates {
+		found = found || c.Event.ID == "hpa"
+	}
+	if !found {
+		t.Fatalf("the autoscaler change was dropped as replaced: %+v", got.Candidates)
+	}
+}
+
+// Two interventions that both explain one crash are rivals. Joining them through
+// the shared effect made every such incident look certain.
+func TestTwoCausesOfOneCrashAreRivalsAndConfidenceShowsIt(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration) time.Time { return now.Add(-ago) }
+	config := event.Event{ID: "config", IngestedAt: at(64 * time.Second), OccurredAt: at(64 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "config_change", Payload: []byte(`{"from_hash":"a","to_hash":"b"}`)}
+	deploy := event.Event{ID: "deploy", IngestedAt: at(60 * time.Second), OccurredAt: at(60 * time.Second), Namespace: "default", EntityKind: "Deployment", EntityName: "api", Type: "deploy", Payload: []byte(`{"old_image":"v1","new_image":"v2"}`)}
+	restart := event.Event{ID: "restart", IngestedAt: at(40 * time.Second), OccurredAt: at(40 * time.Second), Namespace: "default", EntityKind: "Pod", EntityName: "api-2", Type: "container_restart", Severity: "warning", Payload: []byte(`{"owner":"api"}`)}
+	symptom := event.Event{ID: "s", IngestedAt: now, OccurredAt: now, Namespace: "default", EntityKind: "Pod", EntityName: "api-2", Type: "became_unready", Severity: "warning"}
+	node := func(k, n string) graph.Node { return graph.Node{Kind: k, Name: n, Namespace: "default"} }
+	source := &countingGraph{edges: []graph.Edge{{From: node("Deployment", "api"), To: node("Pod", "api-2"), Kind: "owns", Weight: 1, Source: "static"}}}
+
+	got, err := (&Analyzer{Events: fakeEvents{config, deploy, restart}, Graph: source, MaxHops: 3}).Analyze(context.Background(), symptom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chains := map[string]bool{}
+	for _, c := range got.Candidates {
+		if changeTypes[c.Event.Type] {
+			chains[c.Chain] = true
+		}
+	}
+	if len(chains) != 2 {
+		t.Fatalf("the two changes should be separate explanations, got chains %v", chains)
+	}
+	if !got.Contested || got.Confidence > 0.7 {
+		t.Fatalf("two near-equal causes must lower confidence: contested=%v confidence=%.2f", got.Contested, got.Confidence)
+	}
+}
+
+// One cause with its effects stays one story, however many effects it has.
+func TestOneCauseAndItsEffectsStayOneChain(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cands := []Candidate{
+		chainCand("restart", "container_restart", "api-2", "", t0.Add(15*time.Second), 0.7),
+		chainCand("deploy", "deploy", "api", "", t0, 0.4),
+		chainCand("unready", "became_unready", "api-2", "", t0.Add(16*time.Second), 0.3),
+	}
+	reaches := func(from, to string) bool { return true }
+	linkChains(cands, reaches)
+	if cands[0].Chain != cands[1].Chain || cands[1].Chain != cands[2].Chain {
+		t.Fatalf("a cause and its effects are one chain: %q %q %q", cands[0].Chain, cands[1].Chain, cands[2].Chain)
+	}
+}
+
+func rootCand(id, typ, name string, score float64, at time.Time) Candidate {
+	return Candidate{Event: event.Event{ID: id, Type: typ, EntityKind: "Deployment", EntityName: name, OccurredAt: at, IngestedAt: at}, Score: score, Chain: id}
+}
+
+func TestCloseRivalRootsAreAlternativesAndTheVerdictIsAmbiguous(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	lead, rival := rootCand("a", "deploy", "catalog", 0.50, t0), rootCand("b", "config_change", "catalog", 0.45, t0)
+	got := defaultConfig.alternatives([]Candidate{lead, rival})
+	if len(got) != 1 || got[0].Event.ID != "b" {
+		t.Fatalf("a rival at 90%% of the leader is an alternative: %+v", got)
+	}
+	r := &Result{Candidates: []Candidate{lead, rival}, Alternatives: got, Confidence: 0.9, Symptom: event.Event{Title: "errors on gateway"}}
+	if defaultConfig.verdict(r) != VerdictAmbiguous {
+		t.Fatalf("verdict %q", defaultConfig.verdict(r))
+	}
+}
+
+func TestAWeakOrNonRootRivalIsNotAnAlternative(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	lead := rootCand("a", "deploy", "catalog", 0.50, t0)
+	for name, rival := range map[string]Candidate{
+		"weaker":      rootCand("b", "config_change", "worker", 0.30, t0),
+		"measurement": rootCand("c", "log_error", "gateway", 0.49, t0),
+		"recovery":    rootCand("d", "became_ready", "gateway", 0.49, t0),
+		"repair": func() Candidate {
+			c := rootCand("e", "deploy", "catalog", 0.49, t0)
+			c.Reverts = "a"
+			return c
+		}(),
+		"same chain": func() Candidate {
+			c := rootCand("f", "container_restart", "catalog-1", 0.49, t0)
+			c.Chain = "a"
+			return c
+		}(),
+	} {
+		if got := defaultConfig.alternatives([]Candidate{lead, rival}); len(got) != 0 {
+			t.Errorf("%s should not be an alternative: %+v", name, got)
+		}
+	}
+}
+
+func TestTheAmbiguousNarrativeNamesEveryCauseAndRefusesToChoose(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	lead, rival := rootCand("a", "deploy", "catalog", 0.50, t0), rootCand("b", "config_change", "entitlement", 0.46, t0)
+	r := &Result{Candidates: []Candidate{lead, rival}, Alternatives: []Candidate{rival}, Verdict: VerdictAmbiguous, Confidence: 0.55, Symptom: event.Event{Title: "errors on gateway"}, Scanned: 12}
+	got := FallbackNarrative(r)
+	for _, want := range []string{"cannot separate", "catalog", "entitlement", "unresolved"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("narrative should mention %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "most likely cause") {
+		t.Errorf("an ambiguous answer must not assert a most likely cause: %s", got)
+	}
+}
+
+func TestAWeakerRivalIsMentionedButDoesNotMakeTheAnswerAmbiguous(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	lead, rival := rootCand("a", "deploy", "catalog", 0.60, t0), rootCand("b", "config_change", "worker", 0.20, t0)
+	r := &Result{Candidates: []Candidate{lead, rival}, Verdict: VerdictRootCause, Confidence: 0.7, Symptom: event.Event{Title: "x"}}
+	got := FallbackNarrative(r)
+	if !strings.Contains(got, "next most plausible cause is config_change on worker") || strings.Contains(got, "cannot separate") {
+		t.Fatalf("the rival is named as a fallback only: %s", got)
+	}
+}

@@ -109,6 +109,9 @@ type Candidate struct {
 	BlastRadiusScore float64     `json:"blast_radius_score"`
 	// Gap is the time distance the score used, in seconds.
 	Gap float64 `json:"gap_seconds"`
+	// FirstAt is when this signal first appeared, which can be long before the
+	// copy that represents it.
+	FirstAt time.Time `json:"first_seen"`
 	// What this candidate takes down, named. The counts alone could not be
 	// rendered as a list, so the console fell back to the symptom's own blast
 	// radius, which for an edge service is empty.
@@ -126,7 +129,12 @@ type Result struct {
 	Confidence  float64     `json:"confidence"`
 	Strength    float64     `json:"strength"`
 	Provisional bool        `json:"provisional"`
-	Separation  float64     `json:"separation"`
+	// Verdict says whether a root cause was found: see the Verdict constants.
+	Verdict string `json:"verdict"`
+	// Alternatives are rival root-class causes close enough to the leader that
+	// the recorded evidence cannot separate them.
+	Alternatives []Candidate `json:"alternatives,omitempty"`
+	Separation   float64     `json:"separation"`
 	// Contested is false when no genuine rival exists, so Separation is 1 by
 	// default rather than by margin.
 	Contested   bool         `json:"contested"`
@@ -145,6 +153,8 @@ type Analyzer struct {
 	// event at the far edge of the window scores e^-divisor. Zero uses the
 	// default.
 	DecayDivisor float64
+	// Config overrides the ranking's tunables; nil uses DefaultConfig.
+	Config *Config
 	// GraphInterval is how often the dependency graph is resynced. A symptom
 	// about a resource created since the last sync has no edges yet, so its
 	// owner is unreachable and the analysis is incomplete rather than wrong.
@@ -162,7 +172,8 @@ var lookback = map[string]time.Duration{
 	"oom_kill": 60 * time.Minute, "crash_loop": 20 * time.Minute, "became_unready": 5 * time.Minute,
 }
 var typeWeight = map[string]float64{
-	"deploy": 1.00, "config_change": 0.95, "resource_change": 0.90, "oom_kill": 0.85,
+	"deploy": 1.00, "config_change": 0.95, "resource_change": 0.90, "service_change": 0.90,
+	"node_not_ready": 0.85, "oom_kill": 0.85, "hpa_change": 0.70,
 	"scale": 0.75, "container_restart": 0.70, "node_pressure": 0.65,
 	"became_unready": 0.50, "error_spike": 0.30, "latency_spike": 0.25, "log_error": 0.15,
 }
@@ -186,11 +197,11 @@ const restartGap = 6 * time.Minute
 // logEpisodeGap: log lines stream while a failure lasts, so a quiet spell means it stopped.
 const logEpisodeGap = 90 * time.Second
 
-func episodeGapFor(e event.Event) time.Duration {
+func (cfg *Config) episodeGapFor(e event.Event) time.Duration {
 	if e.Type == "log_error" {
-		return logEpisodeGap
+		return cfg.LogEpisodeGap
 	}
-	return episodeGap
+	return cfg.EpisodeGap
 }
 
 // maxEpisode bounds how far back an episode is followed.
@@ -258,7 +269,9 @@ var propagationHorizon = map[string]time.Duration{
 	// A rollout lands progressively: pods cycle under maxSurge, caches warm,
 	// connections drain, and the error rate only moves once enough of the fleet
 	// is carrying the new code.
-	"deploy": 15 * time.Minute, "config_change": 15 * time.Minute,
+	"deploy": 15 * time.Minute, "config_change": 15 * time.Minute, "hpa_change": 15 * time.Minute,
+	// A routing change bites on the next request; a lost node takes its pods at once.
+	"service_change": 2 * time.Minute, "node_not_ready": 2 * time.Minute,
 
 	// Resource pressure accumulates instead of breaking anything at once.
 	// Lowering a memory limit fails nothing until the workload next grows into
@@ -278,11 +291,13 @@ const defaultPropagationHorizon = 2 * time.Minute
 // propagationHorizonFor answers how long this cause may take to reach its
 // effect. It is asked of the cause, never the effect: a deploy is slow to
 // surface whatever it eventually breaks.
-func propagationHorizonFor(cause event.Event) time.Duration {
-	if h, ok := propagationHorizon[cause.Type]; ok {
+func propagationHorizonFor(cause event.Event) time.Duration { return defaultConfig.horizonFor(cause) }
+
+func (cfg *Config) horizonFor(cause event.Event) time.Duration {
+	if h, ok := cfg.PropagationHorizon[cause.Type]; ok {
 		return h
 	}
-	return defaultPropagationHorizon
+	return cfg.DefaultHorizon
 }
 
 // causalTime is when an event actually happened. Ingestion time is how the
@@ -303,10 +318,8 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	if a.Events == nil || a.Graph == nil {
 		return nil, fmt.Errorf("rca analyzer requires an event source and graph")
 	}
-	back := lookback[symptom.Type]
-	if back == 0 {
-		back = 15 * time.Minute
-	}
+	cfg := a.config()
+	back := cfg.lookbackFor(symptom.Type)
 	symptomAt := causalTime(symptom)
 	symptomHypothesis := hypothesisKey(symptom)
 	hops := a.MaxHops
@@ -319,7 +332,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	// e^-6, near zero, so the extra reach found nothing it could rank.
 	divisor := a.DecayDivisor
 	if divisor <= 0 {
-		divisor = defaultDecayDivisor
+		divisor = cfg.DecayDivisor
 	}
 	decay := back.Seconds() / divisor
 
@@ -334,7 +347,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		graphInterval = defaultGraphInterval
 	}
 	// An edge recorded just after the symptom was already true at it (sync lag).
-	edgesFrom := symptom.IngestedAt.Add(-maxEpisode - back - allowedLateness)
+	edgesFrom := symptom.IngestedAt.Add(-cfg.MaxEpisode - back - allowedLateness)
 	edgesTo := symptom.IngestedAt.Add(graphInterval + allowedLateness)
 	if windowed, ok := a.Graph.(WindowedEdgeSource); ok {
 		if loaded, edgeErr := windowed.EdgesBetween(ctx, edgesFrom, edgesTo); edgeErr == nil {
@@ -380,10 +393,10 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	byTime(raw)
 
 	// Measure causes from the onset, not the newest copy, or confidence falls as an outage ages.
-	onset := episodeOnset(raw, hypothesis, symptom, related)
-	floor := symptom.IngestedAt.Add(-maxEpisode - back - allowedLateness)
+	onset := cfg.episodeOnset(raw, hypothesis, symptom, related)
+	floor := symptom.IngestedAt.Add(-cfg.MaxEpisode - back - allowedLateness)
 	reach := back
-	if gap := episodeGapFor(symptom); gap > reach {
+	if gap := cfg.episodeGapFor(symptom); gap > reach {
 		reach = gap
 	}
 	for i := 0; i < maxEpisodeLoads; i++ {
@@ -401,7 +414,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		raw = mergeEvents(raw, earlier)
 		byTime(raw)
 		loadedFrom = need
-		onset = episodeOnset(raw, hypothesis, symptom, related)
+		onset = cfg.episodeOnset(raw, hypothesis, symptom, related)
 	}
 	windowStart := onset.Add(-back)
 	inWindow := make([]event.Event, 0, len(raw))
@@ -433,7 +446,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		result.Evidence = evidenceEdges(edges, upstream, key(symptom))
 	}
 	reverts := revertingChanges(raw, impactOf)
-	replacedAt := lastChangeBefore(raw, onset.Add(-settleAfterChange))
+	replacedAt := lastChangeBefore(raw, onset.Add(-cfg.SettleAfterChange))
 	candidates := make([]Candidate, 0, len(raw))
 	for _, e := range raw {
 		if e.ID == symptom.ID {
@@ -453,7 +466,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 			continue
 		}
 		// A change replaced before this episode began is history.
-		if changeTypes[e.Type] && causalTime(e).Before(replacedAt[key(e)]) {
+		if changeTypes[e.Type] && causalTime(e).Before(replacedAt[key(e)+"|"+e.Type]) {
 			continue
 		}
 		// A controller's pod is its owner's doing; the owner's change is the cause to name.
@@ -475,7 +488,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		impact := blastOf(key(e))
 		c.AffectedServices, c.AffectedNodes, c.BlastRadiusScore = impact.AffectedServices, impact.AffectedNodes, impact.Score
 		c.AffectedServiceKeys = impact.Services
-		score(&c, symptom, onset, decay)
+		cfg.score(&c, symptom, onset, decay)
 		candidates = append(candidates, c)
 	}
 	// Collapse repeats first: the pairwise passes below are quadratic.
@@ -497,10 +510,10 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	// Demote propagation before ranking, so the order the user sees is the order
 	// after every candidate has been judged against the others.
 	// The window spans the episode so late readings still count as propagation.
-	dampPropagation(candidates, reaches, back+symptomAt.Sub(onset))
-	capRemediations(candidates)
+	cfg.dampPropagation(candidates, reaches, back+symptomAt.Sub(onset))
+	cfg.capRemediations(candidates)
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
-	linkChains(candidates, reaches)
+	cfg.linkChains(candidates, reaches)
 	result.Candidates = topDistinct(candidates, 5)
 
 	// An answer is provisional while the inputs behind it are still settling:
@@ -512,8 +525,14 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		settleFor = graphInterval
 	}
 	result.Provisional = time.Since(symptomAt) < settleFor
-	result.Confidence, result.Strength, result.Separation = confidence(result.Candidates)
+	// The answer is reordered so a chain's root is reported before its effects;
+	// strength is still judged on the best-supported candidate.
+	scored := result.Candidates
+	result.Candidates = promoteChainRoot(scored)
+	result.Confidence, result.Strength, result.Separation = cfg.confidenceOf(scored, result.Candidates)
 	result.Contested = contested(result.Candidates)
+	result.Alternatives = cfg.alternatives(result.Candidates)
+	result.Verdict = cfg.verdict(result)
 	if a.Narrator != nil {
 		result.Narrative, err = a.Narrator.Narrate(ctx, result)
 		if err != nil {
@@ -603,11 +622,8 @@ func evidenceEdges(edges []graph.Edge, reachable map[string]int, symptom string)
 // amplifying factors. Each step is recorded twice: Reasons keeps the sentence
 // form the heal audit trail stores, and Factors keeps the same step as data so
 // a caller can lay the derivation out as a table instead of parsing prose.
-func score(c *Candidate, symptom event.Event, onset time.Time, timeConstant float64) {
-	base := typeWeight[c.Event.Type]
-	if base == 0 {
-		base = 0.20
-	}
+func (cfg *Config) score(c *Candidate, symptom event.Event, onset time.Time, timeConstant float64) {
+	base := cfg.weight(c.Event.Type)
 	c.Reasons = append(c.Reasons, fmt.Sprintf("event type %q (base %.2f)", c.Event.Type, base))
 	c.applyFactor(Factor{Label: "Event type", Detail: c.Event.Type, Multiplier: base, Base: true})
 
@@ -622,19 +638,19 @@ func score(c *Candidate, symptom event.Event, onset time.Time, timeConstant floa
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%.0fs before symptom%s (×%.2f)", gap, began, tf))
 	c.applyFactor(Factor{Label: "Time distance", Detail: fmt.Sprintf("%.0fs before the symptom%s", gap, began), Multiplier: tf})
 
-	df := distanceFactor(c.Distance)
+	df := cfg.distance(c.Distance)
 	c.Reasons = append(c.Reasons, fmt.Sprintf("%d hops away (×%.2f)", c.Distance, df))
 	c.applyFactor(Factor{Label: "Graph distance", Detail: fmt.Sprintf("%d hop(s) upstream", c.Distance), Multiplier: df})
 
 	if c.AffectedServices > 0 {
 		affected := float64(c.AffectedServices)
-		impactFactor := 1 + 0.25*affected/(affected+10)
+		impactFactor := 1 + cfg.BlastMax*affected/(affected+cfg.BlastSaturation)
 		c.Reasons = append(c.Reasons, fmt.Sprintf("%d affected service(s) (×%.2f)", c.AffectedServices, impactFactor))
 		c.applyFactor(Factor{Label: "Blast radius", Detail: fmt.Sprintf("%d service(s) depend on this cause", c.AffectedServices), Multiplier: impactFactor})
 	}
 	if c.Reverts != "" {
-		c.Reasons = append(c.Reasons, fmt.Sprintf("undoes an earlier change (×%.2f)", remediationFactor))
-		c.applyFactor(Factor{Label: "Remediation", Detail: "undoes an earlier change in this window", Multiplier: remediationFactor})
+		c.Reasons = append(c.Reasons, fmt.Sprintf("undoes an earlier change (×%.2f)", cfg.RemediationFactor))
+		c.applyFactor(Factor{Label: "Remediation", Detail: "undoes an earlier change in this window", Multiplier: cfg.RemediationFactor})
 	}
 
 	// A heavy change on the failing component with a wide blast radius can
@@ -648,7 +664,9 @@ func score(c *Candidate, symptom event.Event, onset time.Time, timeConstant floa
 
 // distanceFactor is the structural penalty for how far a candidate sits from
 // the symptom in the dependency graph.
-func distanceFactor(hops int) float64 { return 1.0 / (1.0 + float64(hops)*0.4) }
+func distanceFactor(hops int) float64 { return defaultConfig.distance(hops) }
+
+func (cfg *Config) distance(hops int) float64 { return 1.0 / (1.0 + float64(hops)*cfg.DistanceSlope) }
 
 // confidence answers two independent questions and multiplies the answers:
 // how strong the leading candidate's evidence is, and how clearly it beats the
@@ -662,23 +680,33 @@ func distanceFactor(hops int) float64 { return 1.0 / (1.0 + float64(hops)*0.4) }
 // clear a 0.90 gate. Dividing the score by its own distance penalty measures
 // the evidence on its merits, and lets a distant but obvious cause be
 // identified as confidently as a close one.
-func confidence(c []Candidate) (overall, strength, separation float64) {
+func (cfg *Config) confidence(c []Candidate) (overall, strength, separation float64) {
+	return cfg.confidenceOf(c, c)
+}
+
+// confidenceOf takes strength from the best-supported candidate (scored) and
+// separation between the reported root (reported[0]) and the rival chains. They
+// differ when the leader is an effect: a crash shared by two causes is evidence
+// for both, so it cannot be what separates them.
+func (cfg *Config) confidenceOf(scored, reported []Candidate) (overall, strength, separation float64) {
+	c := scored
 	if len(c) == 0 {
 		return 0, 0, 0
 	}
 	// How good is the leading candidate, setting aside how far away it is.
-	strength = math.Min(1, c[0].Score/distanceFactor(c[0].Distance))
+	strength = math.Min(1, c[0].Score/cfg.distance(c[0].Distance))
 	// How clearly does it beat the runner-up? Only a genuinely different
 	// explanation counts as a rival: the links of one causal chain are the same
 	// answer told at different depths, and letting them compete made Chronicle
 	// least certain exactly when it had traced the chain most completely.
 	separation = 1
-	for _, rival := range c[1:] {
-		if sameChain(c[0], rival) || rival.Reverts != "" {
+	lead := reported[0]
+	for _, rival := range reported[1:] {
+		if sameChain(lead, rival) || rival.Reverts != "" {
 			continue // a repair is not a competing explanation
 		}
-		if c[0].Score > 0 {
-			margin := (c[0].Score - rival.Score) / c[0].Score
+		if lead.Score > 0 {
+			margin := (lead.Score - rival.Score) / lead.Score
 			separation = 0.5 + 0.5*math.Max(0, math.Min(1, margin))
 		}
 		break
@@ -690,18 +718,122 @@ func confidence(c []Candidate) (overall, strength, separation float64) {
 const settleAfterChange = 20 * time.Second
 
 // changeTypes alter what a workload is, as opposed to reporting how it is doing.
-var changeTypes = map[string]bool{"deploy": true, "scale": true, "resource_change": true, "config_change": true}
+var changeTypes = map[string]bool{"deploy": true, "scale": true, "resource_change": true, "config_change": true, "service_change": true, "hpa_change": true}
 
-// lastChangeBefore returns each target's newest change before the given time.
+// lastChangeBefore returns each target's newest change of each kind before the
+// given time. A scale is not replaced by a limit change, nor a limit change by
+// the scale it caused: only a change of the same kind overwrites an earlier one.
 func lastChangeBefore(events []event.Event, before time.Time) map[string]time.Time {
 	latest := make(map[string]time.Time)
 	for _, e := range events {
-		at := causalTime(e)
-		if changeTypes[e.Type] && at.Before(before) && at.After(latest[key(e)]) {
-			latest[key(e)] = at
+		at, k := causalTime(e), key(e)+"|"+e.Type
+		if changeTypes[e.Type] && at.Before(before) && at.After(latest[k]) {
+			latest[k] = at
 		}
 	}
 	return latest
+}
+
+// Verdicts say what the analysis concluded. A list of candidates is not an
+// answer: measurements alone never are.
+const (
+	VerdictRootCause    = "root_cause"
+	VerdictAmbiguous    = "ambiguous"
+	VerdictInconclusive = "inconclusive"
+	VerdictNoRootCause  = "no_root_cause"
+)
+
+// manifestations are measurements of a failure's effect. They show where the
+// failure surfaced, never what started it.
+var manifestations = map[string]bool{"log_error": true, "error_spike": true, "latency_spike": true, "memory_pressure": true}
+
+// rootClass reports whether a candidate could be a root cause: a change or a
+// failure fact, not a measurement, a symptom restated or a recovery.
+func rootClass(c Candidate) bool {
+	return !manifestations[c.Event.Type] && !observationTypes[c.Event.Type] && !isRecovery(c.Event)
+}
+
+// alternatives returns the rival root-class causes the leader cannot be told
+// apart from. A different chain, not a repair, and at least AmbiguityRatio of the
+// leader's score. The answer says so rather than naming one cause as if the
+// evidence had chosen it.
+func (cfg *Config) alternatives(c []Candidate) []Candidate {
+	if len(c) < 2 || !rootClass(c[0]) || c[0].Score <= 0 {
+		return nil
+	}
+	var out []Candidate
+	for _, r := range c[1:] {
+		if sameChain(c[0], r) || r.Reverts != "" || !rootClass(r) {
+			continue
+		}
+		if r.Score >= cfg.AmbiguityRatio*c[0].Score {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (cfg *Config) verdict(r *Result) string {
+	for _, c := range r.Candidates {
+		if !manifestations[c.Event.Type] {
+			if len(r.Alternatives) > 0 {
+				return VerdictAmbiguous
+			}
+			if r.Confidence < cfg.InconclusiveBelow {
+				return VerdictInconclusive
+			}
+			return VerdictRootCause
+		}
+	}
+	return VerdictNoRootCause
+}
+
+// promoteChainRoot puts the root of the leading chain first. A chain is one
+// explanation told at different depths, and its root explains the rest: a
+// restart is the effect of the deploy before it, not the other way round.
+//
+// It applies when the leader is an effect (a restart, an unready pod, a node
+// failure's pods), or when the root is an earlier change to the same target as
+// the leader (an autoscaler limit and the scale it caused). It does not apply
+// when the leader is itself a change: two changes on different components do
+// not explain each other just because one is upstream of the other.
+func promoteChainRoot(c []Candidate) []Candidate {
+	if len(c) < 2 || c[0].Chain == "" {
+		return c
+	}
+	began := func(x Candidate) time.Time {
+		if x.FirstAt.IsZero() {
+			return causalTime(x.Event)
+		}
+		return x.FirstAt
+	}
+	root := -1
+	for i := 1; i < len(c); i++ {
+		x := c[i]
+		if x.Chain != c[0].Chain || observationTypes[x.Event.Type] || isRecovery(x.Event) {
+			continue
+		}
+		if changeTypes[c[0].Event.Type] && key(x.Event) != key(c[0].Event) {
+			continue
+		}
+		if !began(x).Before(began(c[0])) {
+			continue // a root precedes what it explains
+		}
+		if root < 0 || began(x).Before(began(c[root])) {
+			root = i
+		}
+	}
+	if root < 0 {
+		return c
+	}
+	out := make([]Candidate, 0, len(c))
+	out = append(out, c[root])
+	for i := range c {
+		if i != root {
+			out = append(out, c[i])
+		}
+	}
+	return out
 }
 
 // hypothesisCache computes each event's hypothesis once; the key is regex-heavy.
@@ -721,8 +853,8 @@ func (h hypothesisCache) of(e event.Event) string {
 }
 
 // episodeOnset returns when the current episode began. Events are in ascending causal time.
-func episodeOnset(events []event.Event, hypothesis hypothesisCache, symptom event.Event, related func(event.Event) bool) time.Time {
-	symptomAt, want, gap := causalTime(symptom), hypothesis.of(symptom), episodeGapFor(symptom)
+func (cfg *Config) episodeOnset(events []event.Event, hypothesis hypothesisCache, symptom event.Event, related func(event.Event) bool) time.Time {
+	symptomAt, want, gap := causalTime(symptom), hypothesis.of(symptom), cfg.episodeGapFor(symptom)
 	onset := symptomAt
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
@@ -732,7 +864,7 @@ func episodeOnset(events []event.Event, hypothesis hypothesisCache, symptom even
 		}
 		// Only this signal's own recovery that held ends an episode; a crash loop is briefly "healthy".
 		// Checked first: a healthy report can share its signal's shape ("1/1" vs "0/1").
-		if key(e) == key(symptom) && endsEpisode(e, symptom) && onset.Sub(at) >= flapWindow {
+		if key(e) == key(symptom) && endsEpisode(e, symptom) && onset.Sub(at) >= cfg.FlapWindow {
 			break
 		}
 		if hypothesis.of(e) != want && !related(e) {
@@ -740,7 +872,7 @@ func episodeOnset(events []event.Event, hypothesis hypothesisCache, symptom even
 		}
 		allowed := gap
 		if hypothesis.of(e) != want {
-			allowed = restartGap // a restart, which backs off for minutes at a time
+			allowed = cfg.RestartGap // a restart, which backs off for minutes at a time
 		}
 		if onset.Sub(at) > allowed {
 			break
@@ -803,14 +935,16 @@ func collapseRepeats(candidates []Candidate, hypothesis hypothesisCache) []Candi
 	kept := make([]Candidate, 0, len(order)*2)
 	for _, k := range order {
 		g := groups[k]
+		began := causalTime(candidates[g.first].Event)
 		if g.first == g.best {
 			c := candidates[g.best]
-			c.Occurrences = g.count
+			c.Occurrences, c.FirstAt = g.count, began
 			kept = append(kept, c)
 			continue
 		}
 		first, best := candidates[g.first], candidates[g.best]
 		first.Occurrences, best.Occurrences = 1, g.count-1
+		first.FirstAt, best.FirstAt = began, began
 		kept = append(kept, first, best)
 	}
 	return kept
@@ -834,7 +968,7 @@ func contested(c []Candidate) bool {
 // reverted eight minutes earlier, so Chronicle named the recovery as the cause
 // of an outage that was still draining. Measured against the break instead, the
 // factor becomes a ratio the decay cannot overturn.
-func capRemediations(candidates []Candidate) {
+func (cfg *Config) capRemediations(candidates []Candidate) {
 	score := make(map[string]float64, len(candidates))
 	for i := range candidates {
 		score[candidates[i].Event.ID] = candidates[i].Score
@@ -844,7 +978,7 @@ func capRemediations(candidates []Candidate) {
 		if !ok {
 			continue
 		}
-		ceiling := reverted * remediationFactor
+		ceiling := reverted * cfg.RemediationFactor
 		if candidates[i].Score <= ceiling {
 			continue
 		}
@@ -871,7 +1005,7 @@ func capRemediations(candidates []Candidate) {
 // Changes are never damped. An intervention explains a failure no matter how
 // much noise surrounds it, and demoting one because a monitor upstream also
 // fired would hide exactly the event the analysis exists to find.
-func dampPropagation(candidates []Candidate, reaches func(from, to string) bool, window time.Duration) {
+func (cfg *Config) dampPropagation(candidates []Candidate, reaches func(from, to string) bool, window time.Duration) {
 	damp := make([]string, len(candidates))
 	for i := range candidates {
 		c := candidates[i]
@@ -916,11 +1050,11 @@ func dampPropagation(candidates []Candidate, reaches func(from, to string) bool,
 	for i := range candidates {
 		switch damp[i] {
 		case "co-symptom":
-			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("on the failing component itself (×%.2f)", propagationFactor))
-			candidates[i].applyFactor(Factor{Label: "Co-symptom", Detail: "on the failing component itself, so it restates the symptom rather than explaining it", Multiplier: propagationFactor})
+			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("on the failing component itself (×%.2f)", cfg.PropagationFactor))
+			candidates[i].applyFactor(Factor{Label: "Co-symptom", Detail: "on the failing component itself, so it restates the symptom rather than explaining it", Multiplier: cfg.PropagationFactor})
 		case "propagation":
-			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("explained by an anomaly upstream of it (×%.2f)", propagationFactor))
-			candidates[i].applyFactor(Factor{Label: "Propagation", Detail: "something upstream of this is also implicated, so this is the failure arriving rather than starting", Multiplier: propagationFactor})
+			candidates[i].Reasons = append(candidates[i].Reasons, fmt.Sprintf("explained by an anomaly upstream of it (×%.2f)", cfg.PropagationFactor))
+			candidates[i].applyFactor(Factor{Label: "Propagation", Detail: "something upstream of this is also implicated, so this is the failure arriving rather than starting", Multiplier: cfg.PropagationFactor})
 		}
 	}
 }
@@ -944,12 +1078,13 @@ func sameChain(a, b Candidate) bool {
 // Deployment and the Pod it owns are routinely created in the same instant, and
 // an order-dependent pass splits them into two chains depending on which the
 // tie-break happened to put first.
-func linkChains(candidates []Candidate, reaches func(from, to string) bool) {
+func (cfg *Config) linkChains(candidates []Candidate, reaches func(from, to string) bool) {
 	parent := make([]int, len(candidates))
 	for i := range parent {
 		parent[i] = i
 	}
 	explained := make([]bool, len(candidates))
+	explainers := make(map[int][]int)
 	var find func(int) int
 	find = func(i int) int {
 		for parent[i] != i {
@@ -968,10 +1103,17 @@ func linkChains(candidates []Candidate, reaches func(from, to string) bool) {
 			if causalTime(to).Before(causalTime(from)) {
 				continue // an effect cannot precede its cause
 			}
-			if causalTime(to).Sub(causalTime(from)) > propagationHorizonFor(from) {
+			if causalTime(to).Sub(causalTime(from)) > cfg.horizonFor(from) {
 				continue // slower than this kind of cause can propagate
 			}
 			if !reaches(key(from), key(to)) {
+				continue
+			}
+			// Two interventions do not explain each other: a deploy is not an
+			// effect of the config change before it. They are rivals, and linking
+			// them hid exactly the ambiguity confidence exists to show. The one
+			// real exception is an autoscaler limit and the scale it causes.
+			if changeTypes[to.Type] && !(from.Type == "hpa_change" && to.Type == "scale" && key(from) == key(to)) {
 				continue
 			}
 			// Simultaneous and mutually reachable says nothing about direction.
@@ -979,9 +1121,18 @@ func linkChains(candidates []Candidate, reaches func(from, to string) bool) {
 				continue
 			}
 			explained[j] = true
-			if a, b := find(i), find(j); a != b {
-				parent[b] = a
-			}
+			explainers[j] = append(explainers[j], i)
+		}
+	}
+	// An effect joins the chain of its strongest explainer only. Two causes that
+	// both explain one crash are rivals; letting the shared effect join them hid
+	// every ambiguity from the confidence calculation. Another explainer is
+	// reached through its own links if it belongs to the same story. Candidates
+	// arrive best-first, so the lowest index is the strongest.
+	for j, from := range explainers {
+		sort.Ints(from)
+		if a, b := find(from[0]), find(j); a != b {
+			parent[b] = a
 		}
 	}
 
@@ -1011,6 +1162,12 @@ func FallbackNarrative(r *Result) string {
 		return fmt.Sprintf("No upstream cause was found for %s at %s; the analysis is inconclusive.", r.Symptom.Title, r.Symptom.IngestedAt.Format(time.RFC3339))
 	}
 	c := r.Candidates[0]
+	if r.Verdict == VerdictNoRootCause {
+		return fmt.Sprintf("No root cause was observed for %s. The failure first appears at %s (%s), but nothing Chronicle recorded explains it. The analysis scanned %d events.", r.Symptom.Title, c.Event.EntityName, c.Event.Type, r.Scanned)
+	}
+	if r.Verdict == VerdictAmbiguous {
+		return ambiguousNarrative(r)
+	}
 	prefix := "The analysis is inconclusive. "
 	if r.Confidence >= 0.5 {
 		prefix = "The most likely cause is "
@@ -1021,7 +1178,30 @@ func FallbackNarrative(r *Result) string {
 	}
 	// Same clock as the score's time factor, so the two cannot disagree.
 	at, gap := causalTime(c.Event), c.Gap
-	return fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom%s), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, at.Format(time.RFC3339), c.Distance, gap, impact, r.Confidence, r.Scanned, len(r.Candidates))
+	text := fmt.Sprintf("%s%s on %s at %s (%d hop(s) upstream, %.0fs before the symptom%s), with confidence %.2f. The analysis scanned %d events and retained %d graph-reachable candidate(s).", prefix, c.Event.Title, c.Event.EntityName, at.Format(time.RFC3339), c.Distance, gap, impact, r.Confidence, r.Scanned, len(r.Candidates))
+	// A weaker rival is still worth naming: it is what the answer would be if
+	// the leader were wrong.
+	for _, x := range r.Candidates[1:] {
+		if !sameChain(c, x) && x.Reverts == "" && rootClass(x) {
+			text += fmt.Sprintf(" The next most plausible cause is %s on %s.", x.Event.Type, x.Event.EntityName)
+			break
+		}
+	}
+	return text
+}
+
+// ambiguousNarrative names every plausible cause and says the record cannot
+// separate them, instead of presenting one as the answer.
+func ambiguousNarrative(r *Result) string {
+	describe := func(c Candidate) string {
+		return fmt.Sprintf("%s on %s (at %s)", c.Event.Type, c.Event.EntityName, causalTime(c.Event).Format(time.RFC3339))
+	}
+	names := []string{describe(r.Candidates[0])}
+	for _, a := range r.Alternatives {
+		names = append(names, describe(a))
+	}
+	return fmt.Sprintf("The recorded evidence cannot separate %d about equally plausible causes for %s: %s. Confidence in any single one is %.2f; treat the choice between them as unresolved. The analysis scanned %d events.",
+		len(names), r.Symptom.Title, strings.Join(names, "; "), r.Confidence, r.Scanned)
 }
 
 // remediationFactor damps a change that undoes an earlier one. It is a
@@ -1137,6 +1317,9 @@ func topDistinct(candidates []Candidate, limit int) []Candidate {
 		}
 		if at, exists := seen[hypothesis]; exists {
 			kept[at].Occurrences += repeats
+			if !c.FirstAt.IsZero() && (kept[at].FirstAt.IsZero() || c.FirstAt.Before(kept[at].FirstAt)) {
+				kept[at].FirstAt = c.FirstAt
+			}
 			continue
 		}
 		if len(kept) == limit {
@@ -1160,7 +1343,7 @@ func changeSignature(e event.Event) (from, to string, ok bool) {
 	case "scale":
 		from = gjson.GetBytes(e.Payload, "old_replicas").String()
 		to = gjson.GetBytes(e.Payload, "new_replicas").String()
-	case "config_change":
+	case "config_change", "service_change", "hpa_change":
 		from = gjson.GetBytes(e.Payload, "from_hash").String()
 		to = gjson.GetBytes(e.Payload, "to_hash").String()
 	case "resource_change":

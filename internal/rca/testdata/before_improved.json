@@ -1,0 +1,2125 @@
+{
+  "incidents": [
+    {
+      "Name": "bad_config/A",
+      "Group": "known",
+      "Fault": "bad_config",
+      "Truths": [
+        "config_change:api"
+      ],
+      "Top": [
+        "config_change:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "resource_status:api"
+      ],
+      "Confidence": 0.9226813842819279,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_config/B",
+      "Group": "known",
+      "Fault": "bad_config",
+      "Truths": [
+        "config_change:api"
+      ],
+      "Top": [
+        "config_change:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "resource_status:api"
+      ],
+      "Confidence": 0.9635431894640498,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_config/C",
+      "Group": "known",
+      "Fault": "bad_config",
+      "Truths": [
+        "config_change:api"
+      ],
+      "Top": [
+        "config_change:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "resource_status:api",
+        "resource_deleted:api-1"
+      ],
+      "Confidence": 0.6605412083952504,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_config/D",
+      "Group": "known",
+      "Fault": "bad_config",
+      "Truths": [
+        "config_change:api"
+      ],
+      "Top": [
+        "config_change:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "resource_status:api"
+      ],
+      "Confidence": 0.9444637559864212,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_config/E",
+      "Group": "known",
+      "Fault": "bad_config",
+      "Truths": [
+        "config_change:api"
+      ],
+      "Top": [
+        "container_restart:api-2",
+        "config_change:api",
+        "resource_status:api",
+        "k8s_event:api-2"
+      ],
+      "Confidence": 0.7087856764340635,
+      "Candidates": 4,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_deploy/A",
+      "Group": "known",
+      "Fault": "bad_deploy",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "resource_status:api"
+      ],
+      "Confidence": 0.9712435624020295,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_deploy/B",
+      "Group": "known",
+      "Fault": "bad_deploy",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "resource_status:api"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_deploy/C",
+      "Group": "known",
+      "Fault": "bad_deploy",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "resource_status:api",
+        "resource_deleted:api-1"
+      ],
+      "Confidence": 0.7012568972902287,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_deploy/D",
+      "Group": "known",
+      "Fault": "bad_deploy",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "resource_status:api"
+      ],
+      "Confidence": 0.9941723747225487,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "bad_deploy/E",
+      "Group": "known",
+      "Fault": "bad_deploy",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "container_restart:api-2",
+        "deploy:api",
+        "resource_status:api",
+        "k8s_event:api-2"
+      ],
+      "Confidence": 0.7087856764340635,
+      "Candidates": 4,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "cloud_load_balancer_fault/A",
+      "Group": "unknown",
+      "Fault": "cloud_load_balancer_fault",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1",
+        "latency_spike:frontend"
+      ],
+      "Confidence": 0.15188264495015646,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "cloud_load_balancer_fault/B",
+      "Group": "unknown",
+      "Fault": "cloud_load_balancer_fault",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "cloud_load_balancer_fault/D",
+      "Group": "unknown",
+      "Fault": "cloud_load_balancer_fault",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1"
+      ],
+      "Confidence": 0.1498709838934965,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "configmap_changed/A",
+      "Group": "newly-observable",
+      "Fault": "configmap_changed",
+      "Truths": [
+        "config_change:api-config"
+      ],
+      "Top": [
+        "config_change:api-config",
+        "container_restart:api-1",
+        "became_unready:api-1",
+        "latency_spike:frontend",
+        "log_error:frontend-1"
+      ],
+      "Confidence": 0.8954120282647517,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "configmap_changed/B",
+      "Group": "newly-observable",
+      "Fault": "configmap_changed",
+      "Truths": [
+        "config_change:api-config"
+      ],
+      "Top": [
+        "config_change:api-config",
+        "container_restart:api-1",
+        "became_unready:api-1"
+      ],
+      "Confidence": 0.9635431894640497,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "configmap_changed/D",
+      "Group": "newly-observable",
+      "Fault": "configmap_changed",
+      "Truths": [
+        "config_change:api-config"
+      ],
+      "Top": [
+        "config_change:api-config",
+        "container_restart:api-1",
+        "became_unready:api-1",
+        "log_error:frontend-1"
+      ],
+      "Confidence": 0.9257621206042052,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "configmap_changed/E",
+      "Group": "newly-observable",
+      "Fault": "configmap_changed",
+      "Truths": [
+        "config_change:api-config"
+      ],
+      "Top": [
+        "container_restart:api-1",
+        "config_change:api-config"
+      ],
+      "Confidence": 0.7087856764340635,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "container_restart/A",
+      "Group": "known",
+      "Fault": "container_restart",
+      "Truths": [
+        "container_restart:api-1"
+      ],
+      "Top": [
+        "container_restart:api-1",
+        "became_unready:api-1",
+        "k8s_event:api-1",
+        "latency_spike:frontend",
+        "log_error:frontend-1"
+      ],
+      "Confidence": 0.6477813333666527,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "container_restart/B",
+      "Group": "known",
+      "Fault": "container_restart",
+      "Truths": [
+        "container_restart:api-1"
+      ],
+      "Top": [
+        "container_restart:api-1",
+        "became_unready:api-1",
+        "k8s_event:api-1"
+      ],
+      "Confidence": 0.6924387992087088,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "container_restart/C",
+      "Group": "known",
+      "Fault": "container_restart",
+      "Truths": [
+        "container_restart:api-1"
+      ],
+      "Top": [
+        "container_restart:api-1",
+        "became_unready:api-1",
+        "k8s_event:api-1"
+      ],
+      "Confidence": 0.261639713603597,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "container_restart/D",
+      "Group": "known",
+      "Fault": "container_restart",
+      "Truths": [
+        "container_restart:api-1"
+      ],
+      "Top": [
+        "container_restart:api-1",
+        "became_unready:api-1",
+        "k8s_event:api-1",
+        "log_error:frontend-1"
+      ],
+      "Confidence": 0.704076154440476,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "container_restart/E",
+      "Group": "known",
+      "Fault": "container_restart",
+      "Truths": [
+        "container_restart:api-1"
+      ],
+      "Top": [
+        "container_restart:api-1"
+      ],
+      "Confidence": 0.7087856764340635,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "deploy_config_oom_and_errors/A",
+      "Group": "competing",
+      "Fault": "deploy_config_oom_and_errors",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "oom_kill:api-2",
+        "became_unready:api-1",
+        "resource_status:api",
+        "resource_deleted:api-1"
+      ],
+      "Confidence": 0.9192676068589536,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "deploy_config_oom_and_errors/B",
+      "Group": "competing",
+      "Fault": "deploy_config_oom_and_errors",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "oom_kill:api-2",
+        "became_unready:api-1",
+        "resource_status:api",
+        "resource_deleted:api-1"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "deploy_config_oom_and_errors/D",
+      "Group": "competing",
+      "Fault": "deploy_config_oom_and_errors",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "oom_kill:api-2",
+        "became_unready:api-1",
+        "resource_status:api",
+        "resource_deleted:api-1"
+      ],
+      "Confidence": 0.9583795985722118,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "deploy_with_benign_upstream_change/A",
+      "Group": "competing",
+      "Fault": "deploy_with_benign_upstream_change",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "config_change:worker",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2"
+      ],
+      "Confidence": 0.9712435624020295,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "deploy_with_benign_upstream_change/B",
+      "Group": "competing",
+      "Fault": "deploy_with_benign_upstream_change",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "config_change:worker",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "deploy_with_benign_upstream_change/D",
+      "Group": "competing",
+      "Fault": "deploy_with_benign_upstream_change",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "config_change:worker",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2"
+      ],
+      "Confidence": 0.9941723747225487,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "dns_resolution_failure/A",
+      "Group": "unknown",
+      "Fault": "dns_resolution_failure",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1",
+        "latency_spike:frontend"
+      ],
+      "Confidence": 0.15188264495015646,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "dns_resolution_failure/B",
+      "Group": "unknown",
+      "Fault": "dns_resolution_failure",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "dns_resolution_failure/D",
+      "Group": "unknown",
+      "Fault": "dns_resolution_failure",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1"
+      ],
+      "Confidence": 0.1498709838934965,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "expired_credential/A",
+      "Group": "unknown",
+      "Fault": "expired_credential",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1",
+        "latency_spike:frontend"
+      ],
+      "Confidence": 0.15188264495015646,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "expired_credential/B",
+      "Group": "unknown",
+      "Fault": "expired_credential",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "expired_credential/D",
+      "Group": "unknown",
+      "Fault": "expired_credential",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1"
+      ],
+      "Confidence": 0.1498709838934965,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "external_database_outage/A",
+      "Group": "unknown",
+      "Fault": "external_database_outage",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1",
+        "latency_spike:frontend"
+      ],
+      "Confidence": 0.15188264495015646,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "external_database_outage/B",
+      "Group": "unknown",
+      "Fault": "external_database_outage",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "external_database_outage/D",
+      "Group": "unknown",
+      "Fault": "external_database_outage",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1"
+      ],
+      "Confidence": 0.1498709838934965,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "hpa_limit_lowered/A",
+      "Group": "newly-observable",
+      "Fault": "hpa_limit_lowered",
+      "Truths": [
+        "hpa_change:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "hpa_change:worker",
+        "error_spike:api",
+        "latency_spike:api",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.6195950243064371,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "hpa_limit_lowered/B",
+      "Group": "newly-observable",
+      "Fault": "hpa_limit_lowered",
+      "Truths": [
+        "hpa_change:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "hpa_change:worker"
+      ],
+      "Confidence": 0.7902895611066569,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "hpa_limit_lowered/D",
+      "Group": "newly-observable",
+      "Fault": "hpa_limit_lowered",
+      "Truths": [
+        "hpa_change:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "hpa_change:worker",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.7222702752896856,
+      "Candidates": 3,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "node_failure/A",
+      "Group": "newly-observable",
+      "Fault": "node_failure",
+      "Truths": [
+        "node_not_ready:node-2"
+      ],
+      "Top": [
+        "became_unready:redis-1",
+        "became_unready:worker-1",
+        "node_not_ready:node-2",
+        "error_spike:api",
+        "latency_spike:api"
+      ],
+      "Confidence": 0.4015893676060241,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "node_failure/B",
+      "Group": "newly-observable",
+      "Fault": "node_failure",
+      "Truths": [
+        "node_not_ready:node-2"
+      ],
+      "Top": [
+        "became_unready:redis-1",
+        "became_unready:worker-1",
+        "node_not_ready:node-2",
+        "resource_status:redis-1",
+        "resource_status:worker-1"
+      ],
+      "Confidence": 0.5122247155320925,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "node_failure/D",
+      "Group": "newly-observable",
+      "Fault": "node_failure",
+      "Truths": [
+        "node_not_ready:node-2"
+      ],
+      "Top": [
+        "became_unready:redis-1",
+        "became_unready:worker-1",
+        "node_not_ready:node-2",
+        "log_error:api-1",
+        "resource_status:redis-1"
+      ],
+      "Confidence": 0.468138141391463,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "node_failure/E",
+      "Group": "newly-observable",
+      "Fault": "node_failure",
+      "Truths": [
+        "node_not_ready:node-2"
+      ],
+      "Top": [
+        "node_not_ready:node-2"
+      ],
+      "Confidence": 0.20795261433182316,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "oom_kill/A",
+      "Group": "known",
+      "Fault": "oom_kill",
+      "Truths": [
+        "oom_kill:redis-1"
+      ],
+      "Top": [
+        "oom_kill:redis-1",
+        "became_unready:redis-1",
+        "resource_status:redis-1",
+        "error_spike:api",
+        "latency_spike:api"
+      ],
+      "Confidence": 0.6559327995619377,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "oom_kill/B",
+      "Group": "known",
+      "Fault": "oom_kill",
+      "Truths": [
+        "oom_kill:redis-1"
+      ],
+      "Top": [
+        "oom_kill:redis-1",
+        "became_unready:redis-1",
+        "resource_status:redis-1"
+      ],
+      "Confidence": 0.8707820164045572,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "oom_kill/C",
+      "Group": "known",
+      "Fault": "oom_kill",
+      "Truths": [
+        "oom_kill:redis-1"
+      ],
+      "Top": [
+        "oom_kill:redis-1",
+        "became_unready:redis-1",
+        "resource_status:redis-1"
+      ],
+      "Confidence": 0.4528275417744092,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "oom_kill/D",
+      "Group": "known",
+      "Fault": "oom_kill",
+      "Truths": [
+        "oom_kill:redis-1"
+      ],
+      "Top": [
+        "oom_kill:redis-1",
+        "became_unready:redis-1",
+        "resource_status:redis-1",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.7620851874596867,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "oom_kill/E",
+      "Group": "known",
+      "Fault": "oom_kill",
+      "Truths": [
+        "oom_kill:redis-1"
+      ],
+      "Top": [
+        "oom_kill:redis-1"
+      ],
+      "Confidence": 0.876606623632076,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "pod_unready/A",
+      "Group": "known",
+      "Fault": "pod_unready",
+      "Truths": [
+        "became_unready:worker-1"
+      ],
+      "Top": [
+        "became_unready:worker-1",
+        "k8s_event:worker-1",
+        "resource_status:worker-1",
+        "error_spike:api",
+        "latency_spike:api"
+      ],
+      "Confidence": 0.3956104808463377,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "pod_unready/B",
+      "Group": "known",
+      "Fault": "pod_unready",
+      "Truths": [
+        "became_unready:worker-1"
+      ],
+      "Top": [
+        "became_unready:worker-1",
+        "k8s_event:worker-1",
+        "resource_status:worker-1"
+      ],
+      "Confidence": 0.5071279944547631,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "pod_unready/C",
+      "Group": "known",
+      "Fault": "pod_unready",
+      "Truths": [
+        "became_unready:worker-1"
+      ],
+      "Top": [
+        "became_unready:worker-1",
+        "k8s_event:worker-1",
+        "resource_status:worker-1"
+      ],
+      "Confidence": 0.5071279944547631,
+      "Candidates": 3,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "pod_unready/D",
+      "Group": "known",
+      "Fault": "pod_unready",
+      "Truths": [
+        "became_unready:worker-1"
+      ],
+      "Top": [
+        "became_unready:worker-1",
+        "k8s_event:worker-1",
+        "resource_status:worker-1",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.4634800890562624,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "pod_unready/E",
+      "Group": "known",
+      "Fault": "pod_unready",
+      "Truths": [
+        "became_unready:worker-1"
+      ],
+      "Top": [
+        "became_unready:worker-1",
+        "resource_status:worker-1"
+      ],
+      "Confidence": 0.4931451069019777,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "repair_rollback/A",
+      "Group": "repair",
+      "Fault": "repair_rollback",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "deploy:api"
+      ],
+      "Confidence": 0.9712435624020295,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "repair_rollback/B",
+      "Group": "repair",
+      "Fault": "repair_rollback",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "deploy:api"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "repair_rollback/D",
+      "Group": "repair",
+      "Fault": "repair_rollback",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2",
+        "deploy:api"
+      ],
+      "Confidence": 0.9941723747225487,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "repair_rollback/E",
+      "Group": "repair",
+      "Fault": "repair_rollback",
+      "Truths": [
+        "deploy:api"
+      ],
+      "Top": [
+        "container_restart:api-2",
+        "deploy:api",
+        "deploy:api",
+        "resource_status:api",
+        "k8s_event:api-2"
+      ],
+      "Confidence": 0.6809937925402838,
+      "Candidates": 5,
+      "Top1": false,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "resource_change/A",
+      "Group": "known",
+      "Fault": "resource_change",
+      "Truths": [
+        "resource_change:worker"
+      ],
+      "Top": [
+        "resource_change:worker",
+        "oom_kill:worker-2",
+        "became_unready:worker-1",
+        "became_unready:worker-2",
+        "resource_status:worker"
+      ],
+      "Confidence": 0.8725217959632466,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "resource_change/B",
+      "Group": "known",
+      "Fault": "resource_change",
+      "Truths": [
+        "resource_change:worker"
+      ],
+      "Top": [
+        "resource_change:worker",
+        "oom_kill:worker-2",
+        "became_unready:worker-1",
+        "became_unready:worker-2",
+        "resource_status:worker"
+      ],
+      "Confidence": 0.9389112583048184,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "resource_change/C",
+      "Group": "known",
+      "Fault": "resource_change",
+      "Truths": [
+        "resource_change:worker"
+      ],
+      "Top": [
+        "resource_change:worker",
+        "became_unready:worker-1",
+        "oom_kill:worker-2",
+        "resource_status:worker",
+        "resource_deleted:worker-1"
+      ],
+      "Confidence": 0.9389112583048184,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "resource_change/D",
+      "Group": "known",
+      "Fault": "resource_change",
+      "Truths": [
+        "resource_change:worker"
+      ],
+      "Top": [
+        "resource_change:worker",
+        "oom_kill:worker-2",
+        "became_unready:worker-1",
+        "became_unready:worker-2",
+        "resource_status:worker"
+      ],
+      "Confidence": 0.9020960212804885,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "resource_change/E",
+      "Group": "known",
+      "Fault": "resource_change",
+      "Truths": [
+        "resource_change:worker"
+      ],
+      "Top": [
+        "resource_change:worker",
+        "resource_status:worker"
+      ],
+      "Confidence": 0.9483474733279883,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "restored_config_then_new_fault/A",
+      "Group": "repair",
+      "Fault": "restored_config_then_new_fault",
+      "Truths": [
+        "scale:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "became_unready:worker-1",
+        "config_change:api",
+        "resource_deleted:worker-1",
+        "error_spike:api"
+      ],
+      "Confidence": 0.6103704561629212,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "restored_config_then_new_fault/B",
+      "Group": "repair",
+      "Fault": "restored_config_then_new_fault",
+      "Truths": [
+        "scale:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "became_unready:worker-1",
+        "config_change:api",
+        "resource_deleted:worker-1",
+        "resource_status:api-1"
+      ],
+      "Confidence": 0.758639140579492,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "restored_config_then_new_fault/D",
+      "Group": "repair",
+      "Fault": "restored_config_then_new_fault",
+      "Truths": [
+        "scale:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "became_unready:worker-1",
+        "config_change:api",
+        "resource_deleted:worker-1",
+        "resource_status:api-1"
+      ],
+      "Confidence": 0.6391675128534274,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "scale_down/A",
+      "Group": "known",
+      "Fault": "scale_down",
+      "Truths": [
+        "scale:redis"
+      ],
+      "Top": [
+        "scale:redis",
+        "became_unready:redis-1",
+        "resource_status:redis",
+        "resource_deleted:redis-1",
+        "error_spike:api"
+      ],
+      "Confidence": 0.6103704561629212,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "scale_down/B",
+      "Group": "known",
+      "Fault": "scale_down",
+      "Truths": [
+        "scale:redis"
+      ],
+      "Top": [
+        "scale:redis",
+        "became_unready:redis-1",
+        "resource_status:redis",
+        "resource_deleted:redis-1",
+        "resource_status:redis-1"
+      ],
+      "Confidence": 0.7824260485873487,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "scale_down/C",
+      "Group": "known",
+      "Fault": "scale_down",
+      "Truths": [
+        "scale:redis"
+      ],
+      "Top": [
+        "scale:redis",
+        "became_unready:redis-1",
+        "resource_status:redis",
+        "resource_deleted:redis-1",
+        "resource_status:redis-1"
+      ],
+      "Confidence": 0.7824260485873487,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "scale_down/D",
+      "Group": "known",
+      "Fault": "scale_down",
+      "Truths": [
+        "scale:redis"
+      ],
+      "Top": [
+        "scale:redis",
+        "became_unready:redis-1",
+        "resource_status:redis",
+        "resource_deleted:redis-1",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.7150835659725191,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "scale_down/E",
+      "Group": "known",
+      "Fault": "scale_down",
+      "Truths": [
+        "scale:redis"
+      ],
+      "Top": [
+        "scale:redis"
+      ],
+      "Confidence": 0.7955757592627243,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "service_selector_broken/A",
+      "Group": "newly-observable",
+      "Fault": "service_selector_broken",
+      "Truths": [
+        "service_change:redis"
+      ],
+      "Top": [
+        "service_change:redis",
+        "error_spike:api",
+        "latency_spike:api",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.15824419233853515,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "service_selector_broken/B",
+      "Group": "newly-observable",
+      "Fault": "service_selector_broken",
+      "Truths": [
+        "service_change:redis"
+      ],
+      "Top": [
+        "service_change:redis"
+      ],
+      "Confidence": 0.20285119778190525,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "service_selector_broken/C",
+      "Group": "newly-observable",
+      "Fault": "service_selector_broken",
+      "Truths": [
+        "service_change:redis"
+      ],
+      "Top": [
+        "service_change:redis"
+      ],
+      "Confidence": 0.20285119778190525,
+      "Candidates": 1,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "service_selector_broken/D",
+      "Group": "newly-observable",
+      "Fault": "service_selector_broken",
+      "Truths": [
+        "service_change:redis"
+      ],
+      "Top": [
+        "service_change:redis",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.185392035622505,
+      "Candidates": 2,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "simultaneous_deploy_and_config/A",
+      "Group": "competing",
+      "Fault": "simultaneous_deploy_and_config",
+      "Truths": [
+        "deploy:api",
+        "config_change:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "config_change:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2"
+      ],
+      "Confidence": 0.9908639838549105,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": true,
+      "AllRequired": false
+    },
+    {
+      "Name": "simultaneous_deploy_and_config/B",
+      "Group": "competing",
+      "Fault": "simultaneous_deploy_and_config",
+      "Truths": [
+        "deploy:api",
+        "config_change:api"
+      ],
+      "Top": [
+        "deploy:api",
+        "config_change:api",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": true,
+      "AllRequired": false
+    },
+    {
+      "Name": "two_independent_faults/A",
+      "Group": "competing",
+      "Fault": "two_independent_faults",
+      "Truths": [
+        "scale:redis",
+        "scale:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "scale:redis",
+        "became_unready:worker-1",
+        "became_unready:redis-1",
+        "error_spike:api"
+      ],
+      "Confidence": 0.625822057825236,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": true
+    },
+    {
+      "Name": "two_independent_faults/B",
+      "Group": "competing",
+      "Fault": "two_independent_faults",
+      "Truths": [
+        "scale:redis",
+        "scale:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "scale:redis",
+        "became_unready:worker-1",
+        "became_unready:redis-1"
+      ],
+      "Confidence": 0.40436273496904995,
+      "Candidates": 4,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": true
+    },
+    {
+      "Name": "two_independent_faults/D",
+      "Group": "competing",
+      "Fault": "two_independent_faults",
+      "Truths": [
+        "scale:redis",
+        "scale:worker"
+      ],
+      "Top": [
+        "scale:worker",
+        "scale:redis",
+        "became_unready:worker-1",
+        "became_unready:redis-1",
+        "log_error:api-1"
+      ],
+      "Confidence": 0.727101496636039,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": false,
+      "AllRequired": true
+    },
+    {
+      "Name": "two_simultaneous_deploys/A",
+      "Group": "competing",
+      "Fault": "two_simultaneous_deploys",
+      "Truths": [
+        "deploy:api",
+        "deploy:worker"
+      ],
+      "Top": [
+        "deploy:api",
+        "deploy:worker",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2"
+      ],
+      "Confidence": 0.9810047224835925,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": true,
+      "AllRequired": false
+    },
+    {
+      "Name": "two_simultaneous_deploys/B",
+      "Group": "competing",
+      "Fault": "two_simultaneous_deploys",
+      "Truths": [
+        "deploy:api",
+        "deploy:worker"
+      ],
+      "Top": [
+        "deploy:api",
+        "deploy:worker",
+        "container_restart:api-2",
+        "became_unready:api-1",
+        "became_unready:api-2"
+      ],
+      "Confidence": 1,
+      "Candidates": 5,
+      "Top1": true,
+      "Top3": true,
+      "AllFound": true,
+      "Unknown": false,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": false,
+      "Ambiguous": true,
+      "AllRequired": false
+    },
+    {
+      "Name": "unrelated_recent_change/A",
+      "Group": "unknown",
+      "Fault": "unrelated_recent_change",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1",
+        "latency_spike:frontend"
+      ],
+      "Confidence": 0.15188264495015646,
+      "Candidates": 2,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "unrelated_recent_change/B",
+      "Group": "unknown",
+      "Fault": "unrelated_recent_change",
+      "Truths": null,
+      "Top": null,
+      "Confidence": 0,
+      "Candidates": 0,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": true,
+      "DeclaredNoCause": true,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    },
+    {
+      "Name": "unrelated_recent_change/D",
+      "Group": "unknown",
+      "Fault": "unrelated_recent_change",
+      "Truths": null,
+      "Top": [
+        "log_error:api-1"
+      ],
+      "Confidence": 0.1498709838934965,
+      "Candidates": 1,
+      "Top1": false,
+      "Top3": false,
+      "AllFound": false,
+      "Unknown": true,
+      "NoCandidates": false,
+      "DeclaredNoCause": false,
+      "Abstained": true,
+      "Ambiguous": false,
+      "AllRequired": false
+    }
+  ],
+  "summary": {
+    "Profile": "improved",
+    "Incidents": 85,
+    "Known": 70,
+    "Unknown": 15,
+    "Top1N": 60,
+    "Top3N": 70,
+    "Top1Pct": 85.71428571428571,
+    "Top3Pct": 100,
+    "UnknownStrictN": 5,
+    "UnknownDeclaredN": 5,
+    "UnknownAbstainN": 15,
+    "UnknownStrictPct": 33.333333333333336,
+    "UnknownDeclaredPct": 33.333333333333336,
+    "UnknownAbstainPct": 100,
+    "NCorrect": 60,
+    "NWrong": 10,
+    "ConfCorrect": 0.7455306555188598,
+    "ConfWrong": 0.6321457907074833,
+    "ConfUnknownGuess": 0.1508768144218265,
+    "UnknownWithCandidates": 10,
+    "MultiCause": 3,
+    "MultiCauseAll": 3,
+    "ByGroup": {
+      "competing": {
+        "N": 13,
+        "Top1": 13,
+        "Top3": 13,
+        "AllFound": 13
+      },
+      "known": {
+        "N": 35,
+        "Top1": 33,
+        "Top3": 35,
+        "AllFound": 35
+      },
+      "newly-observable": {
+        "N": 15,
+        "Top1": 8,
+        "Top3": 15,
+        "AllFound": 15
+      },
+      "repair": {
+        "N": 7,
+        "Top1": 6,
+        "Top3": 7,
+        "AllFound": 7
+      }
+    },
+    "Failed": [
+      "bad_config/E                                 truth=[config_change:api] got=[container_restart:api-2 config_change:api resource_status:api] conf=0.71",
+      "bad_deploy/E                                 truth=[deploy:api] got=[container_restart:api-2 deploy:api resource_status:api] conf=0.71",
+      "configmap_changed/E                          truth=[config_change:api-config] got=[container_restart:api-1 config_change:api-config] conf=0.71",
+      "hpa_limit_lowered/A                          truth=[hpa_change:worker] got=[scale:worker hpa_change:worker error_spike:api] conf=0.62",
+      "hpa_limit_lowered/B                          truth=[hpa_change:worker] got=[scale:worker hpa_change:worker] conf=0.79",
+      "hpa_limit_lowered/D                          truth=[hpa_change:worker] got=[scale:worker hpa_change:worker log_error:api-1] conf=0.72",
+      "node_failure/A                               truth=[node_not_ready:node-2] got=[became_unready:redis-1 became_unready:worker-1 node_not_ready:node-2] conf=0.40",
+      "node_failure/B                               truth=[node_not_ready:node-2] got=[became_unready:redis-1 became_unready:worker-1 node_not_ready:node-2] conf=0.51",
+      "node_failure/D                               truth=[node_not_ready:node-2] got=[became_unready:redis-1 became_unready:worker-1 node_not_ready:node-2] conf=0.47",
+      "repair_rollback/E                            truth=[deploy:api] got=[container_restart:api-2 deploy:api deploy:api] conf=0.68"
+    ]
+  }
+}
