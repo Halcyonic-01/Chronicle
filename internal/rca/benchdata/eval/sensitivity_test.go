@@ -83,6 +83,11 @@ func params() []param {
 		d("FlapWindow", "timing", []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute}, func(c *rca.Config, v time.Duration) { c.FlapWindow = v }),
 		d("SettleAfterChange", "timing", []time.Duration{5 * time.Second, 20 * time.Second, time.Minute, 2 * time.Minute}, func(c *rca.Config, v time.Duration) { c.SettleAfterChange = v }),
 		d("MaxEpisode", "timing", []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour}, func(c *rca.Config, v time.Duration) { c.MaxEpisode = v }),
+		// Hardening pass (F1-F5).
+		f("NonRootFactor", "scoring", []float64{0.1, 0.25, 0.5, 1}, func(c *rca.Config, v float64) { c.NonRootFactor = v }),
+		f("UncorroboratedFactor", "scoring", []float64{0.25, 0.5, 0.75, 1}, func(c *rca.Config, v float64) { c.UncorroboratedFactor = v }),
+		d("TerminationGrace", "timing", []time.Duration{10 * time.Second, 30 * time.Second, time.Minute}, func(c *rca.Config, v time.Duration) { c.TerminationGrace = v }),
+		d("NewPodWindow", "timing", []time.Duration{2 * time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute}, func(c *rca.Config, v time.Duration) { c.NewPodWindow = v }),
 	)
 	ps = append(ps,
 		f("Lookback scale (all windows)", "timing", []float64{0.5, 0.75, 1, 1.5, 2}, func(c *rca.Config, v float64) {

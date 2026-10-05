@@ -116,6 +116,14 @@ type Candidate struct {
 	// rendered as a list, so the console fell back to the symptom's own blast
 	// radius, which for an edge service is empty.
 	AffectedServiceKeys []string `json:"affected_service_keys,omitempty"`
+	// NotRoot says why the evidence rules this out as the cause, when it does.
+	NotRoot string `json:"not_root,omitempty"`
+
+	lifecycle   string          // lifecycleNew, lifecycleRetired or lifecycleRemoved for pod lifecycle events
+	inert       bool            // explains nothing now: a capacity increase or recovered history
+	explains    map[string]bool // live failure facts it can explain, by identity
+	firstEffect time.Time       // when the first failure it explains appeared
+	bridge      float64         // strength multiplier when that failure preceded the onset
 }
 type BlastRadius struct {
 	AffectedServices int      `json:"affected_services"`
@@ -447,6 +455,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	}
 	reverts := revertingChanges(raw, impactOf)
 	replacedAt := lastChangeBefore(raw, onset.Add(-cfg.SettleAfterChange))
+	lifecycleOf := cfg.podLifecycle(raw, edges)
 	candidates := make([]Candidate, 0, len(raw))
 	for _, e := range raw {
 		if e.ID == symptom.ID {
@@ -489,6 +498,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		c.AffectedServices, c.AffectedNodes, c.BlastRadiusScore = impact.AffectedServices, impact.AffectedNodes, impact.Score
 		c.AffectedServiceKeys = impact.Services
 		cfg.score(&c, symptom, onset, decay)
+		cfg.classify(&c, lifecycleOf(e))
 		candidates = append(candidates, c)
 	}
 	// Collapse repeats first: the pairwise passes below are quadratic.
@@ -507,6 +517,12 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		_, reachable := upstream[from]
 		return reachable
 	}
+	// Weigh each candidate against the failures actually observed: history is set
+	// aside, then a change that explains none of them is held back.
+	cfg.markRecovered(candidates, raw, impactOf, onset, lifecycleOf)
+	cfg.relate(candidates, reaches)
+	cfg.dampUncorroborated(candidates)
+	bridgeToFirstEffect(candidates, onset, decay)
 	// Demote propagation before ranking, so the order the user sees is the order
 	// after every candidate has been judged against the others.
 	// The window spans the episode so late readings still count as propagation.
@@ -693,8 +709,13 @@ func (cfg *Config) confidenceOf(scored, reported []Candidate) (overall, strength
 	if len(c) == 0 {
 		return 0, 0, 0
 	}
-	// How good is the leading candidate, setting aside how far away it is.
-	strength = math.Min(1, c[0].Score/cfg.distance(c[0].Distance))
+	// How good is the leading candidate, setting aside how far away it is, and
+	// timed to the first failure it explains when that came before the onset.
+	bridge := c[0].bridge
+	if bridge < 1 {
+		bridge = 1
+	}
+	strength = math.Min(1, c[0].Score/cfg.distance(c[0].Distance)*bridge)
 	// How clearly does it beat the runner-up? Only a genuinely different
 	// explanation counts as a rival: the links of one causal chain are the same
 	// answer told at different depths, and letting them compete made Chronicle
@@ -702,8 +723,8 @@ func (cfg *Config) confidenceOf(scored, reported []Candidate) (overall, strength
 	separation = 1
 	lead := reported[0]
 	for _, rival := range reported[1:] {
-		if sameChain(lead, rival) || rival.Reverts != "" {
-			continue // a repair is not a competing explanation
+		if sameChain(lead, rival) || rival.Reverts != "" || rival.inert {
+			continue // a repair, or what explains nothing now, is not a competing explanation
 		}
 		if lead.Score > 0 {
 			margin := (lead.Score - rival.Score) / lead.Score
@@ -748,22 +769,361 @@ const (
 var manifestations = map[string]bool{"log_error": true, "error_spike": true, "latency_spike": true, "memory_pressure": true}
 
 // rootClass reports whether a candidate could be a root cause: a change or a
-// failure fact, not a measurement, a symptom restated or a recovery.
+// failure fact, not a measurement, a symptom restated, a recovery, or something
+// the evidence rules out (NotRoot).
 func rootClass(c Candidate) bool {
-	return !manifestations[c.Event.Type] && !observationTypes[c.Event.Type] && !isRecovery(c.Event)
+	return c.NotRoot == "" && !manifestations[c.Event.Type] && !observationTypes[c.Event.Type] && !isRecovery(c.Event)
+}
+
+// failureFacts report a component failing, as opposed to a change to it or a
+// measurement of it.
+var failureFacts = map[string]bool{
+	"container_restart": true, "oom_kill": true, "crash_loop": true, "became_unready": true,
+	"node_not_ready": true, "node_pressure": true,
+}
+
+// alertTypes are the user-facing failure signals.
+var alertTypes = map[string]bool{"error_spike": true, "latency_spike": true, "log_error": true}
+
+const (
+	lifecycleNew     = "new"     // a pod its controller just created
+	lifecycleRetired = "retired" // shut down and replaced: a rollout's mechanics
+	lifecycleRemoved = "removed" // shut down and not replaced: capacity lost
+)
+
+// liveFact: a failure fact that is happening now, not a replaced pod or history.
+func liveFact(c Candidate) bool {
+	return failureFacts[c.Event.Type] && c.lifecycle != lifecycleRetired && !c.inert
+}
+
+// shutDown: the event belongs to a pod being shut down, replaced or not.
+func shutDown(lifecycle string) bool {
+	return lifecycle == lifecycleRetired || lifecycle == lifecycleRemoved
+}
+
+// capacityIncrease is a scale that adds replicas to a running workload.
+func capacityIncrease(e event.Event) bool {
+	if e.Type != "scale" {
+		return false
+	}
+	from, to := gjson.GetBytes(e.Payload, "old_replicas").Int(), gjson.GetBytes(e.Payload, "new_replicas").Int()
+	return from > 0 && to > from
+}
+
+// scaleToZero takes a workload away entirely, so it needs no other evidence of failure.
+func scaleToZero(e event.Event) bool {
+	return e.Type == "scale" && gjson.GetBytes(e.Payload, "old_replicas").Int() > 0 && gjson.GetBytes(e.Payload, "new_replicas").Int() == 0
+}
+
+// podLifecycle classifies pod events that are lifecycle rather than failure: a
+// pod its controller created recently, or one being shut down (replaced by a
+// new pod of the same owner, or not).
+func (cfg *Config) podLifecycle(events []event.Event, edges []graph.Edge) func(event.Event) string {
+	created, deleted, owner := map[string]time.Time{}, map[string]time.Time{}, map[string]string{}
+	for _, e := range edges {
+		if e.Kind == "owns" && e.To.Kind == "Pod" {
+			owner[e.To.Key()] = e.From.Name
+		}
+	}
+	for _, e := range events {
+		if e.EntityKind != "Pod" {
+			continue
+		}
+		k := key(e)
+		if o := gjson.GetBytes(e.Payload, "owner").String(); o != "" {
+			owner[k] = o
+		}
+		switch e.Type {
+		case "resource_created":
+			if _, seen := created[k]; !seen && gjson.GetBytes(e.Payload, "owner").String() != "" {
+				created[k] = causalTime(e)
+			}
+		case "resource_deleted":
+			if _, seen := deleted[k]; !seen {
+				deleted[k] = causalTime(e)
+			}
+		}
+	}
+	// A rollout creates a pod of the same owner around when it deletes the old one.
+	replaced := func(k string, gone time.Time) bool {
+		for other, born := range created {
+			if other != k && owner[other] != "" && owner[other] == owner[k] && absDuration(born.Sub(gone)) <= cfg.NewPodWindow {
+				return true
+			}
+		}
+		return false
+	}
+	return func(e event.Event) string {
+		if e.EntityKind != "Pod" {
+			return ""
+		}
+		k, at := key(e), causalTime(e)
+		gone, deletedPod := deleted[k]
+		shutdown := e.Type == "resource_deleted" && owner[k] != ""
+		if deletedPod && (e.Type == "became_unready" || e.Type == "resource_status" || e.Type == "k8s_event") {
+			if d := gone.Sub(at); d >= 0 && d <= cfg.TerminationGrace {
+				shutdown = true
+			}
+		}
+		if shutdown {
+			if replaced(k, gone) {
+				return lifecycleRetired
+			}
+			return lifecycleRemoved
+		}
+		if born, ok := created[k]; ok && failureFacts[e.Type] {
+			if d := at.Sub(born); d >= 0 && d <= cfg.NewPodWindow {
+				return lifecycleNew
+			}
+		}
+		return ""
+	}
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+// classify marks what the evidence rules out as a cause. A capacity increase
+// takes nothing away; a pod's lifecycle is its controller's doing, so a failure
+// on a pod it just created, or one being shut down, is an effect of whatever
+// made the controller act. Effects stay ranked as evidence, undamped.
+func (cfg *Config) classify(c *Candidate, lifecycle string) {
+	c.lifecycle = lifecycle
+	switch {
+	case capacityIncrease(c.Event):
+		c.NotRoot = "it adds replicas to a running workload and takes nothing away"
+		c.inert = true
+		c.Reasons = append(c.Reasons, fmt.Sprintf("a capacity increase (×%.2f)", cfg.NonRootFactor))
+		c.applyFactor(Factor{Label: "Capacity increase", Detail: "adding replicas takes nothing away", Multiplier: cfg.NonRootFactor})
+	case lifecycle == lifecycleNew:
+		c.NotRoot = "its controller created this pod during the incident, so the failure is an effect of whatever made it do so"
+	case shutDown(lifecycle) && (failureFacts[c.Event.Type] || c.Event.Type == "resource_deleted"):
+		c.NotRoot = "the pod was being shut down, which is its owner's or controller's doing"
+	}
+}
+
+// bridgeToFirstEffect lets strength measure a cause to the first failure it
+// explains rather than to the onset, when that failure came first: the gap is
+// then accounted for by evidence, not left unexplained.
+func bridgeToFirstEffect(candidates []Candidate, onset time.Time, timeConstant float64) {
+	for i := range candidates {
+		c := &candidates[i]
+		at := causalTime(c.Event)
+		if c.firstEffect.IsZero() || !at.Before(onset) || timeConstant <= 0 {
+			continue
+		}
+		if effectGap := c.firstEffect.Sub(at).Seconds(); effectGap < c.Gap {
+			c.bridge = math.Exp((c.Gap - effectGap) / timeConstant)
+		}
+	}
+}
+
+// explainsEvent reports whether from can be why to happened: it came first,
+// within how long its kind takes to surface, and the graph lets it reach.
+// Simultaneous and mutually reachable says nothing about direction.
+func (cfg *Config) explainsEvent(from, to event.Event, reaches func(from, to string) bool) bool {
+	gap := causalTime(to).Sub(causalTime(from))
+	if gap < 0 || gap > cfg.horizonFor(from) || !reaches(key(from), key(to)) {
+		return false
+	}
+	return !(gap == 0 && reaches(key(to), key(from)))
+}
+
+// relate records which live failure facts each candidate can explain, and when
+// the first failure it explains (a fact or an alert) appeared.
+func (cfg *Config) relate(candidates []Candidate, reaches func(from, to string) bool) {
+	for i := range candidates {
+		from := &candidates[i]
+		if from.inert {
+			continue
+		}
+		for j := range candidates {
+			to := candidates[j]
+			if i == j || to.inert || to.lifecycle == lifecycleRetired {
+				continue
+			}
+			fact := failureFacts[to.Event.Type]
+			if !fact && !alertTypes[to.Event.Type] {
+				continue
+			}
+			if !cfg.explainsEvent(from.Event, to.Event, reaches) {
+				continue
+			}
+			if fact {
+				if from.explains == nil {
+					from.explains = map[string]bool{}
+				}
+				from.explains[eventIdentity(to.Event)] = true
+			}
+			if at := causalTime(to.Event); from.firstEffect.IsZero() || at.Before(from.firstEffect) {
+				from.firstEffect = at
+			}
+		}
+	}
+}
+
+// markRecovered sets aside a change or failure whose own incident recovered
+// before this episode began: it explained that incident, not this one.
+func (cfg *Config) markRecovered(candidates []Candidate, events []event.Event, impactOf func(string) map[string]int, onset time.Time, lifecycle func(event.Event) string) {
+	for i := range candidates {
+		c := &candidates[i]
+		if !rootClass(*c) || (!changeTypes[c.Event.Type] && !failureFacts[c.Event.Type]) {
+			continue
+		}
+		at, ok := cfg.recoveredAt(c.Event, events, impactOf(key(c.Event)), onset, lifecycle)
+		if !ok {
+			continue
+		}
+		c.NotRoot = fmt.Sprintf("the incident it caused recovered at %s, before this one began", at.Format(time.RFC3339))
+		c.inert = true
+		c.Reasons = append(c.Reasons, fmt.Sprintf("its incident recovered before this one (×%.2f)", cfg.NonRootFactor))
+		c.applyFactor(Factor{Label: "Recovered", Detail: "the incident it caused recovered before this one began", Multiplier: cfg.NonRootFactor})
+	}
+}
+
+// recoveredAt returns when the failure that followed cause had recovered, if
+// that recovery held for FlapWindow before the next failure (or the onset).
+// Each alert or failure fact closes only by its own recovery; silence closes
+// nothing. Log lines cannot be resolved, so they end with the next recovery in
+// scope. A pod being shut down is not a failure. Events are in causal order.
+func (cfg *Config) recoveredAt(cause event.Event, events []event.Event, scope map[string]int, onset time.Time, lifecycle func(event.Event) string) (time.Time, bool) {
+	const logs = "|logs"
+	from := causalTime(cause)
+	open := map[string]bool{} // entity|type
+	var healthy time.Time     // when the last failure closed; zero while failing
+	last := map[string]time.Time{}
+	saw := false
+	held := func(at time.Time) bool {
+		return saw && len(open) == 0 && !healthy.IsZero() && at.Sub(healthy) >= cfg.FlapWindow
+	}
+	closing := func(match func(string) bool, at time.Time) {
+		for k := range open {
+			if match(k) {
+				delete(open, k)
+			}
+		}
+		if saw && len(open) == 0 && healthy.IsZero() {
+			healthy = at
+		}
+	}
+	for _, e := range events {
+		at := causalTime(e)
+		if at.Before(from) {
+			continue
+		}
+		if !at.Before(onset) {
+			break
+		}
+		entity := key(e)
+		if _, in := scope[entity]; !in {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(e.Type, "_resolved"):
+			k := entity + "|" + strings.TrimSuffix(e.Type, "_resolved")
+			closing(func(x string) bool { return x == k || x == logs }, at)
+		case e.Type == "resource_deleted" || isRecovery(e):
+			closing(func(x string) bool { return strings.HasPrefix(x, entity+"|") || x == logs }, at)
+		case alertTypes[e.Type], failureFacts[e.Type]:
+			if failureFacts[e.Type] && shutDown(lifecycle(e)) {
+				continue // a pod being shut down; the alerts say whether service recovered
+			}
+			k := entity + "|" + e.Type
+			// The same pod failing again within the kubelet's back-off is one crash loop.
+			recurs := failureFacts[e.Type] && !last[k].IsZero() && at.Sub(last[k]) <= cfg.RestartGap
+			if failureFacts[e.Type] {
+				last[k] = at
+			}
+			if held(at) && !recurs {
+				return healthy, true // it recovered and stayed so; this is a new failure
+			}
+			if e.Type == "log_error" {
+				if len(open) > 0 {
+					continue // more of the ongoing failure
+				}
+				k = logs
+			}
+			open[k], saw, healthy = true, true, time.Time{}
+		}
+	}
+	if held(onset) {
+		return healthy, true
+	}
+	return time.Time{}, false
+}
+
+// dampUncorroborated holds back a change that explains none of the observed
+// failures when they point at something else: a change they followed from, or a
+// rollout whose own change went unrecorded. A failure with no change behind it
+// says nothing about a change elsewhere, so it holds nothing back. A scale to
+// zero is a failure in itself.
+func (cfg *Config) dampUncorroborated(candidates []Candidate) {
+	pointed := false
+	for _, c := range candidates {
+		if changeTypes[c.Event.Type] && rootClass(c) && c.Reverts == "" && len(c.explains) > 0 {
+			pointed = true // a corroborated change
+		}
+		if liveFact(c) && c.lifecycle == lifecycleNew {
+			pointed = true // a rollout's pod failing: some change made it
+		}
+	}
+	if !pointed {
+		return
+	}
+	for i := range candidates {
+		c := &candidates[i]
+		if !changeTypes[c.Event.Type] || !rootClass(*c) || c.Reverts != "" || len(c.explains) > 0 || scaleToZero(c.Event) {
+			continue
+		}
+		c.Reasons = append(c.Reasons, fmt.Sprintf("explains none of the failures observed (×%.2f)", cfg.UncorroboratedFactor))
+		c.applyFactor(Factor{Label: "Uncorroborated", Detail: "none of the failures observed on the path can be traced to it", Multiplier: cfg.UncorroboratedFactor})
+	}
+}
+
+// evidenceOf is the observed failure a change accounts for. A failure with no
+// recorded change behind it has none to offer: why it happened is unseen, so no
+// rival can be ruled out against it.
+func evidenceOf(c Candidate) map[string]bool {
+	if !changeTypes[c.Event.Type] {
+		return nil
+	}
+	return c.explains
+}
+
+// competes reports whether r can explain any of the evidence; with no evidence
+// to explain, every rival competes.
+func competes(r Candidate, evidence map[string]bool) bool {
+	if len(evidence) == 0 {
+		return true
+	}
+	for id := range evidence {
+		if r.explains[id] {
+			return true
+		}
+	}
+	return false
 }
 
 // alternatives returns the rival root-class causes the leader cannot be told
 // apart from. A different chain, not a repair, and at least AmbiguityRatio of the
 // leader's score. The answer says so rather than naming one cause as if the
 // evidence had chosen it.
+//
+// A rival must also compete for the same evidence: when the leader explains
+// observed failures, a rival that can explain none of them is a separate
+// problem or a bystander, not another reading of this one.
 func (cfg *Config) alternatives(c []Candidate) []Candidate {
 	if len(c) < 2 || !rootClass(c[0]) || c[0].Score <= 0 {
 		return nil
 	}
+	evidence := evidenceOf(c[0])
 	var out []Candidate
 	for _, r := range c[1:] {
-		if sameChain(c[0], r) || r.Reverts != "" || !rootClass(r) {
+		if sameChain(c[0], r) || r.Reverts != "" || !rootClass(r) || !competes(r, evidence) {
 			continue
 		}
 		if r.Score >= cfg.AmbiguityRatio*c[0].Score {
@@ -773,19 +1133,20 @@ func (cfg *Config) alternatives(c []Candidate) []Candidate {
 	return out
 }
 
+// verdict judges the reported answer. When it leads with something that cannot
+// be a cause (a measurement, an effect, a capacity increase), nothing recorded
+// explains the failure, however many weaker changes sit behind it.
 func (cfg *Config) verdict(r *Result) string {
-	for _, c := range r.Candidates {
-		if !manifestations[c.Event.Type] {
-			if len(r.Alternatives) > 0 {
-				return VerdictAmbiguous
-			}
-			if r.Confidence < cfg.InconclusiveBelow {
-				return VerdictInconclusive
-			}
-			return VerdictRootCause
-		}
+	if len(r.Candidates) == 0 || !rootClass(r.Candidates[0]) {
+		return VerdictNoRootCause
 	}
-	return VerdictNoRootCause
+	if len(r.Alternatives) > 0 {
+		return VerdictAmbiguous
+	}
+	if r.Confidence < cfg.InconclusiveBelow {
+		return VerdictInconclusive
+	}
+	return VerdictRootCause
 }
 
 // promoteChainRoot puts the root of the leading chain first. A chain is one
@@ -810,7 +1171,7 @@ func promoteChainRoot(c []Candidate) []Candidate {
 	root := -1
 	for i := 1; i < len(c); i++ {
 		x := c[i]
-		if x.Chain != c[0].Chain || observationTypes[x.Event.Type] || isRecovery(x.Event) {
+		if x.Chain != c[0].Chain || !rootClass(x) {
 			continue
 		}
 		if changeTypes[c[0].Event.Type] && key(x.Event) != key(c[0].Event) {
@@ -890,20 +1251,22 @@ func endsEpisode(e, symptom event.Event) bool {
 	return isRecovery(e)
 }
 
+// eventIdentity names one event, by ID when it has one.
+func eventIdentity(e event.Event) string {
+	if e.ID != "" {
+		return e.ID
+	}
+	return fmt.Sprintf("%s|%s|%s|%d", e.Type, e.Title, key(e), causalTime(e).UnixNano())
+}
+
 // mergeEvents adds events without repeating any, since the windows overlap.
 func mergeEvents(have, more []event.Event) []event.Event {
 	seen := make(map[string]bool, len(have))
-	identity := func(e event.Event) string {
-		if e.ID != "" {
-			return e.ID
-		}
-		return fmt.Sprintf("%s|%s|%s|%d", e.Type, e.Title, key(e), causalTime(e).UnixNano())
-	}
 	for _, e := range have {
-		seen[identity(e)] = true
+		seen[eventIdentity(e)] = true
 	}
 	for _, e := range more {
-		if id := identity(e); !seen[id] {
+		if id := eventIdentity(e); !seen[id] {
 			have = append(have, e)
 			seen[id] = true
 		}
@@ -954,7 +1317,7 @@ func collapseRepeats(candidates []Candidate, hypothesis hypothesisCache) []Candi
 // a link of its chain.
 func contested(c []Candidate) bool {
 	for i := 1; i < len(c); i++ {
-		if !sameChain(c[0], c[i]) && c[i].Reverts == "" {
+		if !sameChain(c[0], c[i]) && c[i].Reverts == "" && !c[i].inert {
 			return true
 		}
 	}
@@ -1021,6 +1384,9 @@ func (cfg *Config) dampPropagation(candidates []Candidate, reaches func(from, to
 				continue
 			}
 			other := candidates[j]
+			if other.inert {
+				continue // not an anomaly, so nothing arrives from it
+			}
 			// Bounded by the incident window rather than by how fast this
 			// cause propagates. The two answer different questions: a
 			// propagation horizon asks whether one event directly produced
@@ -1095,18 +1461,16 @@ func (cfg *Config) linkChains(candidates []Candidate, reaches func(from, to stri
 	}
 
 	for i := range candidates {
+		if candidates[i].inert {
+			continue // a capacity increase or recovered history explains nothing now
+		}
 		for j := range candidates {
 			if i == j {
 				continue
 			}
 			from, to := candidates[i].Event, candidates[j].Event
-			if causalTime(to).Before(causalTime(from)) {
-				continue // an effect cannot precede its cause
-			}
-			if causalTime(to).Sub(causalTime(from)) > cfg.horizonFor(from) {
-				continue // slower than this kind of cause can propagate
-			}
-			if !reaches(key(from), key(to)) {
+			// Time order, horizon and reachability, as in explainsEvent.
+			if !cfg.explainsEvent(from, to, reaches) {
 				continue
 			}
 			// Two interventions do not explain each other: a deploy is not an
@@ -1114,10 +1478,6 @@ func (cfg *Config) linkChains(candidates []Candidate, reaches func(from, to stri
 			// them hid exactly the ambiguity confidence exists to show. The one
 			// real exception is an autoscaler limit and the scale it causes.
 			if changeTypes[to.Type] && !(from.Type == "hpa_change" && to.Type == "scale" && key(from) == key(to)) {
-				continue
-			}
-			// Simultaneous and mutually reachable says nothing about direction.
-			if causalTime(from).Equal(causalTime(to)) && reaches(key(to), key(from)) {
 				continue
 			}
 			explained[j] = true
@@ -1163,7 +1523,7 @@ func FallbackNarrative(r *Result) string {
 	}
 	c := r.Candidates[0]
 	if r.Verdict == VerdictNoRootCause {
-		return fmt.Sprintf("No root cause was observed for %s. The failure first appears at %s (%s), but nothing Chronicle recorded explains it. The analysis scanned %d events.", r.Symptom.Title, c.Event.EntityName, c.Event.Type, r.Scanned)
+		return noRootNarrative(r)
 	}
 	if r.Verdict == VerdictAmbiguous {
 		return ambiguousNarrative(r)
@@ -1188,6 +1548,26 @@ func FallbackNarrative(r *Result) string {
 		}
 	}
 	return text
+}
+
+// noRootNarrative points at where the failure surfaced and, when a change or
+// failure was ruled out, says why, so the refusal can be checked.
+func noRootNarrative(r *Result) string {
+	origin := r.Candidates[0]
+	for _, c := range r.Candidates {
+		if !c.inert {
+			origin = c
+			break
+		}
+	}
+	text := fmt.Sprintf("No root cause was observed for %s. The failure first appears at %s (%s), but nothing Chronicle recorded explains it.", r.Symptom.Title, origin.Event.EntityName, origin.Event.Type)
+	for _, c := range r.Candidates {
+		if c.NotRoot != "" {
+			text += fmt.Sprintf(" %s on %s was not counted as the cause: %s.", c.Event.Type, c.Event.EntityName, c.NotRoot)
+			break
+		}
+	}
+	return text + fmt.Sprintf(" The analysis scanned %d events.", r.Scanned)
 }
 
 // ambiguousNarrative names every plausible cause and says the record cannot

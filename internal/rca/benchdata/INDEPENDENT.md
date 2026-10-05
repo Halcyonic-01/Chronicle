@@ -82,7 +82,7 @@ ambiguous, 25 with no root cause, 25 whose root has no remedy). Missed actionabl
 ambiguous. The engine would have acted on 0 of 7 ambiguous incidents and on 1 of
 26 no-root-cause incidents (the same wrong proposal).
 
-## Findings (documented, not fixed)
+## Findings of the first run (documented, not fixed at the time; see the post-fix section)
 
 * **F1. A capacity increase is treated as a cause.** `capacity_increase_decoy/A,B`:
   a cache scale-up from 1 to 2, 15 seconds before unexplained errors, is reported
@@ -107,6 +107,51 @@ ambiguous. The engine would have acted on 0 of 7 ambiguous incidents and on 1 of
 * **F6. The contract labels were approximate.** `became_unready-after-330s` was
   labeled outside the contract by the lookback alone but was found, because
   restarts on the path extend the episode window.
+
+## Post-fix independent benchmark (hardening pass)
+
+**This is a post-fix rerun, not an untouched estimate.** F1 to F5 were fixed with
+general rules after the findings above were known, so for those five behaviours
+this set now measures a fix designed with them in mind. No fixture was changed,
+no rule names a fixture, nothing was tuned on this set, and the code was frozen
+before this single run: RCA source hash `38cf5a83b12ecbfa`, rows in
+`internal/rca/testdata/independent_postfix_run.json`. The rules were checked
+only on the development and held-out sets and on new regression tests with
+their own topology (`internal/rca/hardening_test.go`,
+`internal/heal/hardening_test.go`).
+
+Inside the documented contract (111 incidents):
+
+| Metric | First run (`e43c3425e9c4f0b9`) | Post-fix (`38cf5a83b12ecbfa`) |
+|---|---|---|
+| Top-1, single-cause | 76/78 | 76/78 |
+| Top-3, single-cause | 78/78 | 78/78 |
+| Single-cause called ambiguous | 5 | 2 |
+| No-root-cause declared | 22/26 | 26/26 |
+| Ambiguity recognised | 7/7 | 7/7 |
+| False confident diagnoses | 1 of 51 | 0 of 59 |
+| Mean confidence: correct / wrong / ambiguous | 0.772 / 0.515 / 0.497 | 0.825 / 0.535 / 0.521 |
+| Healing would-run / wrong / unsafe | 29 / 1 / 1 | 31 / 0 / 0 |
+| Healing coverage of remediable incidents | 28/53 | 31/53 |
+
+All 117: false confident diagnoses 3 to 0; Top-1 77/84 unchanged. 12 incidents
+changed and none got worse.
+
+| Finding | Status | What the run shows |
+|---|---|---|
+| F1 scale-up as a cause | FIXED | `capacity_increase_decoy/A,B` now `no_root_cause`; the wrong `restore_replicas` is gone |
+| F2 effect promoted when the cause is missing | PARTIALLY FIXED | `delayed/120s-late` and `replayed-after-7min-gap` now `no_root_cause` instead of a 0.70 wrong root; still only when the new pod's creation is inside the window |
+| F3 no corroboration | PARTIALLY FIXED | `benign_upstream_deploy/A,B,D` now correct `root_cause`; `benign_deploy_then_oom_limit/A,B` stay ambiguous, because both changes are on the failing workload and either could explain its OOMs |
+| F4 recovered incident resurfaces | FIXED | `resolved_incident_decoy/A,B` now `no_root_cause` |
+| F5 confidence collapse near the lookback edge | PARTIALLY FIXED | `error_spike-after-600s` and `log_error-after-890s` go from 0.05 inconclusive to 0.99 and 1.00, because their effects began at once; a cause with nothing observed between it and the alert still decays, by design |
+| F6 approximate contract labels | UNCHANGED | a labelling note, not an analyzer fault |
+
+Still not as expected (7 of 117): the two `benign_deploy_then_oom_limit` above, and
+five outside the contract. `error_spike-after-630s` and `log_error-after-930s` have
+their cause beyond the lookback and their rollout's pod created outside the
+window, so a restart is named at 0.04 (inconclusive). The two delayed incidents
+and the same-instant one have no visible cause and are now declared
+`no_root_cause` rather than guessed.
 
 ## What was not asked of this set
 

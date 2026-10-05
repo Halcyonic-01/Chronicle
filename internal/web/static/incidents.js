@@ -257,7 +257,7 @@
       return `<tr class="${i === focus ? 'top' : ''}${linked ? ' linked' : ''}" data-cand="${i}" title="${linked ? 'An effect of the leading candidate, not a rival explanation' : ''}">
         <td class="num">${i + 1}</td>
         <td><span class="bar"><i style="width:${Math.round((c.score || 0) * 100)}%"></i></span>${(c.score || 0).toFixed(3)}</td>
-        <td>${esc(c.event.type)}${c.occurrences > 1 ? `<span class="rep">×${c.occurrences}</span>` : ''}${linked ? `<span class="chain-tag">same chain</span>` : ''}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div></td>
+        <td>${esc(c.event.type)}${c.occurrences > 1 ? `<span class="rep">×${c.occurrences}</span>` : ''}${linked ? `<span class="chain-tag">same chain</span>` : ''}${c.not_root ? `<span class="chain-tag" title="${esc(c.not_root)}">not a cause</span>` : ''}<div style="color:var(--dim);margin-top:3px">${esc(target(c.event))}</div></td>
         <td class="num">${Math.round(gap / 1000)}s</td>
         <td class="num">${c.distance}</td>
         <td class="num">${c.affected_services || 0}</td>
@@ -266,8 +266,8 @@
     return `<div class="sec-body">
       ${r.provisional ? `<div class="provisional">Provisional — this symptom is too recent for its inputs to have settled: events explaining it may still be arriving, and a resource created since the last graph sync has no dependencies yet. Re-run in a minute to confirm.</div>` : ''}
       <div class="conf${confidence < 0.5 || r.verdict === 'no_root_cause' ? ' low' : ''}">
-        <span class="conf-n">${pct}%</span>
-        <span class="conf-t"><i style="width:${pct}%"></i></span>
+        <span class="conf-n">${r.verdict === 'no_root_cause' ? '—' : `${pct}%`}</span>
+        <span class="conf-t"><i style="width:${r.verdict === 'no_root_cause' ? 0 : pct}%"></i></span>
         <span class="conf-l">${r.verdict === 'no_root_cause' ? 'NO ROOT CAUSE OBSERVED' : (r.verdict === 'ambiguous' ? 'AMBIGUOUS' : (confidence < 0.5 ? 'INCONCLUSIVE' : 'CONFIDENCE'))}</span>
         <span class="conf-split" title="Evidence strength of the leading candidate, multiplied by how clearly it beats the runner-up">EVIDENCE ${Math.round((r.strength || 0) * 100)}%${r.contested === false ? ' · UNCONTESTED' : ` × SEPARATION ${Math.round((r.separation || 0) * 100)}%`}</span>
       </div>

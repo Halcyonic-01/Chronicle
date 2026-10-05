@@ -91,6 +91,48 @@ failure's first appearance is still shown, but labelled as not a cause.
 
 Everything else is unchanged and now lives in `rca.Config` (`DefaultConfig()`).
 
+## Hardening pass (independent findings F1 to F5)
+
+General rules, no fixture names, all tunable in `rca.Config`:
+
+* **F1** A scale that adds replicas to a running workload is not a cause
+  (`not_root`, ×`NonRootFactor` 0.25), and `restore_replicas` is planned only for
+  a scale to zero, the executor's own precondition.
+* **F2** A failure on a pod its controller created within `NewPodWindow` (15 m),
+  or on a pod being shut down within `TerminationGrace` (30 s) of its deletion, is
+  an effect of whatever made the controller act. It stays ranked as evidence but
+  is never the root; with nothing else, the verdict is `no_root_cause`.
+* **F3** A change that explains none of the observed failure facts is held back
+  (×`UncorroboratedFactor` 0.5) when those facts point at another change, or at
+  an unrecorded rollout. A rival is only an alternative if it could explain the
+  leading change's failures. A failure with no change behind it holds nothing back.
+* **F4** A change or failure whose own incident recovered (every alert or failure
+  closed by its own recovery, held for `FlapWindow` and not a recurrence of the
+  same crash loop) before the current failure began is history (`not_root`).
+* **F5** Strength times the leading candidate to the first failure it explains
+  when that came before the onset, so evidence that bridges the gap keeps
+  confidence up; an unbridged gap still decays.
+* The verdict now judges the reported leader: if it cannot be a cause, the
+  answer is `no_root_cause` however many weaker changes sit behind it.
+
+Measured on these sets, using the same commands as above:
+
+| | Before the pass | After the pass |
+|---|---|---|
+| main Top-1 / single-cause called ambiguous | 66/66 / 3 | 66/66 / 0 |
+| main ambiguity recognised / false confident | 4/4 / 0 of 43 | 4/4 / 0 of 47 |
+| main healing would-run / wrong / coverage | 16 / 0 / 16 of 41 | 19 / 0 / 19 of 41 |
+| held-out Top-1 / single-cause called ambiguous | 51/52 / 1 | 52/52 / 0 |
+| held-out ambiguity recognised / false confident | 1/2 / 1 of 33 | 1/2 / 1 of 38 |
+| held-out healing would-run / wrong / unsafe | 13 / 0 / 1 | 14 / 0 / 1 |
+
+Both sets were used while designing these rules, so this is not a held-out
+estimate. The remaining held-out miss and its unsafe action are the documented
+`two_ledger_deploys/W` fixture flaw. In the sensitivity sweep
+(`testdata/sensitivity_postfix.json`), all four new parameters are STABLE, which
+mostly means these sets barely exercise them; the regression tests are where
+they are exercised. The post-fix independent run is in `INDEPENDENT.md`.
+
 
 ## Independent set and the shared evaluation
 

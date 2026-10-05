@@ -2108,6 +2108,11 @@ func TestMeasurementsAloneAreNeverARootCause(t *testing.T) {
 		}
 		return r
 	}
+	ruledOut := func(typ, why string) *Result {
+		r := only(typ, "log_error")
+		r.Candidates[0].NotRoot = why
+		return r
+	}
 	for _, c := range []struct {
 		name string
 		r    *Result
@@ -2115,8 +2120,13 @@ func TestMeasurementsAloneAreNeverARootCause(t *testing.T) {
 	}{
 		{"nothing", only(), VerdictNoRootCause},
 		{"logs and alerts", only("log_error", "error_spike", "latency_spike"), VerdictNoRootCause},
-		{"a change among them", only("log_error", "deploy"), VerdictRootCause},
+		{"a change leading the measurements", only("deploy", "log_error"), VerdictRootCause},
 		{"a pod failure fact", only("became_unready"), VerdictRootCause},
+		// The answer is its leader: a measurement nothing explains, with a weaker
+		// change elsewhere, is not that change's doing.
+		{"a measurement leading an unrelated change", only("log_error", "deploy"), VerdictNoRootCause},
+		{"a capacity increase", ruledOut("scale", "adds replicas"), VerdictNoRootCause},
+		{"a new pod's crash", ruledOut("container_restart", "created during the incident"), VerdictNoRootCause},
 	} {
 		if got := verdictOf(c.r); got != c.want {
 			t.Errorf("%s: verdict %q, want %q", c.name, got, c.want)

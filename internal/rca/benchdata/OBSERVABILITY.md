@@ -66,7 +66,21 @@ configured. (`terraform_run` and `commit` have no tuned weight.)
 
 * **No recorded root event** (only logs and metrics): `verdict: no_root_cause`.
   The failure's first appearance is still shown, labelled as not a cause.
+* **The answer would lead with something that cannot be a cause** (a
+  measurement, an effect, a capacity increase): `verdict: no_root_cause`, even
+  when weaker changes sit behind it. Each ruled-out candidate carries `not_root`
+  saying why, and the console marks it "not a cause".
+* **A rollout whose change was not recorded** (the change ingested too late, or
+  missed in a collector gap): the new pod's failures, and the old pod's shutdown,
+  are effects of something unobserved, so the answer is `no_root_cause`, not the
+  restart. This needs the pod's creation inside the analysis window; a pod
+  created earlier looks established, and its failure is still named (asserted in
+  `TestF2ThePodsCreationMustBeInsideTheWindow`).
 * **Several roots the record cannot separate**: `verdict: ambiguous`, with the
   alternatives listed and named in the explanation. Healing declines to act.
+  Corroboration is topological: a change that could reach the observed failures
+  stays a rival even if its own component shows nothing (silence is not health).
 * **A weak single candidate**: `verdict: inconclusive`.
+* For `no_root_cause` the confidence field is the strength of the leading
+  evidence, not confidence in a cause; the console shows no percentage for it.
 * The LLM, when enabled, only narrates this result. It never ranks or decides.

@@ -35,7 +35,7 @@ func (n *OpenAICompatibleNarrator) Narrate(ctx context.Context, result *Result) 
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
-	prompt := fmt.Sprintf("Explain this completed root-cause analysis in 3-5 sentences. Do not add causes. If confidence is below 0.5, explicitly say it is inconclusive. If verdict is 'ambiguous', name every alternative and say the evidence cannot separate them. If verdict is 'no_root_cause', say no root cause was observed.\n%s", mustJSON(result))
+	prompt := fmt.Sprintf("Explain this completed root-cause analysis in 3-5 sentences. Do not add causes. If confidence is below 0.5, explicitly say it is inconclusive. If verdict is 'ambiguous', name every alternative and say the evidence cannot separate them. If verdict is 'no_root_cause', say no root cause was observed. Never present a candidate with 'not_root' set as a cause; give its not_root reason instead.\n%s", mustJSON(result))
 	body, err := json.Marshal(map[string]any{"model": n.Model, "temperature": 0.1, "messages": []message{{"system", "You are an SRE assistant. Explain only the supplied ranked evidence."}, {"user", prompt}}})
 	if err != nil {
 		return "", err

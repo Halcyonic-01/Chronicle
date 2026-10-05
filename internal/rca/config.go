@@ -52,6 +52,19 @@ type Config struct {
 	// the leader's score is a plausible alternative, and the verdict is
 	// ambiguous. Chosen as "within 20%" by reasoning, not fitted to a benchmark.
 	AmbiguityRatio float64
+
+	// NonRootFactor damps what the evidence says is not the current cause: a
+	// capacity increase, or a change whose incident already recovered.
+	NonRootFactor float64
+	// UncorroboratedFactor damps a change that explains none of the observed
+	// failures while failures it cannot explain were seen.
+	UncorroboratedFactor float64
+	// TerminationGrace: a pod going unready this close before its deletion is
+	// being shut down (Kubernetes' default grace period), not failing.
+	TerminationGrace time.Duration
+	// NewPodWindow: a failure this soon after a controller created the pod is
+	// an effect of whatever made the controller act (a rollout's horizon).
+	NewPodWindow time.Duration
 }
 
 // DefaultConfig returns the shipped values. Every field copies what the package
@@ -79,6 +92,9 @@ func DefaultConfig() *Config {
 		EpisodeGap: episodeGap, LogEpisodeGap: logEpisodeGap, RestartGap: restartGap,
 		FlapWindow: flapWindow, MaxEpisode: maxEpisode, SettleAfterChange: settleAfterChange,
 		InconclusiveBelow: 0.5, AmbiguityRatio: 0.8,
+		// Chosen a priori: as weak as propagation, and "half as plausible".
+		NonRootFactor: propagationFactor, UncorroboratedFactor: 0.5,
+		TerminationGrace: 30 * time.Second, NewPodWindow: 15 * time.Minute,
 	}
 }
 

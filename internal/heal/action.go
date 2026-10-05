@@ -15,6 +15,7 @@ import (
 
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/oklog/ulid/v2"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -96,6 +97,20 @@ func formatBelow(value, floor float64) (string, string) {
 	}
 	// Shortest form that round-trips: two different float64s cannot collide.
 	return strconv.FormatFloat(value, 'g', -1, 64), strconv.FormatFloat(floor, 'g', -1, 64)
+}
+
+// precondition says why an action does not fit its cause, or "" when it does.
+// Replicas are restored only after a scale to zero: any other scale is capacity
+// management, and undoing it would fight whoever made it.
+func precondition(actionType string, payload json.RawMessage) string {
+	if actionType != ActionRestoreReplicas {
+		return ""
+	}
+	from, to := gjson.GetBytes(payload, "old_replicas").Int(), gjson.GetBytes(payload, "new_replicas").Int()
+	if from <= 0 || to != 0 {
+		return fmt.Sprintf("not a scale to zero (%d to %d); restoring replicas does not apply", from, to)
+	}
+	return ""
 }
 
 type AuditStore interface {
@@ -189,6 +204,10 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	// a node failure restarts no pod, and an autoscaler limit is not undone by
 	// restoring replicas.
 	top := result.Candidates[0]
+	if top.NotRoot != "" {
+		action.Result = "the leading candidate is not a cause: " + top.NotRoot
+		return action, e.Store.RecordAction(ctx, action)
+	}
 	var rule *Rule
 	for i := range e.Rules {
 		if e.Rules[i].CauseType == top.Event.Type {
@@ -208,6 +227,11 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	action.Confidence, action.Reasoning = result.Confidence, append([]string(nil), top.Reasons...)
 	if rule.RequireApprove {
 		action.Approval = ApprovalPending
+	}
+	// Never plan what the executor would refuse.
+	if reason := precondition(rule.ActionType, top.Event.Payload); reason != "" {
+		action.Result = reason
+		return action, e.Store.RecordAction(ctx, action)
 	}
 	if result.Confidence < rule.MinConfidence {
 		action.Status = StatusBlocked
