@@ -29,6 +29,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/rca/benchdata"
+	"github.com/tidwall/gjson"
 )
 
 // appropriateAction is the remedy that actually addresses each injected cause.
@@ -85,26 +86,26 @@ func analyze(t *testing.T, profile string, inc benchdata.Incident) *rca.Result {
 // simulatedFollowUps is what the cluster would show after a decision: if the
 // proposed action is the right one it is carried out and the symptom recovers;
 // if it is not, the symptom recovers only after somebody makes the real fix.
-func simulatedFollowUps(a *Action, appropriate bool) []event.Event {
+func simulatedFollowUps(a *Action, symptom string, appropriate bool) []event.Event {
 	fix := func() event.Event {
 		switch a.ActionType {
 		case ActionRestoreReplicas:
 			return ev("scale", a.Target, a.Target+" scaled from 0 to 1", `{"old_replicas":0,"new_replicas":1}`)
 		case ActionRollbackDeployment:
-			return ev("deploy", a.Target, a.Target+" rolled back", `{}`)
+			return ev("deploy", a.Target, a.Target+" rolled back", fmt.Sprintf(`{"new_image":%q}`, gjson.GetBytes(a.Payload, "old_image").String()))
 		case ActionBumpMemory:
-			return ev("resource_change", a.Target, a.Target+" memory raised", `{}`)
+			return ev("resource_change", gjson.GetBytes(a.Payload, "owner").String(), a.Target+" memory raised", `{"old_mem_limit":1,"new_mem_limit":2}`)
 		default:
 			e := ev("resource_deleted", a.Target, a.Target+" deleted", `{}`)
 			e.EntityKind = "Pod"
 			return e
 		}
 	}
-	recovery := ev("error_spike_resolved", "frontend", "high_error_rate resolved", `{}`)
+	recovery := ev("error_spike_resolved", symptom, "high_error_rate resolved", `{}`)
 	if appropriate {
 		return []event.Event{fix(), recovery}
 	}
-	return []event.Event{ev("config_change", "somebody-else", "the real fix", `{}`), recovery}
+	return []event.Event{ev("config_change", symptom, "the real fix", `{}`), recovery}
 }
 
 func runHealing(t *testing.T, profile string, incidents []benchdata.Incident) []healRow {
@@ -130,8 +131,10 @@ func runHealing(t *testing.T, profile string, incidents []benchdata.Incident) []
 		}
 		// What the engine actually decides with the shipped floors.
 		shipped := NewEngine(&memoryAudit{})
+		var decided *Action
 		if action, err := shipped.Evaluate(context.Background(), result); err == nil && action != nil {
 			row.WouldRun = action.Status == StatusWouldRun
+			decided = action
 		}
 		for _, tr := range inc.Truths {
 			if row.Action != "" && appropriateAction[tr.Type] == row.Action {
@@ -139,25 +142,13 @@ func runHealing(t *testing.T, profile string, incidents []benchdata.Incident) []
 			}
 		}
 		if row.WouldRun {
-			a := &Action{ActionType: row.Action, Namespace: "default", Target: targetOf(result), Payload: nil}
-			row.Outcome, _ = classifyOutcome(a, simulatedFollowUps(a, row.Appropriate))
+			a := decided
+			symptom := SymptomRef{Namespace: "default", Name: inc.Symptom.EntityName}
+			row.Outcome, _ = classifyOutcome(a, symptom, simulatedFollowUps(a, symptom.Name, row.Appropriate))
 		}
 		rows = append(rows, row)
 	}
 	return rows
-}
-
-func targetOf(r *rca.Result) string {
-	if len(r.Candidates) == 0 {
-		return ""
-	}
-	top := r.Candidates[0]
-	for _, c := range r.Candidates[1:] {
-		if c.Score > top.Score {
-			top = c
-		}
-	}
-	return top.Event.EntityName
 }
 
 func report(t *testing.T, label string, rows []healRow) {

@@ -1,0 +1,32 @@
+# The same UPDATE requests from another user: the policies are about Chronicle only, so every one skips.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: other-update
+policies:
+  - ../../chronicle-heal-guardrails.yaml
+resources:
+  - ../resources.yaml
+userinfo: ../userinfo-other.yaml
+variables: ../values-update.yaml
+results:
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [coredns]
+    result: skip
+  - policy: chronicle-heal-no-gitops-writes
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [shop-api]
+    result: skip
+  - policy: chronicle-heal-no-privilege-widening
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [host-network]
+    result: skip
+  - policy: chronicle-heal-replica-ceiling
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [huge]
+    result: skip

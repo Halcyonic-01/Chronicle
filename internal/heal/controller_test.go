@@ -16,14 +16,20 @@ import (
 type executionMemory struct {
 	claimed bool
 	status  string
+	refusal string
+	request ClaimRequest
 }
 
-func (m *executionMemory) ClaimExecution(context.Context, string, time.Time) (bool, error) {
+func (m *executionMemory) ClaimExecution(_ context.Context, req ClaimRequest) (bool, string, error) {
+	m.request = req
+	if m.refusal != "" {
+		return false, m.refusal, nil
+	}
 	if m.claimed {
-		return false, nil
+		return false, "", nil
 	}
 	m.claimed = true
-	return true, nil
+	return true, "", nil
 }
 func (m *executionMemory) CompleteExecution(_ context.Context, _ string, status, _, _, _ string) error {
 	m.status = status
@@ -40,13 +46,27 @@ func (e *recordingExecutor) Verify(context.Context, *Action) (string, error) { r
 
 func livePolicy() Policy {
 	return Policy{
-		LiveEnabled:       true,
-		AllowedActions:    map[string]bool{ActionRestartPod: true},
-		AllowedNamespaces: map[string]bool{"default": true},
-		AllowedTargets:    map[string]bool{"default/redis": true},
-		ObservationSince:  time.Now().Add(-31 * 24 * time.Hour),
-		Timeout:           time.Second,
+		LiveEnabled:          true,
+		AllowedActions:       map[string]bool{ActionRestartPod: true},
+		AllowedNamespaces:    map[string]bool{"default": true},
+		AllowedTargets:       map[string]bool{"default/redis": true},
+		ObservationSince:     time.Now().Add(-31 * 24 * time.Hour),
+		Timeout:              time.Second,
+		MaxExecutionsPerHour: 3,
+		TargetCooldown:       30 * time.Minute,
 	}
+}
+
+// approvedRestart is a decision as the worker receives it.
+func approvedRestart(id string) *Action {
+	expires := time.Now().Add(10 * time.Minute)
+	return &Action{ID: id, Rule: "restart-deadlocked-pod", ActionType: ActionRestartPod, Namespace: "default",
+		Target: "redis-6d79c4d8db-8jp47", Workload: "redis", Payload: []byte(`{"owner":"redis"}`),
+		Confidence: 0.9, Status: StatusApproved, Approval: ApprovalApproved, DryRun: true, ExpiresAt: &expires}
+}
+
+func liveController(store ExecutionStore, executor Executor) *Controller {
+	return &Controller{Store: store, Executor: executor, Policy: livePolicy(), Rules: append([]Rule(nil), defaultRules...)}
 }
 
 func TestPolicyAllowsOnlyAllowlistedPodRestart(t *testing.T) {
@@ -65,14 +85,17 @@ func TestPolicyAllowsOnlyAllowlistedPodRestart(t *testing.T) {
 func TestControllerExecutesAndVerifiesApprovedRestart(t *testing.T) {
 	store := &executionMemory{}
 	executor := &recordingExecutor{}
-	controller := &Controller{Store: store, Executor: executor, Policy: livePolicy()}
-	action := &Action{ID: "action-1", ActionType: ActionRestartPod, Namespace: "default", Target: "redis", Approval: ApprovalApproved, DryRun: true}
-	got, err := controller.ExecuteApproved(context.Background(), action)
+	controller := liveController(store, executor)
+	got, err := controller.ExecuteApproved(context.Background(), approvedRestart("action-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if executor.calls != 1 || store.status != StatusSucceeded || got.Verification != "verified" || got.DryRun {
 		t.Fatalf("unexpected execution: %+v", got)
+	}
+	// The claim carried the limits, keyed on the workload, not the pod.
+	if r := store.request; r.Workload != "redis" || r.RuleMaxPerHour != 3 || r.MaxPerHour != 3 || r.Cooldown != 30*time.Minute {
+		t.Fatalf("the claim did not carry the execution limits: %+v", r)
 	}
 }
 
@@ -81,9 +104,9 @@ func TestControllerKillSwitchBlocksWithoutExecutorCall(t *testing.T) {
 	executor := &recordingExecutor{}
 	policy := livePolicy()
 	policy.KillSwitch = true
-	controller := &Controller{Store: store, Executor: executor, Policy: policy}
-	action := &Action{ID: "action-2", ActionType: ActionRestartPod, Namespace: "default", Target: "redis", Approval: ApprovalApproved}
-	if _, err := controller.ExecuteApproved(context.Background(), action); err == nil {
+	controller := liveController(store, executor)
+	controller.Policy = policy
+	if _, err := controller.ExecuteApproved(context.Background(), approvedRestart("action-2")); err == nil {
 		t.Fatal("kill switch did not block")
 	}
 	if executor.calls != 0 || store.status != StatusBlocked {
@@ -110,8 +133,8 @@ type stubStore struct {
 	claimed  bool
 }
 
-func (s *stubStore) ClaimExecution(context.Context, string, time.Time) (bool, error) {
-	return s.claimed, nil
+func (s *stubStore) ClaimExecution(context.Context, ClaimRequest) (bool, string, error) {
+	return s.claimed, "", nil
 }
 func (s *stubStore) CompleteExecution(context.Context, string, string, string, string, string) error {
 	return nil
@@ -355,5 +378,117 @@ func TestBlockedButCorrectIsReportedNotCredited(t *testing.T) {
 	}
 	if err := p.Allows(&Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis"}); err == nil {
 		t.Fatal("38 correctly-declined decisions are not evidence that acting is safe")
+	}
+}
+
+// Issues 1 and 2: only an approved, unexpired decision that still clears
+// today's rule can run; anything else is blocked for good, unexecuted.
+func TestOnlyApprovedUnexpiredDecisionsExecute(t *testing.T) {
+	past := time.Now().Add(-time.Minute)
+	cases := map[string]func(a *Action){
+		"expired approval":      func(a *Action) { a.ExpiresAt = &past },
+		"no deadline recorded":  func(a *Action) { a.ExpiresAt = nil },
+		"still pending":         func(a *Action) { a.Status, a.Approval = StatusWouldRun, ApprovalPending },
+		"denied":                func(a *Action) { a.Status, a.Approval = StatusDenied, ApprovalDenied },
+		"previously blocked":    func(a *Action) { a.Status = StatusBlocked },
+		"below today's floor":   func(a *Action) { a.Confidence = 0.5 },
+		"rule no longer exists": func(a *Action) { a.Rule = "retired-rule" },
+		"precondition fails": func(a *Action) {
+			a.ActionType, a.Rule, a.Payload = ActionRestoreReplicas, "restore-scaled-down-workload", []byte(`{"old_replicas":3,"new_replicas":1}`)
+		},
+	}
+	for name, mutate := range cases {
+		store := &executionMemory{}
+		executor := &recordingExecutor{}
+		action := approvedRestart("a-" + name)
+		mutate(action)
+		_, err := liveController(store, executor).ExecuteApproved(context.Background(), action)
+		if err == nil || executor.calls != 0 || store.claimed {
+			t.Errorf("%s: executed or claimed (err=%v calls=%d claimed=%v)", name, err, executor.calls, store.claimed)
+		}
+	}
+}
+
+// Issue 4: a limit or cooldown refused at claim time blocks the decision for
+// good; it is never executed later.
+func TestAClaimRefusalBlocksWithoutExecuting(t *testing.T) {
+	store := &executionMemory{refusal: "default/redis was acted on 2m0s ago (cooldown 30m0s)"}
+	executor := &recordingExecutor{}
+	got, err := liveController(store, executor).ExecuteApproved(context.Background(), approvedRestart("a-cool"))
+	if err == nil || executor.calls != 0 || store.status != StatusBlocked || got.Status != StatusBlocked {
+		t.Fatalf("a refused claim must block without executing: err=%v calls=%d status=%s", err, executor.calls, store.status)
+	}
+}
+
+// A decision another worker already claimed is not executed twice.
+func TestAnAlreadyClaimedDecisionIsNotExecutedAgain(t *testing.T) {
+	store := &executionMemory{claimed: true}
+	executor := &recordingExecutor{}
+	if _, err := liveController(store, executor).ExecuteApproved(context.Background(), approvedRestart("a-dup")); err == nil || executor.calls != 0 {
+		t.Fatalf("a decision claimed elsewhere ran again: err=%v calls=%d", err, executor.calls)
+	}
+}
+
+// Issue 10: the allowlist names the workload, and a pod is matched through
+// its owner. The shipped "default/redis" never matched a real pod name.
+func TestAllowlistMatchesTheOwningWorkload(t *testing.T) {
+	p := livePolicy()
+	pod := &Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis-6d79c4d8db-8jp47", Payload: []byte(`{"owner":"redis"}`)}
+	if err := p.Allows(pod); err != nil {
+		t.Fatalf("a pod of the allowlisted workload must be allowed: %v", err)
+	}
+	other := &Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis-cache-5f-x", Payload: []byte(`{"owner":"redis-cache"}`)}
+	if err := p.Allows(other); err == nil {
+		t.Fatal("a pod of another workload must not match by name prefix")
+	}
+}
+
+type queueMemory struct {
+	executionMemory
+	approved            []Action
+	expired, interrupts int
+}
+
+func (q *queueMemory) ApprovedActions(context.Context, time.Time, int) ([]Action, error) {
+	return q.approved, nil
+}
+func (q *queueMemory) ExpireStale(context.Context, time.Time) (int64, error) {
+	q.expired++
+	return 0, nil
+}
+func (q *queueMemory) FailInterrupted(context.Context, time.Time) (int64, error) {
+	q.interrupts++
+	return 0, nil
+}
+
+// Issue 12: with live healing off, the worker only expires and tidies; it
+// never executes an approved decision.
+func TestTheWorkerExecutesNothingWhileLiveIsOff(t *testing.T) {
+	q := &queueMemory{approved: []Action{*approvedRestart("queued")}}
+	executor := &recordingExecutor{}
+	c := liveController(q, executor)
+	c.Policy.LiveEnabled = false
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if executor.calls != 0 || q.expired != 1 || q.interrupts != 1 {
+		t.Fatalf("calls=%d expired=%d interrupts=%d", executor.calls, q.expired, q.interrupts)
+	}
+	c.Policy.LiveEnabled = true
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("with live on, the approved decision should run once, ran %d", executor.calls)
+	}
+}
+
+func TestExecutionLimitsHaveSafeDefaults(t *testing.T) {
+	for _, k := range []string{"HEAL_MAX_EXECUTIONS_PER_HOUR", "HEAL_TARGET_COOLDOWN", "HEAL_VERIFY_TIMEOUT"} {
+		t.Setenv(k, "")
+	}
+	p := PolicyFromEnv()
+	if p.MaxExecutionsPerHour != 3 || p.TargetCooldown != 30*time.Minute || p.VerifyTimeout != 3*time.Minute {
+		t.Fatalf("unexpected defaults: %+v", p)
 	}
 }

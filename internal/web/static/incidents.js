@@ -225,9 +225,9 @@
             <div style="font:11px var(--mono);color:var(--text)">${esc(a.rule || a.action_type || 'no rule matched')}${a.target ? ` → ${esc(a.namespace || 'default')}/${esc(a.target)}` : ''}</div>
             <div style="font:10px var(--mono);color:var(--dim);margin-top:4px">${esc(a.status)} · ${esc(a.result || '')}</div>
           </div>
-          ${a.approval === 'pending' && a.status === 'would_run'
+          ${a.state === 'pending_approval' && (!a.expires_at || new Date(a.expires_at) > new Date())
             ? `<div class="det-act"><button class="k pri" data-approve="${esc(a.id)}">Approve</button><button class="k no" data-deny="${esc(a.id)}">Deny</button></div>`
-            : `<span class="gate">${esc(a.status === 'blocked' ? 'blocked by safety gate' : a.approval)}</span>`}
+            : `<span class="gate">${esc(a.status === 'blocked' ? 'blocked by safety gate' : (a.state || a.approval))}</span>`}
         </div>`).join('')}</div></section>`;
   }
 

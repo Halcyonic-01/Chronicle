@@ -62,6 +62,9 @@ type Config struct {
 	// TerminationGrace: a pod going unready this close before its deletion is
 	// being shut down (Kubernetes' default grace period), not failing.
 	TerminationGrace time.Duration
+	// AllowedLateness is how long after a symptom's ingestion an earlier event
+	// may still arrive and count; it must cover the slowest detector.
+	AllowedLateness time.Duration
 	// NewPodWindow: a failure this soon after a controller created the pod is
 	// an effect of whatever made the controller act (a rollout's horizon).
 	NewPodWindow time.Duration
@@ -95,6 +98,7 @@ func DefaultConfig() *Config {
 		// Chosen a priori: as weak as propagation, and "half as plausible".
 		NonRootFactor: propagationFactor, UncorroboratedFactor: 0.5,
 		TerminationGrace: 30 * time.Second, NewPodWindow: 15 * time.Minute,
+		AllowedLateness: allowedLateness,
 	}
 }
 

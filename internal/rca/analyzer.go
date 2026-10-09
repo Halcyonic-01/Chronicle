@@ -191,7 +191,11 @@ var typeWeight = map[string]float64{
 // symptom can be ingested after it. Bounding the ingestion query by symptom
 // time alone silently drops exactly those events — usually the deploy that
 // caused the incident, because it is noticed last.
-const allowedLateness = 30 * time.Second
+//
+// It must cover the slowest detector: Kubernetes declares a node NotReady about
+// 50s after its last heartbeat, and a 30s allowance dropped the lost node from
+// the analysis of its own first alert (found by a chaos run).
+const allowedLateness = 60 * time.Second
 
 // episodeGap is the longest silence inside one episode; alerts re-notify rather than repeat.
 const episodeGap = 30 * time.Minute
@@ -355,8 +359,8 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		graphInterval = defaultGraphInterval
 	}
 	// An edge recorded just after the symptom was already true at it (sync lag).
-	edgesFrom := symptom.IngestedAt.Add(-cfg.MaxEpisode - back - allowedLateness)
-	edgesTo := symptom.IngestedAt.Add(graphInterval + allowedLateness)
+	edgesFrom := symptom.IngestedAt.Add(-cfg.MaxEpisode - back - cfg.AllowedLateness)
+	edgesTo := symptom.IngestedAt.Add(graphInterval + cfg.AllowedLateness)
 	if windowed, ok := a.Graph.(WindowedEdgeSource); ok {
 		if loaded, edgeErr := windowed.EdgesBetween(ctx, edgesFrom, edgesTo); edgeErr == nil {
 			edges = loaded
@@ -389,8 +393,8 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	}
 
 	// Reach past the symptom by the lateness allowance; causality is judged on event time below.
-	loadedFrom := symptom.IngestedAt.Add(-back - allowedLateness)
-	raw, err := a.Events.EventsBetween(ctx, loadedFrom, symptom.IngestedAt.Add(allowedLateness))
+	loadedFrom := symptom.IngestedAt.Add(-back - cfg.AllowedLateness)
+	raw, err := a.Events.EventsBetween(ctx, loadedFrom, symptom.IngestedAt.Add(cfg.AllowedLateness))
 	if err != nil {
 		return nil, fmt.Errorf("load causal window: %w", err)
 	}
@@ -402,13 +406,13 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 
 	// Measure causes from the onset, not the newest copy, or confidence falls as an outage ages.
 	onset := cfg.episodeOnset(raw, hypothesis, symptom, related)
-	floor := symptom.IngestedAt.Add(-cfg.MaxEpisode - back - allowedLateness)
+	floor := symptom.IngestedAt.Add(-cfg.MaxEpisode - back - cfg.AllowedLateness)
 	reach := back
 	if gap := cfg.episodeGapFor(symptom); gap > reach {
 		reach = gap
 	}
 	for i := 0; i < maxEpisodeLoads; i++ {
-		need := onset.Add(-reach - allowedLateness)
+		need := onset.Add(-reach - cfg.AllowedLateness)
 		if need.Before(floor) {
 			need = floor
 		}
@@ -536,7 +540,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	// events explaining the symptom may not have arrived yet, and a resource
 	// created since the last graph sync has no edges, so nothing it depends on
 	// can be reached. Both make the analysis incomplete rather than wrong.
-	settleFor := allowedLateness
+	settleFor := cfg.AllowedLateness
 	if graphInterval > settleFor {
 		settleFor = graphInterval
 	}
@@ -820,6 +824,7 @@ func scaleToZero(e event.Event) bool {
 // new pod of the same owner, or not).
 func (cfg *Config) podLifecycle(events []event.Event, edges []graph.Edge) func(event.Event) string {
 	created, deleted, owner := map[string]time.Time{}, map[string]time.Time{}, map[string]string{}
+	ready, failed := map[string][]time.Time{}, map[string][]time.Time{} // in causal order
 	for _, e := range edges {
 		if e.Kind == "owns" && e.To.Kind == "Pod" {
 			owner[e.To.Key()] = e.From.Name
@@ -833,7 +838,12 @@ func (cfg *Config) podLifecycle(events []event.Event, edges []graph.Edge) func(e
 		if o := gjson.GetBytes(e.Payload, "owner").String(); o != "" {
 			owner[k] = o
 		}
+		if failureFacts[e.Type] {
+			failed[k] = append(failed[k], causalTime(e))
+		}
 		switch e.Type {
+		case "became_ready":
+			ready[k] = append(ready[k], causalTime(e))
 		case "resource_created":
 			if _, seen := created[k]; !seen && gjson.GetBytes(e.Payload, "owner").String() != "" {
 				created[k] = causalTime(e)
@@ -852,6 +862,28 @@ func (cfg *Config) podLifecycle(events []event.Event, edges []graph.Edge) func(e
 			}
 		}
 		return false
+	}
+	// served reports a pod that was ready for longer than a flap before the
+	// failures leading to at began: it is established, and its own failure can
+	// be a root again (a pod rolled out by an earlier, recovered incident
+	// crashed on its own).
+	served := func(k string, born, at time.Time) bool {
+		var since time.Time
+		for _, r := range ready[k] {
+			if !r.Before(born) && r.Before(at) {
+				since = r
+			}
+		}
+		if since.IsZero() {
+			return false
+		}
+		began := at // the first failure after the last healthy report
+		for _, f := range failed[k] {
+			if f.After(since) && f.Before(began) {
+				began = f
+			}
+		}
+		return began.Sub(since) >= cfg.FlapWindow
 	}
 	return func(e event.Event) string {
 		if e.EntityKind != "Pod" {
@@ -872,7 +904,7 @@ func (cfg *Config) podLifecycle(events []event.Event, edges []graph.Edge) func(e
 			return lifecycleRemoved
 		}
 		if born, ok := created[k]; ok && failureFacts[e.Type] {
-			if d := at.Sub(born); d >= 0 && d <= cfg.NewPodWindow {
+			if d := at.Sub(born); d >= 0 && d <= cfg.NewPodWindow && !served(k, born, at) {
 				return lifecycleNew
 			}
 		}
@@ -1217,6 +1249,7 @@ func (h hypothesisCache) of(e event.Event) string {
 func (cfg *Config) episodeOnset(events []event.Event, hypothesis hypothesisCache, symptom event.Event, related func(event.Event) bool) time.Time {
 	symptomAt, want, gap := causalTime(symptom), hypothesis.of(symptom), cfg.episodeGapFor(symptom)
 	onset := symptomAt
+	inEpisode := map[string]bool{} // entities with a failure already kept in the episode
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
 		at := causalTime(e)
@@ -1231,6 +1264,12 @@ func (cfg *Config) episodeOnset(events []event.Event, hypothesis hypothesisCache
 		if hypothesis.of(e) != want && !related(e) {
 			continue
 		}
+		// A restart elsewhere on the path keeps the episode alive only while
+		// that entity is still unhealthy. One that recovered and stayed healthy
+		// before this failure began is history, not part of it.
+		if hypothesis.of(e) != want && key(e) != key(symptom) && !inEpisode[key(e)] && cfg.healthyBefore(events, i, onset) {
+			continue
+		}
 		allowed := gap
 		if hypothesis.of(e) != want {
 			allowed = cfg.RestartGap // a restart, which backs off for minutes at a time
@@ -1239,8 +1278,34 @@ func (cfg *Config) episodeOnset(events []event.Event, hypothesis hypothesisCache
 			break
 		}
 		onset = at
+		inEpisode[key(e)] = true
 	}
 	return onset
+}
+
+// healthyBefore reports whether the entity of events[i] had recovered from the
+// failure at events[i], and then stayed free of failures for at least FlapWindow
+// up to onset. A crash loop never qualifies: each restart resets the check, and
+// once one of its restarts is in the episode the earlier ones are the same loop.
+func (cfg *Config) healthyBefore(events []event.Event, i int, onset time.Time) bool {
+	k := key(events[i])
+	var recovered time.Time
+	for _, x := range events[i+1:] {
+		at := causalTime(x)
+		if !at.Before(onset) {
+			break
+		}
+		if key(x) != k {
+			continue
+		}
+		switch {
+		case failureFacts[x.Type]:
+			recovered = time.Time{}
+		case isRecovery(x) && recovered.IsZero():
+			recovered = at
+		}
+	}
+	return !recovered.IsZero() && onset.Sub(recovered) >= cfg.FlapWindow
 }
 
 // endsEpisode reports whether e says the symptom's failure was over.

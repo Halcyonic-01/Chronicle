@@ -1,0 +1,39 @@
+# Write access for LIVE healing, granted only in namespaces on the healing
+# allowlist (HEAL_ALLOWED_NAMESPACES). Not part of deploy/chronicle: dry-run
+# needs none of it. Copy the Role and RoleBinding once per allowlisted
+# namespace; never bind it cluster-wide.
+#
+# Apply:   kubectl apply -k deploy/heal-executor
+# Revoke:  kubectl delete -k deploy/heal-executor
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chronicle-heal-executor
+  namespace: default
+rules:
+# restart_pod re-reads the pod, then deletes it with a UID precondition.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "delete"]
+# restore_replicas, bump_memory, rollback_deployment.
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "update"]
+# rollback_deployment reads the previous revision's pod template.
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chronicle-heal-executor
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chronicle-heal-executor
+subjects:
+- kind: ServiceAccount
+  name: chronicle
+  namespace: chronicle

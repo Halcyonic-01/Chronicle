@@ -206,7 +206,8 @@ func TestTimingControllerOwnedPodCreationIsNeverTheCause(t *testing.T) {
 }
 
 // DESIGN LIMIT, asserted so it stays visible: an event is seen only if it was
-// ingested no later than 30 seconds after the symptom's own ingestion. So a
+// ingested no later than 60 seconds after the symptom's own ingestion (enough
+// for a node declared NotReady 50s after its last heartbeat). So a
 // cause observed late is still found when the symptom is recorded soon after,
 // and is lost once the gap exceeds the allowance. An event replayed after a
 // collector gap and stamped when observed lands after the symptom and cannot be
@@ -219,12 +220,12 @@ func TestTimingDelayedObservationIsOnlyToleratedWithinTheLatenessAllowance(t *te
 		r.IngestedAt = symptom.IngestedAt.Add(time.Duration(sec * float64(time.Second)))
 		return analyzeTiming(t, []event.Event{r}, symptom, 1)
 	}
-	for _, sec := range []float64{-30, 0, 25} {
+	for _, sec := range []float64{-30, 0, 25, 55} {
 		if got := ingestedAfterSymptom(sec); !topIs(got, "deploy", "api") {
 			t.Errorf("cause ingested %+.0fs from the symptom's ingestion should be found: %s", sec, describe(got))
 		}
 	}
-	for _, sec := range []float64{35, 120, 400} {
+	for _, sec := range []float64{65, 120, 400} {
 		if got := ingestedAfterSymptom(sec); len(got.Candidates) != 0 {
 			t.Errorf("cause ingested %.0fs after the symptom is outside the allowance and was found: %s", sec, describe(got))
 		}

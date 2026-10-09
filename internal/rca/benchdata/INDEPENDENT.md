@@ -153,6 +153,47 @@ window, so a restart is named at 0.04 (inconclusive). The two delayed incidents
 and the same-instant one have no visible cause and are now declared
 `no_root_cause` rather than guessed.
 
+## Post-onset-fix independent benchmark (chaos-driven changes)
+
+**This is a post-fix rerun, not an untouched estimate, and it is the second one.**
+Since the post-fix run above, live chaos campaigns on a real cluster led to three
+general changes in RCA: the lateness allowance 30s to 60s (node failures are
+declared ~50s after their last heartbeat), a rule that a pod which served
+healthily longer than the flap window is established (not "new"), and the
+episode-onset fix below. None names a fixture, nothing was tuned on this set, and
+the set was run once after each state. RCA source hash `64264b07878b7b87`, rows in
+`internal/rca/testdata/independent_postonsetfix_run.json`.
+
+**The onset fix.** A restart on another entity used to extend an episode backwards
+by up to six minutes even when that entity had recovered and stayed healthy. A
+one-second control-plane blip during cluster start-up then tied with a real
+scale-to-zero 100 seconds later (ambiguous, 0.39). Now a restart extends the
+episode only while its entity is unhealthy; a crash loop never qualifies, because
+each restart resets the check (`internal/rca/onset_test.go`, including a replay of
+the real incident in `internal/rca/testdata/postgres_after_linkerd_blip.json`).
+
+Inside the documented contract (111 incidents):
+
+| Metric | First run (`e43c3425e9c4f0b9`) | Post-fix (`38cf5a83b12ecbfa`) | Post-onset-fix (`64264b07878b7b87`) |
+|---|---|---|---|
+| Top-1, single-cause | 76/78 | 76/78 | 76/78 |
+| Top-3, single-cause | 78/78 | 78/78 | 78/78 |
+| Single-cause called ambiguous | 5 | 2 | 2 |
+| No-root-cause declared | 22/26 | 26/26 | 26/26 |
+| Ambiguity recognised | 7/7 | 7/7 | 7/7 |
+| False confident diagnoses | 1 of 51 | 0 of 59 | 0 of 59 |
+
+All 117: Top-1 77/84, then 78/84 (92.9%), Top-3 80/84.
+
+**What the onset fix did on this set: nothing.** The run with only that rule
+switched off (`testdata/independent_postonsetfix_off_run.json`, hash
+`1b69e68fd0da2fb9`) differs from the run with it on in 0 of 117 incidents. The
+one incident that changed since the post-fix run, `delayed/cause-recorded-120s-late`
+(missed to correct), is due to the lateness allowance, as that incident is about a
+cause recorded 120s late. The development and held-out reports are byte-identical
+before and after the onset fix. The fix is therefore supported by its own
+regression tests and the real incident, not by this benchmark.
+
 ## What was not asked of this set
 
 It does not measure healing outcomes (none are simulated), calibration against

@@ -1,0 +1,52 @@
+# CREATE requests made by Chronicle: each policy catches its violation and passes a benign one.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: chronicle-create
+policies:
+  - ../../chronicle-heal-guardrails.yaml
+resources:
+  - ../resources.yaml
+userinfo: ../userinfo-chronicle.yaml
+variables: ../values-create.yaml
+results:
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api, shop-api]
+    result: pass
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [coredns]
+    result: fail
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [new-pod, api-5f-abc]
+    result: pass
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [coredns-7d-xyz]
+    result: fail
+  - policy: chronicle-heal-never-create
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api, coredns]
+    result: fail
+  - policy: chronicle-heal-never-create
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [new-pod, debug]
+    result: fail
+  - policy: chronicle-heal-no-privilege-widening
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api, shop-api, huge]
+    result: pass
+  - policy: chronicle-heal-no-privilege-widening
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [host-network, privileged, host-path, privileged-init]
+    result: fail

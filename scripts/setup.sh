@@ -14,6 +14,12 @@ fi
 # Ensure context is set
 kubectl cluster-info --context kind-chronicle
 
+# Dedicate the second worker to chaos targets before anything is scheduled: a
+# lost-node experiment (docker pause) then takes out the victim's redis only,
+# never Chronicle, its storage or the monitoring that observes the fault.
+kubectl --context kind-chronicle label node chronicle-worker2 chronicle.io/chaos-target=true --overwrite
+kubectl --context kind-chronicle taint node chronicle-worker2 chronicle.io/chaos-target=true:NoSchedule --overwrite
+
 # 2. Install monitoring stack (Prometheus, Grafana, Alertmanager)
 echo "Installing Prometheus and Grafana..."
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts

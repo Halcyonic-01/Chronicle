@@ -12,23 +12,22 @@ rules:
 # Chronicle never reads Secret contents. Secrets appear in the dependency graph
 # only through the pod specs that reference them, so cluster-wide read access to
 # every Secret in the cluster is deliberately NOT granted here.
+#
+# Read-only cluster-wide. Dry-run healing needs no write access at all: the
+# verbs live healing needs are granted per allowlisted namespace by the opt-in
+# overlay in deploy/heal-executor, never here.
 - apiGroups: ["", "apps", "networking.k8s.io"]
   resources: ["pods", "events", "services", "nodes", "configmaps", "persistentvolumeclaims", "deployments", "ingresses"]
   verbs: ["get", "list", "watch"]
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["delete"]
-- apiGroups: ["apps"]
-  resources: ["deployments"]
-  verbs: ["get", "update", "patch"]
-# Read-only. The replica-restore action refuses to write spec.replicas when an
-# autoscaler already owns that field, and it needs to see the HPAs to know.
+# The replica-restore action refuses to write spec.replicas when an autoscaler
+# already owns that field, and it needs to see the HPAs to know.
 - apiGroups: ["autoscaling"]
   resources: ["horizontalpodautoscalers"]
   verbs: ["get", "list", "watch"]
+# Node heartbeats date node failures (kube-node-lease).
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
-  verbs: ["get", "create", "update"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -65,6 +64,31 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: chronicle-collector-state
+subjects:
+- kind: ServiceAccount
+  name: chronicle
+  namespace: chronicle
+---
+# Leader election writes one Lease, in Chronicle's own namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chronicle-leader-election
+  namespace: chronicle
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chronicle-leader-election
+  namespace: chronicle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chronicle-leader-election
 subjects:
 - kind: ServiceAccount
   name: chronicle

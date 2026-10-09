@@ -19,14 +19,18 @@ type ArgoCollector struct {
 	baseURL string
 	token   string
 	seen    map[string]string
+	// apps receives the Application names Argo CD reports on every poll.
+	apps *graph.ApplicationSet
 }
 
-func NewArgoCollectorFromEnv(out chan<- event.Event) *ArgoCollector {
+// apps is optional; when given, it is kept current with the Applications Argo CD
+// reports, so others can tell a real Application from a Helm release.
+func NewArgoCollectorFromEnv(out chan<- event.Event, apps *graph.ApplicationSet) *ArgoCollector {
 	baseURL := strings.TrimRight(os.Getenv("ARGOCD_URL"), "/")
 	if baseURL == "" {
 		return nil
 	}
-	return &ArgoCollector{BaseCollector: BaseCollector{Out: out}, client: &http.Client{Timeout: 10 * time.Second}, baseURL: baseURL, token: os.Getenv("ARGOCD_TOKEN"), seen: make(map[string]string)}
+	return &ArgoCollector{BaseCollector: BaseCollector{Out: out}, client: &http.Client{Timeout: 10 * time.Second}, baseURL: baseURL, token: os.Getenv("ARGOCD_TOKEN"), seen: make(map[string]string), apps: apps}
 }
 
 func (a *ArgoCollector) Run(ctx context.Context) error {
@@ -80,6 +84,15 @@ func (a *ArgoCollector) poll(ctx context.Context) error {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return err
+	}
+	if a.apps != nil {
+		names := make([]string, 0, len(response.Items))
+		for _, app := range response.Items {
+			if app.Metadata.Name != "" {
+				names = append(names, app.Metadata.Name)
+			}
+		}
+		a.apps.Replace(names)
 	}
 	for _, app := range response.Items {
 		name := app.Metadata.Name

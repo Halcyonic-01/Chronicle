@@ -1,0 +1,22 @@
+# The same DELETE requests from another user: the policies are about Chronicle only, so every one skips.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: other-delete
+policies:
+  - ../../chronicle-heal-guardrails.yaml
+resources:
+  - ../resources.yaml
+userinfo: ../userinfo-other.yaml
+variables: ../values-delete.yaml
+results:
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [coredns-7d-xyz]
+    result: skip
+  - policy: chronicle-heal-delete-controlled-pods
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [debug]
+    result: skip

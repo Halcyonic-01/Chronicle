@@ -1,0 +1,210 @@
+# Defence in depth for Chronicle's live healing. These policies repeat, at the
+# API server, refusals Chronicle already makes in code; they are a backstop if
+# that code is wrong, not a replacement for it.
+#
+# Every policy starts in Audit: violations are recorded (PolicyReports,
+# events) and nothing is blocked. Move a policy to Deny only after its reports
+# have been reviewed against real executions. See internal/heal/README.md.
+#
+# CEL ValidatingPolicy (policies.kyverno.io/v1, Kyverno >= 1.17). Tested with
+# the 1.19 CLI (make kyverno-test). The namespace list in
+# chronicle-heal-namespaces must match HEAL_ALLOWED_NAMESPACES in
+# deploy/chronicle/deployment.yaml; deploy/manifests_test.go checks it.
+#
+# Shared choices, repeated per policy because each policy has one match scope:
+#  - matchConditions limit every policy to Chronicle's service account.
+#  - failurePolicy Ignore: a policy fault must never block healing or the
+#    cluster; the Chronicle code path has its own checks.
+#  - background and autogen off: the rules read who made the request, which
+#    exists only at admission, and pod rules must not be copied onto controllers.
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: chronicle-heal-namespaces
+  annotations:
+    policies.kyverno.io/title: Chronicle changes only allowlisted namespaces
+    policies.kyverno.io/category: Self-healing
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  evaluation: {background: {enabled: false}}
+  autogen: {podControllers: {controllers: []}}
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [pods]}
+      - {apiGroups: [apps], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [deployments]}
+  matchConditions:
+    - name: chronicle-service-account
+      expression: "request.userInfo.username == 'system:serviceaccount:chronicle:chronicle'"
+  variables:
+    # A DELETE carries only the old object. Keyed on the operation, not on
+    # object being null: the admission server sends null, the CLI an empty map.
+    - name: target
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+  validations:
+    - expression: "variables.target.metadata.namespace in ['default']"
+      messageExpression: "'Chronicle may change Pods and Deployments only in namespaces on its healing allowlist, not ' + variables.target.metadata.namespace"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: chronicle-heal-never-create
+  annotations:
+    policies.kyverno.io/title: Chronicle never creates workloads
+    policies.kyverno.io/category: Self-healing
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  evaluation: {background: {enabled: false}}
+  autogen: {podControllers: {controllers: []}}
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [""], apiVersions: [v1], operations: [CREATE], resources: [pods]}
+      - {apiGroups: [apps], apiVersions: [v1], operations: [CREATE], resources: [deployments, replicasets, statefulsets, daemonsets]}
+      - {apiGroups: [batch], apiVersions: [v1], operations: [CREATE], resources: [jobs, cronjobs]}
+  matchConditions:
+    - name: chronicle-service-account
+      expression: "request.userInfo.username == 'system:serviceaccount:chronicle:chronicle'"
+  validations:
+    - expression: "false"
+      message: "Chronicle restarts, scales and reverts existing workloads; it never creates one."
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: chronicle-heal-delete-controlled-pods
+  annotations:
+    policies.kyverno.io/title: Chronicle deletes only pods a controller recreates
+    policies.kyverno.io/category: Self-healing
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  evaluation: {background: {enabled: false}}
+  autogen: {podControllers: {controllers: []}}
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [""], apiVersions: [v1], operations: [DELETE], resources: [pods]}
+  matchConditions:
+    - name: chronicle-service-account
+      expression: "request.userInfo.username == 'system:serviceaccount:chronicle:chronicle'"
+  validations:
+    # The executor requires a controller reference, so the policy does too.
+    - expression: "has(oldObject.metadata.ownerReferences) && oldObject.metadata.ownerReferences.exists(r, has(r.controller) && r.controller)"
+      messageExpression: "'Chronicle may delete only a Pod a controller recreates; ' + oldObject.metadata.name + ' has no controller.'"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: chronicle-heal-no-gitops-writes
+  annotations:
+    policies.kyverno.io/title: Chronicle does not write GitOps-managed workloads
+    policies.kyverno.io/category: Self-healing
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  evaluation: {background: {enabled: false}}
+  autogen: {podControllers: {controllers: []}}
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [apps], apiVersions: [v1], operations: [UPDATE], resources: [deployments]}
+  matchConditions:
+    - name: chronicle-service-account
+      expression: "request.userInfo.username == 'system:serviceaccount:chronicle:chronicle'"
+  variables:
+    - name: labels
+      expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
+    - name: annotations
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+  validations:
+    - expression: >-
+        !(('argocd.argoproj.io/tracking-id' in variables.annotations && variables.annotations['argocd.argoproj.io/tracking-id'] != '') ||
+          ('argocd.argoproj.io/instance' in variables.labels && variables.labels['argocd.argoproj.io/instance'] != '') ||
+          ('kustomize.toolkit.fluxcd.io/name' in variables.labels && variables.labels['kustomize.toolkit.fluxcd.io/name'] != '') ||
+          ('helm.toolkit.fluxcd.io/name' in variables.labels && variables.labels['helm.toolkit.fluxcd.io/name'] != ''))
+      messageExpression: "oldObject.metadata.name + ' is reconciled from Git; revert the change there instead.'"
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: chronicle-heal-no-privilege-widening
+  annotations:
+    policies.kyverno.io/title: Chronicle cannot widen a workload's privileges
+    policies.kyverno.io/category: Self-healing
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  evaluation: {background: {enabled: false}}
+  autogen: {podControllers: {controllers: []}}
+  matchConstraints:
+    resourceRules:
+      # CREATE has no old object, so everything it grants counts as new; that is
+      # also what lets the CLI tests exercise these expressions.
+      - {apiGroups: [apps], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [deployments]}
+  matchConditions:
+    - name: chronicle-service-account
+      expression: "request.userInfo.username == 'system:serviceaccount:chronicle:chronicle'"
+  variables:
+    # Only what Chronicle's write ADDS is judged: a workload that was already
+    # privileged is not a violation just because Chronicle restarts it.
+    - name: pod
+      expression: "object.spec.template.spec"
+    - name: oldPod
+      expression: "request.operation == 'CREATE' ? {} : oldObject.spec.template.spec"
+    - name: privileged
+      expression: >-
+        ((has(variables.pod.containers) ? variables.pod.containers : []) + (has(variables.pod.initContainers) ? variables.pod.initContainers : []))
+        .filter(c, has(c.securityContext) && has(c.securityContext.privileged) && c.securityContext.privileged).map(c, c.name)
+    - name: oldPrivileged
+      expression: >-
+        ((has(variables.oldPod.containers) ? variables.oldPod.containers : []) + (has(variables.oldPod.initContainers) ? variables.oldPod.initContainers : []))
+        .filter(c, has(c.securityContext) && has(c.securityContext.privileged) && c.securityContext.privileged).map(c, c.name)
+    - name: hostPaths
+      expression: >-
+        (has(variables.pod.volumes) ? variables.pod.volumes : []).filter(v, has(v.hostPath)).map(v, v.name + '=' + v.hostPath.path)
+    - name: oldHostPaths
+      expression: >-
+        (has(variables.oldPod.volumes) ? variables.oldPod.volumes : []).filter(v, has(v.hostPath)).map(v, v.name + '=' + v.hostPath.path)
+  validations:
+    - expression: >-
+        request.operation == 'CREATE' ||
+        (has(variables.pod.serviceAccountName) ? variables.pod.serviceAccountName : 'default') ==
+        (has(variables.oldPod.serviceAccountName) ? variables.oldPod.serviceAccountName : 'default')
+      message: "Chronicle must not change a workload's service account."
+    - expression: >-
+        !(has(variables.pod.hostNetwork) && variables.pod.hostNetwork && !(has(variables.oldPod.hostNetwork) && variables.oldPod.hostNetwork)) &&
+        !(has(variables.pod.hostPID) && variables.pod.hostPID && !(has(variables.oldPod.hostPID) && variables.oldPod.hostPID)) &&
+        !(has(variables.pod.hostIPC) && variables.pod.hostIPC && !(has(variables.oldPod.hostIPC) && variables.oldPod.hostIPC))
+      message: "Chronicle must not give a workload access to the host's network or process namespaces."
+    - expression: "variables.privileged.all(n, n in variables.oldPrivileged)"
+      message: "Chronicle must not make a container privileged."
+    - expression: "variables.hostPaths.all(h, h in variables.oldHostPaths)"
+      message: "Chronicle must not mount host paths."
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: chronicle-heal-replica-ceiling
+  annotations:
+    policies.kyverno.io/title: Chronicle restores replicas to at most 20
+    policies.kyverno.io/category: Self-healing
+    policies.kyverno.io/severity: medium
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  evaluation: {background: {enabled: false}}
+  autogen: {podControllers: {controllers: []}}
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [apps], apiVersions: [v1], operations: [UPDATE], resources: [deployments]}
+  matchConditions:
+    - name: chronicle-service-account
+      expression: "request.userInfo.username == 'system:serviceaccount:chronicle:chronicle'"
+  validations:
+    - expression: "!has(object.spec.replicas) || object.spec.replicas <= 20"
+      messageExpression: "'Chronicle restores replicas to the count a workload had; ' + string(object.spec.replicas) + ' exceeds the ceiling of 20.'"

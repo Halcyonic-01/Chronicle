@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/graph"
 )
 
 type K8sCollector struct {
@@ -30,6 +31,9 @@ type K8sCollector struct {
 	// checkpoints remembers what was last seen, so a new leader can report
 	// what changed while no one was watching. Nil disables it.
 	checkpoints checkpointStore
+	// Applications, when set, says which app.kubernetes.io/instance values are
+	// Argo CD Applications (see graph.GitOpsManager).
+	Applications graph.KnownApplication
 }
 
 func NewK8sCollector(client kubernetes.Interface, out chan<- event.Event) *K8sCollector {
@@ -341,12 +345,12 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "deploy",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s deployed: %s -> %s", new.Name, shortTag(oldImg), shortTag(newImg)),
-			Payload: mustJSON(map[string]any{
+			Payload: mustJSON(k.withGitOps(new, map[string]any{
 				"old_image":  oldImg,
 				"new_image":  newImg,
 				"commit_sha": extractSHA(newImg),
 				"changed_by": changedBy,
-			}),
+			})),
 		})
 	}
 
@@ -362,7 +366,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "resource_change",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s resource limits changed", new.Name),
-			Payload:    mustJSON(map[string]any{"new_mem_limit": memoryLimit(new.Spec.Template.Spec.Containers[0]), "old_mem_limit": memoryLimit(old.Spec.Template.Spec.Containers[0]), "changed_by": changedBy}),
+			Payload:    mustJSON(k.withGitOps(new, map[string]any{"new_mem_limit": memoryLimit(new.Spec.Template.Spec.Containers[0]), "old_mem_limit": memoryLimit(old.Spec.Template.Spec.Containers[0]), "changed_by": changedBy})),
 		})
 	}
 
@@ -376,7 +380,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "config_change",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s configuration changed (%s)", new.Name, strings.Join(changed, ", ")),
-			Payload:    mustJSON(map[string]any{"changed": changed, "changed_by": changedBy, "from_hash": configFingerprint(old), "to_hash": configFingerprint(new)}),
+			Payload:    mustJSON(k.withGitOps(new, map[string]any{"changed": changed, "changed_by": changedBy, "from_hash": configFingerprint(old), "to_hash": configFingerprint(new)})),
 		})
 	}
 
@@ -390,9 +394,19 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "scale",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s scaled from %d to %d", new.Name, *old.Spec.Replicas, *new.Spec.Replicas),
-			Payload:    mustJSON(map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas, "changed_by": changedBy}),
+			Payload:    mustJSON(k.withGitOps(new, map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas, "changed_by": changedBy})),
 		})
 	}
+}
+
+// withGitOps notes the GitOps controller that owns a Deployment, so healing
+// proposes a Git revert instead of a write that would be reconciled away. The
+// key is added only when there is one, leaving other payloads unchanged.
+func (k *K8sCollector) withGitOps(d *appsv1.Deployment, payload map[string]any) map[string]any {
+	if manager := graph.GitOpsManager(d.Labels, d.Annotations, k.Applications); manager != "" {
+		payload["gitops"] = manager
+	}
+	return payload
 }
 
 // configChanges names changed container settings, never values: env values hold credentials.

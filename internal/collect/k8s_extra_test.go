@@ -2,11 +2,16 @@ package collect
 
 import (
 	"testing"
+	"time"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/Halcyonic-01/Chronicle/internal/event"
 )
 
 func service(selector map[string]string, port int32) *corev1.Service {
@@ -161,5 +166,36 @@ func TestAnAutoscalerLimitChangeIsRecordedOnTheWorkloadItScales(t *testing.T) {
 	}
 	if got := extraOut(func(k *K8sCollector) { k.diffHPAs(hpa(5), hpa(5)) }); len(got) != 0 {
 		t.Fatalf("an unchanged autoscaler must not emit: %v", got)
+	}
+}
+
+// A node fails when its kubelet stops heartbeating; it is declared NotReady
+// 40-50s later, after its own symptoms. The event is dated by the heartbeat
+// (found by a chaos run: the alert came first, so the node could not explain it).
+func TestANodeFailureIsDatedByItsLastHeartbeat(t *testing.T) {
+	lease := func(ago time.Duration) *coordinationv1.Lease {
+		at := metav1.NewMicroTime(time.Now().Add(-ago))
+		return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Namespace: "kube-node-lease"}, Spec: coordinationv1.LeaseSpec{RenewTime: &at}}
+	}
+	for _, c := range []struct {
+		name  string
+		lease *coordinationv1.Lease
+		want  time.Duration // how far before now the event should be dated
+	}{
+		{"heartbeat 45s ago", lease(45 * time.Second), 45 * time.Second},
+		{"heartbeat too old to trust", lease(time.Hour), 0},
+		{"no lease", nil, 0},
+	} {
+		out := make(chan event.Event, 4)
+		client := fake.NewSimpleClientset()
+		if c.lease != nil {
+			client = fake.NewSimpleClientset(c.lease)
+		}
+		k := &K8sCollector{BaseCollector: BaseCollector{Out: out}, client: client}
+		k.diffNodes(node(corev1.ConditionTrue), node(corev1.ConditionUnknown))
+		e := drain(out)[0]
+		if ago := time.Since(e.OccurredAt); ago < c.want-2*time.Second || ago > c.want+2*time.Second {
+			t.Errorf("%s: dated %v ago, want about %v", c.name, ago.Round(time.Second), c.want)
+		}
 	}
 }

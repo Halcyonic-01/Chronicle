@@ -47,6 +47,10 @@ var rules = []Rule{
 	},
 }
 
+// AlertRules returns a copy of the rules, so other tools judge health by the
+// same thresholds Chronicle alerts on.
+func AlertRules() []Rule { return append([]Rule(nil), rules...) }
+
 type PromCollector struct {
 	BaseCollector
 	api v1.API

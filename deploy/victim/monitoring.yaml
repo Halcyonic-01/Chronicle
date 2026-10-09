@@ -14,3 +14,25 @@ spec:
   endpoints:
   - port: http
     path: /metrics
+---
+# Linkerd's proxies see every call between meshed pods, HTTP and raw TCP alike.
+# Chronicle builds its observed `calls` edges from these; without this scrape
+# a dependency named only in code (the worker's postgres) had no edge at all.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: linkerd-proxy
+  namespace: default
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchExpressions:
+      - key: linkerd.io/control-plane-ns
+        operator: Exists
+  podMetricsEndpoints:
+  - port: linkerd-admin
+    path: /metrics
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_label_linkerd_io_proxy_deployment]
+      targetLabel: deployment

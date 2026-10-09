@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/segmentio/kafka-go"
+
+	"github.com/Halcyonic-01/Chronicle/internal/event"
 )
 
 func TestCollectCommitBatchGroupsQueuedAcknowledgements(t *testing.T) {
@@ -69,5 +72,39 @@ func TestCollectCommitBatchStopsWhenAcknowledgementsNeverMatch(t *testing.T) {
 
 	if _, err := (&KafkaBus{}).collectCommitBatch(ctx, inFlight, make(chan string), "z"); err == nil {
 		t.Fatal("an unmatched acknowledgement must never commit an offset")
+	}
+}
+
+// A synchronous write of one event waits for BatchTimeout; at the library's
+// one-second default the publisher managed one event per second, and an
+// incident's log flood queued alerts minutes behind (found by a chaos run).
+func TestPublishingDoesNotWaitASecondPerEvent(t *testing.T) {
+	bus := NewKafkaBus("localhost:9092", "t", "g")
+	if bus.writer.BatchTimeout > 50*time.Millisecond {
+		t.Fatalf("a lone event lingers %v before it is sent", bus.writer.BatchTimeout)
+	}
+}
+
+func TestDrainBatchTakesWhatIsQueuedWithoutWaiting(t *testing.T) {
+	queue := make(chan event.Event, 10)
+	for _, id := range []string{"b", "c"} {
+		queue <- event.Event{ID: id}
+	}
+	got := DrainBatch(event.Event{ID: "a"}, queue, 10)
+	if len(got) != 3 || got[0].ID != "a" || got[1].ID != "b" || got[2].ID != "c" {
+		t.Fatalf("queued events should follow in order: %+v", got)
+	}
+	if one := DrainBatch(event.Event{ID: "x"}, queue, 10); len(one) != 1 {
+		t.Fatalf("an empty queue sends the one event at once: %+v", one)
+	}
+}
+
+func TestDrainBatchStopsAtItsLimit(t *testing.T) {
+	queue := make(chan event.Event, 10)
+	for i := 0; i < 5; i++ {
+		queue <- event.Event{ID: string(rune('b' + i))}
+	}
+	if got := DrainBatch(event.Event{ID: "a"}, queue, 3); len(got) != 3 || len(queue) != 3 {
+		t.Fatalf("took %d, left %d", len(got), len(queue))
 	}
 }

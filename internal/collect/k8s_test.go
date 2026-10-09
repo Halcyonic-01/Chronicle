@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/tidwall/gjson"
@@ -292,5 +293,40 @@ func TestAnAddedAndARemovedVariableAreBothReported(t *testing.T) {
 	events := emittedBy(old, new)
 	if len(events) != 1 || gjsonString(events[0], "changed.#") != "2" {
 		t.Fatalf("expected both names, got %+v", events)
+	}
+}
+
+// A deploy of an Argo CD-managed workload names its application, so healing
+// proposes a Git revert; an unmanaged one carries no such key at all.
+func TestADeployRecordsItsGitOpsOwner(t *testing.T) {
+	old, new := deployment("api:1"), deployment("api:2")
+	new.Annotations = map[string]string{"argocd.argoproj.io/tracking-id": "shop:apps/Deployment:default/api"}
+	events := emittedBy(old, new)
+	if len(events) != 1 || gjsonString(events[0], "gitops") != "argocd:shop" {
+		t.Fatalf("expected the Argo CD application in the deploy, got %+v", events)
+	}
+	plain := emittedBy(deployment("api:1"), deployment("api:2"))
+	if len(plain) != 1 || contains(plain[0].Payload, "gitops") {
+		t.Fatalf("an unmanaged deploy must not carry a gitops key: %s", plain[0].Payload)
+	}
+}
+
+// A Helm release is not Argo-managed just because Argo CD is installed: the
+// instance label counts only when Argo CD reports an Application of that name.
+func TestAHelmReleaseIsNotRecordedAsGitOpsManaged(t *testing.T) {
+	var apps graph.ApplicationSet
+	apps.Replace([]string{"shop"})
+	deploy := func(instance string) []event.Event {
+		old, new := deployment("api:1"), deployment("api:2")
+		new.Labels = map[string]string{"app.kubernetes.io/instance": instance}
+		out := make(chan event.Event, 8)
+		(&K8sCollector{BaseCollector: BaseCollector{Out: out}, Applications: apps.Has}).diffDeployments(old, new)
+		return drain(out)
+	}
+	if ev := deploy("monitoring"); len(ev) != 1 || contains(ev[0].Payload, "gitops") {
+		t.Fatalf("a Helm release was recorded as GitOps-managed: %s", ev[0].Payload)
+	}
+	if ev := deploy("shop"); len(ev) != 1 || gjsonString(ev[0], "gitops") != "argocd:shop" {
+		t.Fatalf("a real Argo CD application should be recorded, got %+v", ev)
 	}
 }

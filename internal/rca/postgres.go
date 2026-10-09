@@ -15,7 +15,7 @@ func NewPostgresEventSource(pool *pgxpool.Pool) *PostgresEventSource {
 	return &PostgresEventSource{pool: pool}
 }
 func (s *PostgresEventSource) EventsBetween(ctx context.Context, from, to time.Time) ([]event.Event, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, occurred_at, ingested_at, source, namespace, entity_kind, entity_name, type, severity, title, payload, trace_id, correlation_key FROM events WHERE ingested_at >= $1 AND ingested_at < $2 ORDER BY ingested_at ASC, id ASC`, from, to)
+	rows, err := s.pool.Query(ctx, `SELECT id, occurred_at, ingested_at, source, namespace, entity_kind, entity_name, type, severity, title, payload, COALESCE(trace_id,'') AS trace_id, COALESCE(correlation_key,'') AS correlation_key FROM events WHERE ingested_at >= $1 AND ingested_at < $2 ORDER BY ingested_at ASC, id ASC`, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func (s *PostgresEventSource) RecentSignals(ctx context.Context, from, to time.T
 		       total, first_seen
 		FROM (
 			SELECT id, occurred_at, ingested_at, source, namespace, entity_kind,
-			       entity_name, type, severity, title, payload, trace_id, correlation_key,
+			       entity_name, type, severity, title, payload, COALESCE(trace_id,'') AS trace_id, COALESCE(correlation_key,'') AS correlation_key,
 			       row_number() OVER w AS rn,
 			       count(*) OVER p AS total,
 			       min(ingested_at) OVER p AS first_seen
@@ -113,7 +113,7 @@ func (s *PostgresEventSource) RecentEvents(ctx context.Context, from, to time.Ti
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, occurred_at, ingested_at, source, namespace, entity_kind,
-		       entity_name, type, severity, title, payload, trace_id, correlation_key
+		       entity_name, type, severity, title, payload, COALESCE(trace_id,'') AS trace_id, COALESCE(correlation_key,'') AS correlation_key
 		FROM events
 		WHERE ingested_at >= $1 AND ingested_at <= $2
 		ORDER BY ingested_at DESC, id DESC
@@ -146,7 +146,7 @@ func (s *PostgresEventSource) CountEvents(ctx context.Context, from, to time.Tim
 
 func (s *PostgresEventSource) GetEvent(ctx context.Context, id string) (*event.Event, error) {
 	var e event.Event
-	err := s.pool.QueryRow(ctx, `SELECT id, occurred_at, ingested_at, source, namespace, entity_kind, entity_name, type, severity, title, payload, trace_id, correlation_key FROM events WHERE id = $1`, id).Scan(&e.ID, &e.OccurredAt, &e.IngestedAt, &e.Source, &e.Namespace, &e.EntityKind, &e.EntityName, &e.Type, &e.Severity, &e.Title, &e.Payload, &e.TraceID, &e.CorrelationKey)
+	err := s.pool.QueryRow(ctx, `SELECT id, occurred_at, ingested_at, source, namespace, entity_kind, entity_name, type, severity, title, payload, COALESCE(trace_id,'') AS trace_id, COALESCE(correlation_key,'') AS correlation_key FROM events WHERE id = $1`, id).Scan(&e.ID, &e.OccurredAt, &e.IngestedAt, &e.Source, &e.Namespace, &e.EntityKind, &e.EntityName, &e.Type, &e.Severity, &e.Title, &e.Payload, &e.TraceID, &e.CorrelationKey)
 	if err != nil {
 		return nil, err
 	}

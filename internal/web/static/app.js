@@ -124,7 +124,7 @@ function now(){
   const s = state.posture.summary || {total:0,healthy:0,warning:0,critical:0};
   const signals = (state.events||[]).filter(e=>e.severity==='warning'||e.severity==='critical');
   const unhealthy = (state.posture.resources||[]).filter(r=>r.status!=='healthy');
-  const pending = (state.actions||[]).filter(a=>a.approval==='pending');
+  const pending = (state.actions||[]).filter(awaitingApproval);
   const cell = (label,value,cls,note) => `<div><dt>${label}</dt><dd class="${cls||''}">${value}${note?`<small>${note}</small>`:''}</dd></div>`;
   return `<div class="ops">
     <div class="strip">
@@ -187,17 +187,21 @@ function events(){
 
 function healing(){
   const actions = state.actions||[];
-  const pending = actions.filter(a=>a.approval==='pending');
+  const pending = actions.filter(awaitingApproval);
   const rules = (state.healRules||[]).map(r=>[
     r.name, r.cause_type, r.action_type,
     Number(r.min_confidence||0).toFixed(2),
     `${r.max_per_hour}/h`,
-    r.require_approve ? 'approval required' : 'automatic when live'
+    'approval required'
   ]);
+  const mode = state.healMode||{};
+  const modeText = mode.live_enabled && !mode.kill_switch
+    ? `LIVE · approved actions run after every safety gate is re-checked · ${esc(mode.max_executions_per_hour)}/h cap · ${esc(mode.target_cooldown)} cooldown per workload`
+    : `DRY RUN · nothing executes${mode.live_enabled ? ' (kill switch on)' : ''} · approvals expire after ${esc(mode.approval_ttl||'30m')}`;
   return `<div class="ops">
-    <div class="mode"><span>●</span><span>DRY RUN · execution disabled · every decision is recorded before anything runs</span></div>
+    <div class="mode"><span>●</span><span>${modeText}</span></div>
     <div class="strip">
-      <div><dt>Queued</dt><dd>${actions.length}</dd></div>
+      <div><dt>Approved</dt><dd>${actions.filter(a=>a.state==='approved').length}</dd></div>
       <div><dt>Pending approval</dt><dd class="${pending.length?'warn':'ok'}">${pending.length}</dd></div>
       <div><dt>Executed</dt><dd>${actions.filter(a=>a.status==='succeeded').length}</dd></div>
       <div><dt>Blocked</dt><dd>${actions.filter(a=>a.status==='blocked').length}</dd></div>
@@ -212,8 +216,8 @@ function healing(){
           <td class="dim">${a.target?`${esc(a.namespace||'default')}/${esc(a.target)}`:'—'}</td>
           <td class="num">${(a.confidence||0).toFixed(2)}</td>
           <td class="${a.status==='blocked'||a.status==='failed'?'sev-warning':''}">${esc(a.status)}</td>
-          <td class="dim">${esc(a.approval)}</td>
-          <td>${a.approval==='pending' && a.status==='would_run'
+          <td class="dim">${esc(a.state||a.approval)}</td>
+          <td>${awaitingApproval(a)
             ? `<button class="k pri" data-approve="${esc(a.id)}">approve</button> <button class="k no" data-deny="${esc(a.id)}">deny</button>`
             : `<span class="dim">${esc(a.result||a.approval||'')}</span>`}</td>
         </tr>`).join('')}</tbody></table>`
@@ -347,7 +351,11 @@ async function loadGraph(){ try { const r=await api('/api/graph'); state.graph=r
 async function loadPosture(){ state.postureLoading=true; try { const r=await api('/api/posture'); const d=await r.json(); if(!r.ok)throw new Error(d.error||'Live posture unavailable'); state.posture=d; state.postureError=''; } catch (e) { state.posture={resources:[],summary:{total:0,healthy:0,warning:0,critical:0}}; state.postureError=e.message; } state.postureLoading=false; }
 async function loadActions(){ try { const r=await api('/api/heal/actions'); state.actions=r.ok?(await r.json()).actions||[]:[]; } catch (_) { state.actions=[]; } }
 // The rules come from the engine that enforces them, never from a copy here.
-async function loadHealRules(){ try { const r=await api('/api/heal/rules'); state.healRules=r.ok?(await r.json()).rules||[]:null; } catch (_) { state.healRules=null; } }
+async function loadHealRules(){ try { const r=await api('/api/heal/rules'); const body=r.ok?await r.json():null; state.healRules=body?body.rules||[]:null; state.healMode=body; } catch (_) { state.healRules=null; state.healMode=null; } }
+
+// Only a proposal still inside its deadline can be approved; the server
+// enforces this too.
+function awaitingApproval(a){ return a.state==='pending_approval' && (!a.expires_at || new Date(a.expires_at) > new Date()); }
 async function loadMoreEvents(){
   const button=$('#load-more-events');
   if(button){button.disabled=true;button.textContent='loading…';}
@@ -368,9 +376,10 @@ async function decide(id,approved){
     sessionStorage.setItem('chronicle_heal_token',token);
     const r=await api(`/api/heal/actions/${encodeURIComponent(id)}/${approved?'approve':'deny'}`,{method:'POST',headers:{'Content-Type':'application/json','X-Chronicle-Heal-Token':token},body:JSON.stringify({by:'local-reviewer'})});
     if(r.status===401){sessionStorage.removeItem('chronicle_heal_token');throw new Error('Invalid approval token');}
-    if(!r.ok)throw new Error('Action is no longer pending');
+    const body=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(body.error||'Action is no longer pending');
     await Promise.all([loadActions(),loadHealRules()]); render();
-    showToast(approved?'Approved and recorded':'Denied and recorded');
+    showToast(approved?(body.result||'Approved and recorded'):'Denied and recorded');
   }catch(e){ showToast(e.message); }
 }
 

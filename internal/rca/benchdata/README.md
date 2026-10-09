@@ -120,7 +120,7 @@ Measured on these sets, using the same commands as above:
 | | Before the pass | After the pass |
 |---|---|---|
 | main Top-1 / single-cause called ambiguous | 66/66 / 3 | 66/66 / 0 |
-| main ambiguity recognised / false confident | 4/4 / 0 of 43 | 4/4 / 0 of 47 |
+| main ambiguity recognised / false confident | 4/4 / 0 of 43 | 4/4 / 0 of 48 |
 | main healing would-run / wrong / coverage | 16 / 0 / 16 of 41 | 19 / 0 / 19 of 41 |
 | held-out Top-1 / single-cause called ambiguous | 51/52 / 1 | 52/52 / 0 |
 | held-out ambiguity recognised / false confident | 1/2 / 1 of 33 | 1/2 / 1 of 38 |

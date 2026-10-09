@@ -120,6 +120,21 @@ func main() {
 	meshBuilder := graph.NewMeshBuilder(promClient)
 	graphStore := store.NewGraphStore(pool)
 
+	// The Application names Argo CD reports, when Argo CD is configured. Shared
+	// by the graph builder, the Kubernetes collector and the healing executor, so
+	// all three tell a real Application from a Helm release the same way.
+	var argoApps *graph.ApplicationSet
+	var knownApplication graph.KnownApplication
+	if os.Getenv("ARGOCD_URL") != "" {
+		argoApps = &graph.ApplicationSet{}
+		knownApplication = argoApps.Has
+	}
+	newExecutor := func() *heal.KubernetesExecutor {
+		executor := heal.NewKubernetesExecutor(k8sClient)
+		executor.Applications = knownApplication
+		return executor
+	}
+
 	// Phase 3: Snapshotter — takes a full cluster snapshot every 5 minutes.
 	snapshotter := replay.NewSnapshotter(k8sClient, promClient, pool, inMemGraph)
 
@@ -173,14 +188,14 @@ func main() {
 				} else {
 					slog.Warn("failed to read k8s cache for graph", "pod_err", podErr, "service_err", svcErr)
 				}
-				// Argo CD stamps an instance label on what it deploys; that label is the
-				// only thing tying an Application event to a node in this graph.
+				// Argo CD marks what it deploys; that marker is the only thing tying
+				// an Application event to a node in this graph.
 				if deploymentRefs, err := deploymentLister.List(labels.Everything()); err == nil {
 					deployments := make([]appsv1.Deployment, 0, len(deploymentRefs))
 					for _, d := range deploymentRefs {
 						deployments = append(deployments, *d)
 					}
-					allEdges = append(allEdges, graph.BuildArgoEdges(deployments)...)
+					allEdges = append(allEdges, graph.BuildArgoEdges(deployments, knownApplication)...)
 				} else {
 					slog.Warn("failed to read deployments for graph", "err", err)
 				}
@@ -227,13 +242,15 @@ func main() {
 			}
 			syncGraph(leaderCtx)
 			leaderGroup, leaderCtx := errgroup.WithContext(leaderCtx)
-			leaderGroup.Go(func() error { return collect.NewK8sCollector(k8sClient, collectorEvents).Run(leaderCtx) })
+			k8sCollector := collect.NewK8sCollector(k8sClient, collectorEvents)
+			k8sCollector.Applications = knownApplication
+			leaderGroup.Go(func() error { return k8sCollector.Run(leaderCtx) })
 			leaderGroup.Go(func() error {
 				return collect.NewGitHubCollector(ghClient, githubOwner, githubRepo, collectorEvents).Run(leaderCtx)
 			})
 			leaderGroup.Go(func() error { return collect.NewPromCollector(promClient, collectorEvents).Run(leaderCtx) })
 			leaderGroup.Go(func() error { return collect.NewLokiCollector(collectorEvents).Run(leaderCtx) })
-			if argocd := collect.NewArgoCollectorFromEnv(collectorEvents); argocd != nil {
+			if argocd := collect.NewArgoCollectorFromEnv(collectorEvents, argoApps); argocd != nil {
 				leaderGroup.Go(func() error { return argocd.Run(leaderCtx) })
 			}
 			if terraform := collect.NewTerraformCollectorFromEnv(collectorEvents); terraform != nil {
@@ -246,11 +263,13 @@ func main() {
 						case <-leaderCtx.Done():
 							return leaderCtx.Err()
 						case e := <-collectorEvents:
+							// Everything already queued goes in the same write.
+							batch := store.DrainBatch(e, collectorEvents, store.PublishBatchSize)
 							for {
-								if err := eventBus.Publish(leaderCtx, e); err == nil {
+								if err := eventBus.PublishBatch(leaderCtx, batch); err == nil {
 									break
 								} else {
-									slog.Warn("Kafka publish failed; retrying", "err", err)
+									slog.Warn("Kafka publish failed; retrying", "err", err, "events", len(batch))
 								}
 								select {
 								case <-leaderCtx.Done():
@@ -321,6 +340,14 @@ func main() {
 				}
 			})
 
+			// The execution worker: approvals only queue decisions, and this
+			// re-checks every gate before acting. It also expires stale
+			// decisions, so it runs even while live healing is off.
+			leaderGroup.Go(func() error {
+				worker := heal.NewController(heal.NewPostgresAuditStore(pool), newExecutor())
+				return worker.Run(leaderCtx, 5*time.Second)
+			})
+
 			// Closed edge versions are kept for the same year the snapshot
 			// retention policy covers, so historical graph queries and replay
 			// stay answerable over the same period.
@@ -380,7 +407,7 @@ func main() {
 	}
 	healStore := heal.NewPostgresAuditStore(pool)
 	healer := heal.NewEngine(healStore)
-	healController := heal.NewController(healStore, heal.NewKubernetesExecutor(k8sClient))
+	healController := heal.NewController(healStore, newExecutor())
 
 	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer, graphStore, healStore, k8sClient, healController).
 		WithRecentCache(recentCache)

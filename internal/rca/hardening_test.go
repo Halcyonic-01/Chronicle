@@ -576,3 +576,27 @@ func TestHardeningIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// Found by a chaos run: a pod rolled out by an earlier, recovered incident,
+// which then served healthily for minutes, crashed on its own. It is
+// established by then, so the crash is the root, not an effect of its creation.
+func TestF2APodThatServedHealthilyIsEstablished(t *testing.T) {
+	b := &hb{}
+	b.rollout(-600, "api", "api-1", "api-2")
+	b.add(-590, "Pod", "api-2", "became_ready", "info", "api-2 started serving traffic", `{"owner":"api"}`)
+	b.fail("container_restart", "api-2", "api", 0, 40, 110)
+	b.logs("web-1", "api returned HTTP 500", 5, 50)
+	got := b.analyze(t, b.alert(60, "web"))
+	if !leads(got, "container_restart", "api-2") || got.Verdict == VerdictNoRootCause {
+		t.Fatalf("a crash after ten healthy minutes is the root: %s", lead(got))
+	}
+	// Control: ready for a moment, then crashing, is still the rollout's failure.
+	c := &hb{}
+	c.rollout(0, "api", "api-1", "api-2")
+	c.add(10, "Pod", "api-2", "became_ready", "info", "api-2 started serving traffic", `{"owner":"api"}`)
+	c.fail("container_restart", "api-2", "api", 30, 70, 140)
+	c.logs("web-1", "api returned HTTP 500", 35, 110)
+	if got := c.analyze(t, c.alert(120, "web")); got.Verdict != VerdictNoRootCause {
+		t.Fatalf("a crash 20s after first readiness belongs to the unrecorded rollout: %s", lead(got))
+	}
+}

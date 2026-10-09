@@ -11,6 +11,22 @@ spec:
       labels:
         app: redis
     spec:
+      # Runs on the chaos-target node when there is one (scripts/setup.sh), so a
+      # lost-node experiment hits redis alone; anywhere otherwise.
+      tolerations:
+      - key: chronicle.io/chaos-target
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: chronicle.io/chaos-target
+                operator: In
+                values: ["true"]
       containers:
       - name: redis
         image: redis:7-alpine

@@ -3,7 +3,9 @@ package heal
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -25,10 +27,17 @@ type Policy struct {
 	AllowedActions    map[string]bool
 	AllowedTargets    map[string]bool
 	Timeout           time.Duration
-	ObservationSince  time.Time
-	MinDecisive       int
-	MinPrecision      float64
-	Evidence          EvidenceSummary
+	// VerifyTimeout is separate from Timeout: a rollout can take minutes, and
+	// sharing one budget reported applied changes as failed.
+	VerifyTimeout    time.Duration
+	ObservationSince time.Time
+	MinDecisive      int
+	MinPrecision     float64
+	Evidence         EvidenceSummary
+	// MaxExecutionsPerHour caps executions across every rule; TargetCooldown
+	// is the least time between two actions on one workload.
+	MaxExecutionsPerHour int
+	TargetCooldown       time.Duration
 }
 
 // EvidenceSummary is what the observation period actually produced. Unknown
@@ -57,15 +66,18 @@ func (e EvidenceSummary) Precision() float64 {
 
 func PolicyFromEnv() Policy {
 	return Policy{
-		LiveEnabled:       os.Getenv("HEAL_LIVE_ENABLED") == "true",
-		KillSwitch:        os.Getenv("HEAL_KILL_SWITCH") != "false",
-		AllowedNamespaces: csvSet(os.Getenv("HEAL_ALLOWED_NAMESPACES")),
-		AllowedActions:    csvSet(os.Getenv("HEAL_ALLOWED_ACTIONS")),
-		AllowedTargets:    csvSet(os.Getenv("HEAL_ALLOWED_TARGETS")),
-		Timeout:           durationEnv("HEAL_ACTION_TIMEOUT", 30*time.Second),
-		ObservationSince:  timeEnv("HEAL_OBSERVATION_STARTED_AT"),
-		MinDecisive:       intEnv("HEAL_MIN_DECISIVE_DECISIONS", 20),
-		MinPrecision:      floatEnv("HEAL_MIN_PRECISION", 0.80),
+		LiveEnabled:          os.Getenv("HEAL_LIVE_ENABLED") == "true",
+		KillSwitch:           os.Getenv("HEAL_KILL_SWITCH") != "false",
+		AllowedNamespaces:    csvSet(os.Getenv("HEAL_ALLOWED_NAMESPACES")),
+		AllowedActions:       csvSet(os.Getenv("HEAL_ALLOWED_ACTIONS")),
+		AllowedTargets:       csvSet(os.Getenv("HEAL_ALLOWED_TARGETS")),
+		Timeout:              durationEnv("HEAL_ACTION_TIMEOUT", 30*time.Second),
+		VerifyTimeout:        durationEnv("HEAL_VERIFY_TIMEOUT", 3*time.Minute),
+		ObservationSince:     timeEnv("HEAL_OBSERVATION_STARTED_AT"),
+		MinDecisive:          intEnv("HEAL_MIN_DECISIVE_DECISIONS", 20),
+		MinPrecision:         floatEnv("HEAL_MIN_PRECISION", 0.80),
+		MaxExecutionsPerHour: intEnv("HEAL_MAX_EXECUTIONS_PER_HOUR", 3),
+		TargetCooldown:       durationEnv("HEAL_TARGET_COOLDOWN", 30*time.Minute),
 	}
 }
 
@@ -74,16 +86,65 @@ type Controller struct {
 	Executor Executor
 	Notifier Notifier
 	Policy   Policy
-	mu       sync.Mutex
+	// Rules are the current ones: a decision is re-checked against today's
+	// floor, not the one it was planned under.
+	Rules []Rule
+	Now   func() time.Time
+	mu    sync.Mutex
 }
 
 func NewController(store ExecutionStore, executor Executor) *Controller {
-	return &Controller{Store: store, Executor: executor, Notifier: NewSlackNotifierFromEnv(), Policy: PolicyFromEnv()}
+	return &Controller{Store: store, Executor: executor, Notifier: NewSlackNotifierFromEnv(), Policy: PolicyFromEnv(), Rules: RulesFromEnv(), Now: time.Now}
 }
 
-// ExecuteApproved is the only live execution entry point. It is default-deny:
-// live mode, the kill switch, the observation gate, and all allowlists must
-// permit the action before Kubernetes is called.
+func (c *Controller) now() time.Time {
+	if c.Now != nil {
+		return c.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// Revalidate re-checks an approved decision against the present, short of the
+// limits the claim checks atomically. "" means it may proceed.
+func (c *Controller) Revalidate(ctx context.Context, action *Action) string {
+	if action.Approval != ApprovalApproved || action.Status != StatusApproved {
+		return fmt.Sprintf("not an approved decision (status %s, approval %s)", action.Status, action.Approval)
+	}
+	if action.ExpiresAt == nil || !c.now().Before(*action.ExpiresAt) {
+		return "the approval expired"
+	}
+	rule := c.rule(action.Rule)
+	if rule == nil || rule.ActionType != action.ActionType {
+		return fmt.Sprintf("rule %q no longer proposes %s", action.Rule, action.ActionType)
+	}
+	if action.Confidence < rule.MinConfidence {
+		got, floor := formatBelow(action.Confidence, rule.MinConfidence)
+		return fmt.Sprintf("confidence %s is below the current floor %s", got, floor)
+	}
+	if reason := precondition(action.ActionType, action.Payload); reason != "" {
+		return reason
+	}
+	policy := c.Policy
+	policy.ObservationSince = c.ObservationStart(ctx)
+	policy.Evidence = c.Evidence(ctx)
+	if err := policy.Allows(action); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func (c *Controller) rule(name string) *Rule {
+	for i := range c.Rules {
+		if c.Rules[i].Name == name {
+			return &c.Rules[i]
+		}
+	}
+	return nil
+}
+
+// ExecuteApproved runs one approved decision. It is default-deny: every check
+// is repeated here, the claim enforces the limits atomically, and any refusal
+// is final -- a blocked decision is never executed later.
 func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Action, error) {
 	if c == nil || c.Store == nil || c.Executor == nil {
 		return action, fmt.Errorf("healing execution is not configured")
@@ -94,21 +155,33 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 	if action.Approval != ApprovalApproved {
 		return action, fmt.Errorf("action is not approved")
 	}
-	policy := c.Policy
-	policy.ObservationSince = c.ObservationStart(ctx)
-	policy.Evidence = c.Evidence(ctx)
-	if err := policy.Allows(action); err != nil {
-		action.Status = StatusBlocked
-		action.Result = err.Error()
-		action.Error = err.Error()
-		_ = c.Store.CompleteExecution(ctx, action.ID, StatusBlocked, err.Error(), err.Error(), "")
-		return action, err
+	block := func(reason string) (*Action, error) {
+		action.Status, action.Result, action.Error = StatusBlocked, reason, reason
+		_ = c.Store.CompleteExecution(ctx, action.ID, StatusBlocked, reason, reason, "")
+		return action, errors.New(reason)
+	}
+	if reason := c.Revalidate(ctx, action); reason != "" {
+		return block(reason)
+	}
+	rule := c.rule(action.Rule)
+	workload := action.Workload
+	if workload == "" {
+		workload = workloadOf(action.ActionType, action.Target, action.Payload)
 	}
 	c.mu.Lock()
-	claimed, err := c.Store.ClaimExecution(ctx, action.ID, time.Now().UTC())
+	claimed, refusal, err := c.Store.ClaimExecution(ctx, ClaimRequest{
+		ID: action.ID, Rule: action.Rule, Namespace: action.Namespace, Workload: workload, Now: c.now(),
+		RuleMaxPerHour: rule.MaxPerHour, MaxPerHour: c.Policy.MaxExecutionsPerHour, Cooldown: c.Policy.TargetCooldown,
+	})
 	c.mu.Unlock()
-	if err != nil || !claimed {
+	if err != nil {
 		return action, err
+	}
+	if refusal != "" {
+		return block(refusal)
+	}
+	if !claimed {
+		return action, fmt.Errorf("action %s is no longer claimable", action.ID)
 	}
 	action.Status, action.DryRun = StatusExecuting, false
 
@@ -143,7 +216,13 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 		if verifier, ok := c.Executor.(interface {
 			Verify(context.Context, *Action) (string, error)
 		}); ok {
-			verification, execErr = verifier.Verify(execCtx, action)
+			verifyTimeout := c.Policy.VerifyTimeout
+			if verifyTimeout <= 0 {
+				verifyTimeout = c.Policy.Timeout
+			}
+			verifyCtx, cancelVerify := context.WithTimeout(ctx, verifyTimeout)
+			verification, execErr = verifier.Verify(verifyCtx, action)
+			cancelVerify()
 		} else {
 			verification = "executor completed; no verifier configured"
 		}
@@ -156,9 +235,65 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 		_ = c.Store.CompleteExecution(ctx, action.ID, StatusSucceeded, result, "", verification)
 	}
 	if c.Notifier != nil {
-		_ = c.Notifier.Notify(context.Background(), action)
+		if err := c.Notifier.Notify(context.Background(), action); err != nil {
+			slog.Warn("execution notification failed", "action", action.ID, "err", err)
+		}
 	}
 	return action, execErr
+}
+
+// Tick is one pass of the execution worker: expire what waited too long, close
+// executions a crash interrupted, then -- only when live healing is on -- run
+// what is approved. Execution never happens inside an HTTP request.
+func (c *Controller) Tick(ctx context.Context) error {
+	queue, ok := c.Store.(WorkQueue)
+	if !ok {
+		return fmt.Errorf("the execution store cannot queue work")
+	}
+	now := c.now()
+	if n, err := queue.ExpireStale(ctx, now); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Info("expired healing decisions", "rows", n)
+	}
+	grace := 2 * (c.Policy.Timeout + c.Policy.VerifyTimeout)
+	if n, err := queue.FailInterrupted(ctx, now.Add(-grace)); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Warn("closed interrupted healing executions", "rows", n)
+	}
+	if !c.Policy.LiveEnabled {
+		return nil
+	}
+	approved, err := queue.ApprovedActions(ctx, now, 10)
+	if err != nil {
+		return err
+	}
+	for i := range approved {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, err := c.ExecuteApproved(ctx, &approved[i]); err != nil {
+			slog.Warn("healing action did not run", "action", approved[i].ID, "err", err)
+		}
+	}
+	return nil
+}
+
+// Run drives the worker until ctx ends. Run it on the leader only.
+func (c *Controller) Run(ctx context.Context, every time.Duration) error {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		if err := c.Tick(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("healing worker pass failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // executableActions are the action types with an executor and a verifier. The
@@ -301,8 +436,17 @@ func (p Policy) Allows(a *Action) error {
 	if !p.AllowedNamespaces[a.Namespace] {
 		return fmt.Errorf("namespace %q is not allowlisted", a.Namespace)
 	}
-	if len(p.AllowedTargets) == 0 || (!p.AllowedTargets[a.Namespace+"/"+a.Target] && !p.AllowedTargets[a.Target]) {
-		return fmt.Errorf("target %s/%s is not allowlisted", a.Namespace, a.Target)
+	// A Pod is named for its ReplicaSet and changes on every restart; the
+	// allowlist names the workload that owns it.
+	workload := a.Workload
+	if workload == "" {
+		workload = workloadOf(a.ActionType, a.Target, a.Payload)
+	}
+	allowed := func(name string) bool {
+		return name != "" && (p.AllowedTargets[a.Namespace+"/"+name] || p.AllowedTargets[name])
+	}
+	if !allowed(workload) && !allowed(a.Target) {
+		return fmt.Errorf("target %s/%s is not allowlisted", a.Namespace, workload)
 	}
 	return nil
 }

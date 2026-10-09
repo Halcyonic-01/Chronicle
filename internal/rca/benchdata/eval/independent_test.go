@@ -13,8 +13,6 @@ package eval
 // Env: RCA_INDEPENDENT_OUT=path.json writes the per-incident rows.
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,32 +22,14 @@ import (
 	"testing"
 )
 
-// sourceHash identifies the RCA implementation under test: the non-test files of
-// internal/rca and the healing rules and outcome logic.
+// sourceHash identifies the RCA implementation under test (see SourceHash).
 func sourceHash(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join("..", "..", "..", "..")
-	files, _ := filepath.Glob(filepath.Join(root, "internal", "rca", "*.go"))
-	var names []string
-	for _, f := range files {
-		if !strings.HasSuffix(f, "_test.go") {
-			names = append(names, f)
-		}
+	hash, err := SourceHash(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
 	}
-	names = append(names, filepath.Join(root, "internal", "heal", "action.go"), filepath.Join(root, "internal", "heal", "outcome.go"))
-	sort.Strings(names)
-	var manifest strings.Builder
-	for _, f := range names {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sum := sha256.Sum256(raw)
-		rel, _ := filepath.Rel(root, f)
-		fmt.Fprintf(&manifest, "%s  %s\n", hex.EncodeToString(sum[:]), rel)
-	}
-	total := sha256.Sum256([]byte(manifest.String()))
-	return hex.EncodeToString(total[:])[:16]
+	return hash
 }
 
 func TestIndependentBenchmark(t *testing.T) {

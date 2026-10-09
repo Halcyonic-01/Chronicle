@@ -37,14 +37,18 @@ func TestEnginePlansDryRunForHighConfidenceCause(t *testing.T) {
 	result := &rca.Result{
 		Symptom:    event.Event{ID: "incident-1"},
 		Confidence: 0.91,
-		Candidates: []rca.Candidate{{Event: event.Event{Namespace: "default", EntityName: "redis", Type: "deploy"}, Reasons: []string{"one hop upstream"}}},
+		Candidates: []rca.Candidate{{Event: event.Event{Namespace: "default", EntityKind: "Deployment", EntityName: "redis", Type: "deploy",
+			Payload: []byte(`{"old_image":"redis:7.2","new_image":"redis:7.4"}`)}, Reasons: []string{"one hop upstream"}}},
 	}
 	action, err := engine.Evaluate(context.Background(), result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if action.Status != StatusWouldRun || !action.DryRun {
+	if action.Status != StatusWouldRun || !action.DryRun || action.Approval != ApprovalPending || !action.Proposed {
 		t.Fatalf("unexpected action: %+v", action)
+	}
+	if action.ExpiresAt == nil || action.ExpiresAt.Sub(action.CreatedAt) != DefaultApprovalTTL {
+		t.Fatalf("a proposal must carry its approval deadline: %+v", action.ExpiresAt)
 	}
 	if action.Result != "WOULD HAVE RUN (approval required)" {
 		t.Fatalf("unexpected result: %q", action.Result)
@@ -55,13 +59,18 @@ func TestEngineBlocksLowConfidenceCause(t *testing.T) {
 	store := &memoryAudit{}
 	action, err := NewEngine(store).Evaluate(context.Background(), &rca.Result{
 		Symptom: event.Event{ID: "incident-2"}, Confidence: 0.20,
-		Candidates: []rca.Candidate{{Event: event.Event{EntityName: "redis", Type: "oom_kill"}}},
+		Candidates: []rca.Candidate{{Event: event.Event{EntityName: "redis-1", Type: "oom_kill",
+			Payload: []byte(`{"owner":"redis","container":"redis","original_mem_bytes":104857600}`)}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if action.Status != StatusBlocked || action.DryRun == false {
 		t.Fatalf("unexpected action: %+v", action)
+	}
+	// Issue 1: a blocked decision is never approvable.
+	if action.Approval != ApprovalNotRequired || action.Proposed {
+		t.Fatalf("a blocked decision was left awaiting approval: %+v", action)
 	}
 }
 
@@ -105,7 +114,7 @@ func TestEmptyReasoningIsRepresentedAsAnEmptyList(t *testing.T) {
 }
 
 func TestKubernetesExecutorDeletesOnlyApprovedNonDryRunPod(t *testing.T) {
-	client := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "redis", Namespace: "default"}})
+	client := fake.NewSimpleClientset(unreadyPod("redis", "redis-6d79c4d8db"))
 	executor := NewKubernetesExecutor(client)
 	action := &Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis", Approval: ApprovalNotRequired, DryRun: false}
 	if _, err := executor.Execute(context.Background(), action); err != nil {

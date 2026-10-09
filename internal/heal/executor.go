@@ -2,9 +2,13 @@ package heal
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -12,6 +16,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/tidwall/gjson"
+
+	"github.com/Halcyonic-01/Chronicle/internal/graph"
 )
 
 // Executor is deliberately separate from Engine. Planning and auditing can
@@ -23,10 +29,25 @@ type Executor interface {
 type KubernetesExecutor struct {
 	Client              kubernetes.Interface
 	MaxMemoryMultiplier float64
+	// Applications says which app.kubernetes.io/instance values are Argo CD
+	// Applications; nil when Argo CD is not in use (see graph.GitOpsManager).
+	Applications graph.KnownApplication
 }
 
 func NewKubernetesExecutor(client kubernetes.Interface) *KubernetesExecutor {
 	return &KubernetesExecutor{Client: client, MaxMemoryMultiplier: 2.0}
+}
+
+var updateOptions = metav1.UpdateOptions{FieldManager: FieldManager}
+
+// refuseGitOps stops a write a GitOps controller would revert, or that would
+// hide drift from it. The engine checks the event's evidence; this checks the
+// object as it is now.
+func (e *KubernetesExecutor) refuseGitOps(d *appsv1.Deployment) error {
+	if manager := graph.GitOpsManager(d.Labels, d.Annotations, e.Applications); manager != "" {
+		return errors.New(gitopsProposal(manager))
+	}
+	return nil
 }
 
 func (e *KubernetesExecutor) Execute(ctx context.Context, action *Action) (string, error) {
@@ -56,14 +77,58 @@ func (e *KubernetesExecutor) Execute(ctx context.Context, action *Action) (strin
 	}
 }
 
+// restartPod deletes a pod only while it is still the one the decision was
+// about: present, still unready, and owned by a controller that recreates it.
 func (e *KubernetesExecutor) restartPod(ctx context.Context, action *Action) (string, error) {
 	if action.Namespace == "" || action.Target == "" {
 		return "", fmt.Errorf("pod namespace and target are required")
 	}
-	if err := e.Client.CoreV1().Pods(action.Namespace).Delete(ctx, action.Target, metav1.DeleteOptions{}); err != nil {
+	pod, err := e.Client.CoreV1().Pods(action.Namespace).Get(ctx, action.Target, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("refusing to restart: pod %s no longer exists", action.Target)
+	}
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("deleted pod %s/%s; Kubernetes should recreate it", action.Namespace, action.Target), nil
+	if pod.DeletionTimestamp != nil {
+		// A repeat of this decision, or one already carried out: nothing to do.
+		return fmt.Sprintf("no change: pod %s is already being deleted", action.Target), nil
+	}
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil {
+		return "", fmt.Errorf("refusing to restart: pod %s has no controller, so nothing would recreate it", action.Target)
+	}
+	if want := gjson.GetBytes(action.Payload, "owner").String(); want != "" && ownerWorkload(owner) != want {
+		return "", fmt.Errorf("refusing to restart: pod %s is now owned by %s, not %s", action.Target, owner.Name, want)
+	}
+	if podReady(pod) {
+		return "", fmt.Errorf("refusing to restart: pod %s is ready again", action.Target)
+	}
+	uid := pod.UID
+	if err := e.Client.CoreV1().Pods(action.Namespace).Delete(ctx, action.Target, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("deleted pod %s/%s; %s %s recreates it", action.Namespace, action.Target, owner.Kind, owner.Name), nil
+}
+
+// ownerWorkload names the workload behind a pod's controller: a ReplicaSet
+// name minus its template hash.
+func ownerWorkload(ref *metav1.OwnerReference) string {
+	if ref.Kind == "ReplicaSet" {
+		if i := strings.LastIndex(ref.Name, "-"); i > 0 {
+			return ref.Name[:i]
+		}
+	}
+	return ref.Name
+}
+
+func podReady(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func (e *KubernetesExecutor) Verify(ctx context.Context, action *Action) (string, error) {
@@ -156,10 +221,13 @@ func (e *KubernetesExecutor) bumpMemory(ctx context.Context, action *Action) (st
 	if err != nil {
 		return "", err
 	}
-	if len(d.Spec.Template.Spec.Containers) == 0 {
-		return "", fmt.Errorf("deployment %s has no containers", owner)
+	if err := e.refuseGitOps(d); err != nil {
+		return "", err
 	}
-	container := &d.Spec.Template.Spec.Containers[0]
+	container, err := oomContainer(d, gjson.GetBytes(action.Payload, "container").String())
+	if err != nil {
+		return "", err
+	}
 	current := container.Resources.Limits[corev1.ResourceMemory]
 	if current.IsZero() {
 		return "", fmt.Errorf("deployment %s has no memory limit", owner)
@@ -176,10 +244,25 @@ func (e *KubernetesExecutor) bumpMemory(ctx context.Context, action *Action) (st
 		container.Resources.Limits = corev1.ResourceList{}
 	}
 	container.Resources.Limits[corev1.ResourceMemory] = *resource.NewQuantity(newBytes, resource.BinarySI)
-	if _, err := e.Client.AppsV1().Deployments(action.Namespace).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+	if _, err := e.Client.AppsV1().Deployments(action.Namespace).Update(ctx, d, updateOptions); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("memory limit %d -> %d bytes", current.Value(), newBytes), nil
+	return fmt.Sprintf("memory limit of %s %d -> %d bytes", container.Name, current.Value(), newBytes), nil
+}
+
+// oomContainer is the container that was killed, by name. The first container
+// is used only when it is the only one, never as a guess.
+func oomContainer(d *appsv1.Deployment, name string) (*corev1.Container, error) {
+	containers := d.Spec.Template.Spec.Containers
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i], nil
+		}
+	}
+	if name == "" && len(containers) == 1 {
+		return &containers[0], nil
+	}
+	return nil, fmt.Errorf("deployment %s has no container %q to resize", d.Name, name)
 }
 
 // restoreReplicas puts a workload that was scaled to zero back to the count it
@@ -209,6 +292,9 @@ func (e *KubernetesExecutor) restoreReplicas(ctx context.Context, action *Action
 	// The evidence is a snapshot of the past. If the workload is no longer at
 	// zero somebody has already dealt with it, and writing the old count now
 	// would overwrite a newer, deliberate decision with a stale one.
+	if err := e.refuseGitOps(d); err != nil {
+		return "", err
+	}
 	if d.Spec.Replicas == nil || *d.Spec.Replicas != 0 {
 		have := int32(-1)
 		if d.Spec.Replicas != nil {
@@ -224,7 +310,7 @@ func (e *KubernetesExecutor) restoreReplicas(ctx context.Context, action *Action
 
 	want := int32(previous)
 	d.Spec.Replicas = &want
-	if _, err := e.Client.AppsV1().Deployments(action.Namespace).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+	if _, err := e.Client.AppsV1().Deployments(action.Namespace).Update(ctx, d, updateOptions); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("restored %s/%s to %d replica(s)", action.Namespace, action.Target, want), nil
@@ -244,21 +330,85 @@ func (e *KubernetesExecutor) autoscalerFor(ctx context.Context, namespace, name 
 	return "", nil
 }
 
+// rollbackDeployment returns a Deployment to its previous revision's whole pod
+// template, as `kubectl rollout undo` does: images, environment, resources and
+// every container. Swapping one image left the rest of a bad release in place.
+// It acts only while the bad revision is still the one running, so a newer
+// deploy is never overwritten.
 func (e *KubernetesExecutor) rollbackDeployment(ctx context.Context, action *Action) (string, error) {
 	oldImage := gjson.GetBytes(action.Payload, "old_image").String()
-	if oldImage == "" {
-		return "", fmt.Errorf("rollback requires old_image evidence")
+	newImage := gjson.GetBytes(action.Payload, "new_image").String()
+	if oldImage == "" || newImage == "" {
+		return "", fmt.Errorf("rollback requires old_image and new_image evidence")
 	}
 	d, err := e.Client.AppsV1().Deployments(action.Namespace).Get(ctx, action.Target, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
+	if err := e.refuseGitOps(d); err != nil {
+		return "", err
+	}
 	if len(d.Spec.Template.Spec.Containers) == 0 {
 		return "", fmt.Errorf("deployment %s has no containers", action.Target)
 	}
-	d.Spec.Template.Spec.Containers[0].Image = oldImage
-	if _, err := e.Client.AppsV1().Deployments(action.Namespace).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+	running := d.Spec.Template.Spec.Containers[0].Image
+	if running == oldImage {
+		// A retry after the update landed, or someone already rolled back.
+		return fmt.Sprintf("no change: %s already runs %s", action.Target, oldImage), nil
+	}
+	if running != newImage {
+		return "", fmt.Errorf("refusing to roll back: %s now runs %s, not the %s the decision was about", action.Target, running, newImage)
+	}
+	previous, err := e.previousTemplate(ctx, d)
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("deployment %s rolled back to %s", action.Target, oldImage), nil
+	if len(previous.Spec.Containers) == 0 || previous.Spec.Containers[0].Image != oldImage {
+		return "", fmt.Errorf("refusing to roll back: the previous revision does not run %s", oldImage)
+	}
+	d.Spec.Template = *previous
+	if _, err := e.Client.AppsV1().Deployments(action.Namespace).Update(ctx, d, updateOptions); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("deployment %s rolled back to its previous pod template (%s)", action.Target, oldImage), nil
 }
+
+// previousTemplate is the pod template of the revision before the current one,
+// read from the ReplicaSets the Deployment owns.
+func (e *KubernetesExecutor) previousTemplate(ctx context.Context, d *appsv1.Deployment) (*corev1.PodTemplateSpec, error) {
+	current, err := strconv.ParseInt(d.Annotations[revisionAnnotation], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("deployment %s has no revision to roll back from", d.Name)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(d.Spec.Selector)
+	if err != nil {
+		return nil, err
+	}
+	sets, err := e.Client.AppsV1().ReplicaSets(d.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return nil, err
+	}
+	var best *appsv1.ReplicaSet
+	var bestRevision int64
+	for i := range sets.Items {
+		rs := &sets.Items[i]
+		if !metav1.IsControlledBy(rs, d) {
+			continue
+		}
+		revision, err := strconv.ParseInt(rs.Annotations[revisionAnnotation], 10, 64)
+		if err != nil || revision >= current {
+			continue
+		}
+		if best == nil || revision > bestRevision {
+			best, bestRevision = rs, revision
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("deployment %s has no earlier revision to roll back to", d.Name)
+	}
+	template := best.Spec.Template.DeepCopy()
+	delete(template.Labels, appsv1.DefaultDeploymentUniqueLabelKey)
+	return template, nil
+}
+
+const revisionAnnotation = "deployment.kubernetes.io/revision"

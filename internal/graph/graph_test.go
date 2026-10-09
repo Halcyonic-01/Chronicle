@@ -117,10 +117,10 @@ func TestInferCallEdgesMatchesTheHostNotASubstring(t *testing.T) {
 func TestBuildArgoEdgesLinkApplicationsToWhatTheyDeploy(t *testing.T) {
 	deployments := []appsv1.Deployment{
 		{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", Labels: map[string]string{"argocd.argoproj.io/instance": "victim"}}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Labels: map[string]string{"app.kubernetes.io/instance": "victim"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Annotations: map[string]string{"argocd.argoproj.io/tracking-id": "victim:apps/Deployment:default/worker"}}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "unmanaged", Namespace: "default"}},
 	}
-	edges := BuildArgoEdges(deployments)
+	edges := BuildArgoEdges(deployments, nil)
 	if len(edges) != 2 {
 		t.Fatalf("expected one edge per managed deployment, got %d", len(edges))
 	}
@@ -138,6 +138,39 @@ func TestBuildArgoEdgesLinkApplicationsToWhatTheyDeploy(t *testing.T) {
 	g.SetEdges(append(edges, Edge{From: node("Deployment", "api"), To: node("Pod", "api-1"), Kind: "owns"}))
 	if upstream := g.Upstream("default/Pod/api-1", 3); upstream[ArgoNamespace+"/Application/victim"] != 2 {
 		t.Fatalf("an Argo sync should be reachable as a cause, got %#v", upstream)
+	}
+}
+
+// A Helm release carries app.kubernetes.io/instance too. Treating it as Argo CD
+// ownership invented an "Application" for every release (seen live: the
+// monitoring chart appeared as an Argo application that never existed).
+func TestAHelmReleaseIsNotAnArgoApplication(t *testing.T) {
+	helm := []appsv1.Deployment{
+		{ObjectMeta: metav1.ObjectMeta{Name: "grafana", Namespace: "monitoring", Labels: map[string]string{"app.kubernetes.io/instance": "monitoring"}}},
+	}
+	if edges := BuildArgoEdges(helm, nil); len(edges) != 0 {
+		t.Fatalf("a Helm release became an Argo Application: %+v", edges)
+	}
+	// Even with Argo CD installed, a name Argo CD does not report is not an Application.
+	var apps ApplicationSet
+	apps.Replace([]string{"shop"})
+	if edges := BuildArgoEdges(helm, apps.Has); len(edges) != 0 {
+		t.Fatalf("a Helm release became an Argo Application while Argo CD was in use: %+v", edges)
+	}
+	// Where Argo CD does report that name, the label is its marker.
+	apps.Replace([]string{"shop", "monitoring"})
+	if edges := BuildArgoEdges(helm, apps.Has); len(edges) != 1 || edges[0].From.Name != "monitoring" {
+		t.Fatalf("an Application Argo CD reports should be linked, got %+v", edges)
+	}
+}
+
+// Flux-managed workloads have no Argo Application.
+func TestAFluxWorkloadIsNotAnArgoApplication(t *testing.T) {
+	flux := []appsv1.Deployment{
+		{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", Labels: map[string]string{"kustomize.toolkit.fluxcd.io/name": "apps"}}},
+	}
+	if edges := BuildArgoEdges(flux, func(string) bool { return true }); len(edges) != 0 {
+		t.Fatalf("a Flux workload became an Argo Application: %+v", edges)
 	}
 }
 

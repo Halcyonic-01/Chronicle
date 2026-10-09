@@ -1,0 +1,22 @@
+# The same CREATE requests from another user: the policies are about Chronicle only, so every one skips.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: other-create
+policies:
+  - ../../chronicle-heal-guardrails.yaml
+resources:
+  - ../resources.yaml
+userinfo: ../userinfo-other.yaml
+variables: ../values-create.yaml
+results:
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [coredns]
+    result: skip
+  - policy: chronicle-heal-never-create
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [new-pod]
+    result: skip

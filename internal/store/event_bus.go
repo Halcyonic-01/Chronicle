@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 	"golang.org/x/sync/errgroup"
@@ -35,21 +36,55 @@ func NewKafkaBus(brokers, topic, group string) *KafkaBus {
 		addresses = []string{"localhost:9092"}
 	}
 	return &KafkaBus{
-		writer: &kafka.Writer{Addr: kafka.TCP(addresses...), Topic: topic, Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll, AllowAutoTopicCreation: true},
+		// A synchronous write waits for its batch to fill or for BatchTimeout,
+		// which defaults to a second: one event per call was one event per
+		// second, and an incident's log flood queued alerts minutes behind.
+		writer: &kafka.Writer{Addr: kafka.TCP(addresses...), Topic: topic, Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll, AllowAutoTopicCreation: true,
+			BatchTimeout: publishLinger},
 		reader: kafka.NewReader(kafka.ReaderConfig{Brokers: addresses, Topic: topic, GroupID: group, MinBytes: 1, MaxBytes: 10 << 20}),
 	}
 }
 
+// publishLinger is how long a lone event waits for company before it is sent.
+const publishLinger = 10 * time.Millisecond
+
+// PublishBatchSize bounds how many queued events go out in one write.
+const PublishBatchSize = 200
+
 func (b *KafkaBus) Publish(ctx context.Context, e event.Event) error {
-	payload, err := json.Marshal(e)
-	if err != nil {
-		return err
+	return b.PublishBatch(ctx, []event.Event{e})
+}
+
+// PublishBatch writes events in one call, in order.
+func (b *KafkaBus) PublishBatch(ctx context.Context, events []event.Event) error {
+	messages := make([]kafka.Message, 0, len(events))
+	for _, e := range events {
+		payload, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		key := []byte(event.CorrelationKey(e))
+		if len(key) == 0 {
+			key = []byte(e.ID)
+		}
+		messages = append(messages, kafka.Message{Key: key, Value: payload})
 	}
-	key := []byte(event.CorrelationKey(e))
-	if len(key) == 0 {
-		key = []byte(e.ID)
+	return b.writer.WriteMessages(ctx, messages...)
+}
+
+// DrainBatch returns first plus whatever is already queued, up to max, without
+// waiting: a quiet stream still sends each event at once, a flood goes in bulk.
+func DrainBatch(first event.Event, queue <-chan event.Event, max int) []event.Event {
+	batch := []event.Event{first}
+	for len(batch) < max {
+		select {
+		case e := <-queue:
+			batch = append(batch, e)
+		default:
+			return batch
+		}
 	}
-	return b.writer.WriteMessages(ctx, kafka.Message{Key: key, Value: payload})
+	return batch
 }
 
 // pendingMessage pairs a fetched Kafka message with the ID of the event it

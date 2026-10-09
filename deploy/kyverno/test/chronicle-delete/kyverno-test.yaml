@@ -1,0 +1,42 @@
+# DELETE requests made by Chronicle: each policy catches its violation and passes a benign one.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: chronicle-delete
+policies:
+  - ../../chronicle-heal-guardrails.yaml
+resources:
+  - ../resources.yaml
+userinfo: ../userinfo-chronicle.yaml
+variables: ../values-delete.yaml
+results:
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api]
+    result: pass
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [coredns]
+    result: fail
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [api-5f-abc, debug, owned-no-controller]
+    result: pass
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [coredns-7d-xyz]
+    result: fail
+  - policy: chronicle-heal-delete-controlled-pods
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [api-5f-abc, coredns-7d-xyz]
+    result: pass
+  - policy: chronicle-heal-delete-controlled-pods
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [debug, new-pod, owned-no-controller]
+    result: fail

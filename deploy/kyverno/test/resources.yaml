@@ -1,0 +1,151 @@
+# Shared fixtures for the guardrail tests. Each test's values file sets the
+# admission operation per resource.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api, namespace: default}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: api}}
+  template:
+    metadata: {labels: {app: api}}
+    spec:
+      containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: coredns, namespace: kube-system}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: coredns}}
+  template:
+    metadata: {labels: {app: coredns}}
+    spec:
+      containers: [{name: coredns, image: "coredns:1.11"}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-api
+  namespace: default
+  annotations: {argocd.argoproj.io/tracking-id: "shop:apps/Deployment:default/shop-api"}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: shop-api}}
+  template:
+    metadata: {labels: {app: shop-api}}
+    spec:
+      containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux-api
+  namespace: default
+  labels: {kustomize.toolkit.fluxcd.io/name: apps}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: flux-api}}
+  template:
+    metadata: {labels: {app: flux-api}}
+    spec:
+      containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: host-network, namespace: default}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: host-network}}
+  template:
+    metadata: {labels: {app: host-network}}
+    spec:
+      hostNetwork: true
+      containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: privileged, namespace: default}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: privileged}}
+  template:
+    metadata: {labels: {app: privileged}}
+    spec:
+      containers:
+        - {name: api, image: "api:v1"}
+        - {name: debug, image: "busybox", securityContext: {privileged: true}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: host-path, namespace: default}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: host-path}}
+  template:
+    metadata: {labels: {app: host-path}}
+    spec:
+      volumes: [{name: root, hostPath: {path: /}}]
+      containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: huge, namespace: default}
+spec:
+  replicas: 50
+  selector: {matchLabels: {app: huge}}
+  template:
+    metadata: {labels: {app: huge}}
+    spec:
+      containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: debug, namespace: default}
+spec:
+  containers: [{name: debug, image: busybox}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: api-5f-abc
+  namespace: default
+  ownerReferences: [{apiVersion: apps/v1, kind: ReplicaSet, name: api-5f, uid: "1", controller: true}]
+spec:
+  containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: coredns-7d-xyz
+  namespace: kube-system
+  ownerReferences: [{apiVersion: apps/v1, kind: ReplicaSet, name: coredns-7d, uid: "2", controller: true}]
+spec:
+  containers: [{name: coredns, image: "coredns:1.11"}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: new-pod, namespace: default}
+spec:
+  containers: [{name: api, image: "api:v1"}]
+---
+# Has an owner, but not a controller: deleting it recreates nothing.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: owned-no-controller
+  namespace: default
+  ownerReferences: [{apiVersion: v1, kind: ConfigMap, name: cfg, uid: "3"}]
+spec:
+  containers: [{name: api, image: "api:v1"}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: privileged-init, namespace: default}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: privileged-init}}
+  template:
+    metadata: {labels: {app: privileged-init}}
+    spec:
+      initContainers: [{name: setup, image: busybox, securityContext: {privileged: true}}]
+      containers: [{name: api, image: "api:v1"}]

@@ -222,7 +222,8 @@ func (k *K8sCollector) catchUpRelated(prior *checkpoint, services []*corev1.Serv
 		ready, reason, message := nodeCondition(n, corev1.NodeReady)
 		switch {
 		case was && ready != corev1.ConditionTrue:
-			k.emitResource("Node", "", n.Name, "node_not_ready", "critical", fmt.Sprintf("%s is NotReady", n.Name), time.Now().UTC(),
+			at, _ := k.nodeFailedAt(n.Name)
+			k.emitResource("Node", "", n.Name, "node_not_ready", "critical", fmt.Sprintf("%s is NotReady", n.Name), at,
 				missed(map[string]any{"reason": reason, "message": message, "status": string(ready)}))
 		case !was && ready == corev1.ConditionTrue:
 			k.emitResource("Node", "", n.Name, "became_ready", "info", fmt.Sprintf("%s is Ready", n.Name), time.Now().UTC(), missed(map[string]any{}))
@@ -276,6 +277,7 @@ func (k *K8sCollector) catchUpDeployment(was deploymentState, d *appsv1.Deployme
 	changedAt, changedBy := specChangeTime(d)
 	emit := func(typ, title string, payload map[string]any) {
 		payload["changed_by"], payload["missed"] = changedBy, true
+		payload = k.withGitOps(d, payload)
 		k.Emit(event.Event{Source: "k8s", OccurredAt: changedAt, EntityKind: "Deployment", EntityName: d.Name, Namespace: d.Namespace, Type: typ, Severity: "info", Title: title, Payload: mustJSON(payload)})
 	}
 	if was.Image != now.Image {

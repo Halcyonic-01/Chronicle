@@ -1,0 +1,61 @@
+# UPDATE requests made by Chronicle: each policy catches its violation and passes a benign one.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: chronicle-update
+policies:
+  - ../../chronicle-heal-guardrails.yaml
+resources:
+  - ../resources.yaml
+userinfo: ../userinfo-chronicle.yaml
+variables: ../values-update.yaml
+results:
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api, shop-api, huge]
+    result: pass
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [coredns]
+    result: fail
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [api-5f-abc]
+    result: pass
+  - policy: chronicle-heal-namespaces
+    isValidatingPolicy: true
+    kind: Pod
+    resources: [coredns-7d-xyz]
+    result: fail
+  - policy: chronicle-heal-no-gitops-writes
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api, huge]
+    result: pass
+  - policy: chronicle-heal-no-gitops-writes
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [shop-api, flux-api]
+    result: fail
+  # The CLI gives an UPDATE an old object identical to the new one, so nothing
+  # is widened: an already-privileged workload that Chronicle merely restarts
+  # must not be flagged. Widening itself is tested on CREATE here, and on a
+  # real API server by scripts/test-kyverno-live.sh.
+  - policy: chronicle-heal-no-privilege-widening
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api, shop-api, huge, host-network, privileged, host-path, privileged-init]
+    result: pass
+  - policy: chronicle-heal-replica-ceiling
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [api, shop-api]
+    result: pass
+  - policy: chronicle-heal-replica-ceiling
+    isValidatingPolicy: true
+    kind: Deployment
+    resources: [huge]
+    result: fail

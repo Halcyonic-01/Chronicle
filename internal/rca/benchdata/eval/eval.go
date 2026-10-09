@@ -158,6 +158,13 @@ func Run(c Case, opt Options) (Row, error) {
 	if err != nil {
 		return Row{}, err
 	}
+	return Score(c, res, opt), nil
+}
+
+// Score judges an analysis already made against a case's ground truth. The
+// chaos harness scores a live Chronicle's answer with it, so live and
+// synthetic results mean the same thing. Only the truth fields of c are used.
+func Score(c Case, res *rca.Result, opt Options) Row {
 	row := Row{Name: c.Name, Group: c.Group, Expected: c.Expected, InScope: c.InScope, Verdict: res.Verdict,
 		Confidence: res.Confidence, Contested: res.Contested, Narrative: res.Narrative}
 	for _, r := range c.Actual {
@@ -235,7 +242,7 @@ func Run(c Case, opt Options) (Row, error) {
 	} else {
 		row.SkippedInsufficient = true
 	}
-	return row, nil
+	return row
 }
 
 // classify names what happened and whether it was a false confident diagnosis.

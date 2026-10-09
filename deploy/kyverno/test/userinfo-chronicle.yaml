@@ -1,0 +1,6 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: UserInfo
+metadata: {name: chronicle}
+userInfo:
+  username: system:serviceaccount:chronicle:chronicle
+  groups: [system:serviceaccounts, system:serviceaccounts:chronicle, system:authenticated]

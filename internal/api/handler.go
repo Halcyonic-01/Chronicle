@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -146,6 +147,9 @@ func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if action != nil {
+		action.State = heal.StateOf(action)
+	}
 	json.NewEncoder(w).Encode(analyzeResponse{Result: res, Action: action})
 }
 
@@ -581,11 +585,18 @@ func (h *Handler) HealingRules(w http.ResponseWriter, r *http.Request) {
 			"action_type":     rule.ActionType,
 			"min_confidence":  rule.MinConfidence,
 			"max_per_hour":    rule.MaxPerHour,
-			"require_approve": rule.RequireApprove,
+			"require_approve": true,
 		})
 	}
-	payload := map[string]any{"rules": rules, "dry_run": h.healer.DryRun}
+	payload := map[string]any{"rules": rules, "dry_run": h.healer.DryRun,
+		// Every executable action needs approval; nothing runs automatically.
+		"automatic_execution": false, "approval_ttl": h.healer.ApprovalTTL.String()}
 	if h.execution != nil {
+		p := h.execution.Policy
+		payload["live_enabled"] = p.LiveEnabled
+		payload["kill_switch"] = p.KillSwitch
+		payload["max_executions_per_hour"] = p.MaxExecutionsPerHour
+		payload["target_cooldown"] = p.TargetCooldown.String()
 		remaining, started := h.execution.ObservationRemaining(r.Context())
 		payload["observation_started"] = started
 		payload["observation_days_remaining"] = int(remaining.Hours()/24 + 0.999)
@@ -616,7 +627,14 @@ func (h *Handler) HealingCalibration(w http.ResponseWriter, r *http.Request) {
 	if bands == nil {
 		bands = []map[string]any{}
 	}
-	payload := map[string]any{"bands": bands, "settle_window": heal.SettleWindow.String()}
+	payload := map[string]any{"bands": bands, "settle_window": heal.SettleWindow.String(), "labeller": heal.LabellerVersion}
+	if counter, ok := h.actions.(interface {
+		PreservedLabelCount(context.Context) (int, error)
+	}); ok {
+		if n, err := counter.PreservedLabelCount(r.Context()); err == nil {
+			payload["superseded_labels_preserved"] = n
+		}
+	}
 	if h.execution != nil {
 		e := h.execution.Evidence(r.Context())
 		remaining, started := h.execution.ObservationRemaining(r.Context())
@@ -666,13 +684,37 @@ func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(input.By) == "" {
 		input.By = "local-reviewer"
 	}
-	action, err := h.actions.DecideAction(r.Context(), parts[3], parts[4] == "approve", input.By, input.Reason)
-	if err != nil {
-		http.Error(w, `{"error":"action is no longer pending or was not found"}`, http.StatusConflict)
+	// Approval only records the decision. The execution worker re-checks
+	// every gate before acting, outside this request.
+	now := time.Now().UTC()
+	result := "APPROVED; live healing is disabled, so it will not run and expires unexecuted"
+	if h.execution != nil && h.execution.Policy.LiveEnabled {
+		result = "APPROVED; waiting for the execution worker, which re-checks every safety gate first"
+	}
+	action, err := h.actions.DecideAction(r.Context(), heal.Decision{
+		ID: parts[3], Approved: parts[4] == "approve", By: input.By, Reason: input.Reason, Result: result, Now: now,
+	})
+	switch {
+	case errors.Is(err, heal.ErrActionNotFound):
+		http.Error(w, `{"error":"healing action not found"}`, http.StatusNotFound)
+		return
+	case errors.Is(err, heal.ErrExpired):
+		http.Error(w, `{"error":"the decision expired before it was approved"}`, http.StatusConflict)
+		return
+	case errors.Is(err, heal.ErrNotPending):
+		// Our own message, naming the state the decision is in.
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		// A storage failure is not a conflict, and its text is not for callers.
+		slog.Error("recording a healing decision failed", "action", parts[3], "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "could not record the decision")
 		return
 	}
-	if approved := parts[4] == "approve"; approved && h.execution != nil && h.execution.Policy.LiveEnabled {
-		_, _ = h.execution.ExecuteApproved(r.Context(), action)
-	}
 	json.NewEncoder(w).Encode(action)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }

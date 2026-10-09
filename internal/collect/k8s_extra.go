@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
@@ -130,8 +132,9 @@ func (k *K8sCollector) diffNodes(old, new *corev1.Node) {
 	now, reason, message := nodeCondition(new, corev1.NodeReady)
 	switch {
 	case was == corev1.ConditionTrue && now != corev1.ConditionTrue:
-		k.emitResource("Node", "", new.Name, "node_not_ready", "critical", fmt.Sprintf("%s is NotReady", new.Name), time.Now().UTC(),
-			map[string]any{"reason": reason, "message": message, "status": string(now)})
+		at, beat := k.nodeFailedAt(new.Name)
+		k.emitResource("Node", "", new.Name, "node_not_ready", "critical", fmt.Sprintf("%s is NotReady", new.Name), at,
+			map[string]any{"reason": reason, "message": message, "status": string(now), "last_heartbeat": beat})
 	case was != corev1.ConditionTrue && now == corev1.ConditionTrue:
 		k.emitResource("Node", "", new.Name, "became_ready", "info", fmt.Sprintf("%s is Ready", new.Name), time.Now().UTC(), map[string]any{})
 	}
@@ -147,6 +150,31 @@ func (k *K8sCollector) diffNodes(old, new *corev1.Node) {
 				map[string]any{"condition": string(t)})
 		}
 	}
+}
+
+// heartbeatTrust bounds how old a node's last heartbeat may be and still date
+// its failure; older, and the lease says little about when it stopped.
+const heartbeatTrust = 5 * time.Minute
+
+// nodeFailedAt dates a node failure by its last kubelet heartbeat (its Lease),
+// not by when the controller gave up waiting: that is 40-50s later, after the
+// failure's own symptoms. Falls back to now.
+func (k *K8sCollector) nodeFailedAt(node string) (time.Time, string) {
+	now := time.Now().UTC()
+	if k.client == nil {
+		return now, ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lease, err := k.client.CoordinationV1().Leases("kube-node-lease").Get(ctx, node, metav1.GetOptions{})
+	if err != nil || lease.Spec.RenewTime == nil {
+		return now, ""
+	}
+	beat := lease.Spec.RenewTime.Time.UTC()
+	if beat.After(now) || now.Sub(beat) > heartbeatTrust {
+		return now, beat.Format(time.RFC3339)
+	}
+	return beat, beat.Format(time.RFC3339)
 }
 
 // ignoredConfigMap skips ConfigMaps that change on their own: Chronicle's own

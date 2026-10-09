@@ -56,9 +56,6 @@ var sidecarContainers = map[string]bool{"linkerd-proxy": true, "istio-proxy": tr
 // "reachable through the thing everything is plugged into" is not impact.
 const EdgeCallsInfra = "calls_infra"
 
-// argoInstanceLabels are the labels Argo CD stamps on the workloads it manages.
-var argoInstanceLabels = []string{"argocd.argoproj.io/instance", "app.kubernetes.io/instance"}
-
 // hostNames pulls the host out of an environment value so a service is matched
 // on identity rather than on appearing somewhere in the string. Accepts
 // "redis://redis.default.svc.cluster.local:6379", "http://api:8080", "api:8080"
@@ -126,27 +123,28 @@ func InferCallEdges(pod corev1.Pod, knownSvcs map[string]bool) []Edge {
 	return dedupeEdges(edges)
 }
 
-// BuildArgoEdges links an Argo CD Application to the Deployments it manages,
-// using the instance label Argo stamps on them. Without these edges an Argo
-// sync event has no node in the graph, so it can never be ranked as a cause of
-// anything it deployed.
-func BuildArgoEdges(deployments []appsv1.Deployment) []Edge {
+// BuildArgoEdges links an Argo CD Application to the Deployments it manages.
+// Without these edges an Argo sync event has no node in the graph, so it can
+// never be ranked as a cause of anything it deployed.
+//
+// Ownership is read as GitOpsManager does: Argo's own markers always count, and
+// app.kubernetes.io/instance only when its value is an Application Argo CD
+// reported, so a Helm release never becomes an Application that does not exist.
+func BuildArgoEdges(deployments []appsv1.Deployment, known KnownApplication) []Edge {
 	var edges []Edge
 	for _, deployment := range deployments {
-		for _, label := range argoInstanceLabels {
-			instance := deployment.Labels[label]
-			if instance == "" {
-				continue
-			}
-			edges = append(edges, Edge{
-				From:   Node{Kind: "Application", Name: instance, Namespace: ArgoNamespace},
-				To:     Node{Kind: "Deployment", Name: deployment.Name, Namespace: deployment.Namespace},
-				Kind:   "owns",
-				Weight: 1,
-				Source: "static",
-			})
-			break
+		manager := GitOpsManager(deployment.Labels, deployment.Annotations, known)
+		application, ok := strings.CutPrefix(manager, "argocd:")
+		if !ok || application == "" {
+			continue
 		}
+		edges = append(edges, Edge{
+			From:   Node{Kind: "Application", Name: application, Namespace: ArgoNamespace},
+			To:     Node{Kind: "Deployment", Name: deployment.Name, Namespace: deployment.Namespace},
+			Kind:   "owns",
+			Weight: 1,
+			Source: "static",
+		})
 	}
 	return dedupeEdges(edges)
 }

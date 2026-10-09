@@ -43,10 +43,18 @@ spec:
           args:
             - |
               until pg_isready -d "$POSTGRES_URL"; do sleep 2; done
-              for migration in /migrations/*.sql; do
-                echo "Applying $migration"
-                psql "$POSTGRES_URL" -v ON_ERROR_STOP=1 -f "$migration"
-              done
+              # Every replica runs every migration at start-up. One session holds an
+              # advisory lock for the whole run, so replicas starting together apply
+              # them one after another instead of interleaved (two pods once copied
+              # the same outcome labels twice).
+              {
+                echo "SELECT pg_advisory_lock(7429001);"
+                for migration in /migrations/*.sql; do
+                  printf '\\echo Applying %s\n' "$migration"
+                  cat "$migration"
+                  echo
+                done
+              } | psql "$POSTGRES_URL" -v ON_ERROR_STOP=1 -f -
           volumeMounts:
             - name: migrations
               mountPath: /migrations
@@ -162,6 +170,14 @@ spec:
               value: default/redis
             - name: HEAL_ACTION_TIMEOUT
               value: 30s
+            - name: HEAL_VERIFY_TIMEOUT
+              value: 3m
+            - name: HEAL_APPROVAL_TTL
+              value: 30m
+            - name: HEAL_MAX_EXECUTIONS_PER_HOUR
+              value: "3"
+            - name: HEAL_TARGET_COOLDOWN
+              value: 30m
             - name: HEAL_OBSERVATION_STARTED_AT
               value: ""
             - name: SLACK_WEBHOOK_URL

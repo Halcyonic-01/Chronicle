@@ -39,3 +39,6 @@ docs/
 internal/rca/testdata/ambig_*.json
 internal/rca/testdata/end_*.json
 internal/rca/testdata/start_*
+
+# Live chaos run logs are local; copy one worth citing into a tracked directory.
+/chaos-results/
