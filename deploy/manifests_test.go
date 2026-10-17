@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -427,6 +429,49 @@ func TestTheE2EOverlayNeverLowersAConfidenceFloor(t *testing.T) {
 		d, ok := defaults[r.Name]
 		if !ok || r.CauseType != d.CauseType || r.ActionType != d.ActionType || r.MinConfidence != d.MinConfidence {
 			t.Errorf("rule %s differs from the built-in one beyond its hourly cap: %+v vs %+v", r.Name, r, d)
+		}
+	}
+}
+
+// .env.example lists every variable the code reads, and nothing it does not.
+func TestEnvExampleMatchesTheCode(t *testing.T) {
+	read := regexp.MustCompile(`(?:os\.Getenv|valueOrEnv|intFromEnv|floatFromEnv|durationFromEnv|durationEnv|intEnv|floatEnv|timeEnv)\("([A-Z0-9_]+)"`)
+	// Set by the platform, or only for tests, benchmarks and the e2e harness.
+	ignore := regexp.MustCompile(`^(HOME|KUBECONFIG|KUBERNETES_SERVICE_HOST|RCA_BENCH_.*|RCA_HOLDOUT_OUT|RCA_INDEPENDENT.*|RCA_SENSITIVITY.*|E2E_.*)$`)
+	code := map[string]bool{}
+	for _, dir := range []string{"../cmd", "../internal"} {
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			raw, err := os.ReadFile(path)
+			for _, m := range read.FindAllStringSubmatch(string(raw), -1) {
+				if !ignore.MatchString(m[1]) {
+					code[m[1]] = true
+				}
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile("../.env.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^#? ?([A-Z0-9_]+)=`).FindAllStringSubmatch(string(raw), -1) {
+		listed[m[1]] = true
+	}
+	for name := range code {
+		if !listed[name] {
+			t.Errorf("%s is read by the code but missing from .env.example", name)
+		}
+	}
+	for name := range listed {
+		if !code[name] && !strings.HasPrefix(name, "CHRONICLE_TEST_") && !strings.HasPrefix(name, "HEAL_TEST_") {
+			t.Errorf("%s is in .env.example but nothing reads it", name)
 		}
 	}
 }
