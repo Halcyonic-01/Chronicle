@@ -32,7 +32,8 @@ RCA result ──► engine ──► skipped / blocked              (terminal, 
    that the executor would refuse. It must also clear the rule's confidence
    floor and its hourly limit, counted per outage. Only then does it become
    `would_run`, awaiting approval, with a deadline (`HEAL_APPROVAL_TTL`).
-2. **Approval (HTTP).** Needs the approval token. It succeeds only for a
+2. **Approval (HTTP).** Needs an approver identity (an OIDC sign-in, or the
+   shared token if no provider is configured). It succeeds only for a
    pending, unexpired `would_run`. It records the decision and executes nothing.
 3. **Worker (execution time).** Re-checks, against the present:
    - approval state and deadline;
@@ -144,9 +145,71 @@ own checks.
 
 **Secrets** are referenced by name and never logged:
 
-- `chronicle-config/HEAL_APPROVAL_TOKEN` (approval; without it nothing can be approved);
+- `chronicle-config/HEAL_APPROVAL_TOKEN` (approval when no OIDC provider is configured; without it, and without OIDC, nothing can be approved). OIDC needs no secret;
 - `ARGOCD_TOKEN`;
 - `SLACK_WEBHOOK_URL`.
+
+## Approver authentication (OIDC)
+
+Without a provider, approval takes one shared token, and the approver's name is
+whatever the caller types. With `OIDC_ISSUER_URL` set, an approver is a person
+the identity provider vouches for, and that is what the audit trail records.
+
+**How it works.** The console signs the approver in with the OpenID Connect
+authorization-code flow and PKCE (a public client: no client secret exists to
+leak). It sends the resulting ID token as `X-Chronicle-Heal-Token`. For every
+approve or deny, the server:
+
+1. verifies the token against the provider's published keys: signature,
+   issuer, audience (`OIDC_CLIENT_ID`), expiry, and an age bound
+   (`OIDC_MAX_TOKEN_AGE`, by `iat`);
+2. requires the person to be in `OIDC_ALLOWED_GROUPS` (the `OIDC_GROUPS_CLAIM`
+   claim, default `groups`) or `OIDC_ALLOWED_EMAILS` (counted only when the
+   provider marks the email verified);
+3. records the verified email (or subject), plus issuer and subject, as the
+   decider. The `by` field in the request body is ignored.
+
+Authentication runs before anything else, so a caller who may not approve
+learns nothing about the actions or the store.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OIDC_ISSUER_URL` | empty | Empty keeps the shared token. Must be `https` (plain `http` only for localhost) |
+| `OIDC_CLIENT_ID` | none | Required with an issuer: the audience tokens must carry |
+| `OIDC_ALLOWED_GROUPS`, `OIDC_ALLOWED_EMAILS` | none | Comma-separated; at least one is required. Empty never means everyone |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim holding the groups (a list or a comma-separated string) |
+| `OIDC_MAX_TOKEN_AGE` | `1h` | Older tokens are refused even if not yet expired |
+| `OIDC_SCOPES` | `openid email profile groups` | Requested at sign-in; drop `groups` if the provider rejects it |
+
+**Provider setup.** Register a *public* client (no secret) with PKCE, with the
+redirect URI `<console origin>/` (for example `https://chronicle.example.com/`),
+and allow the console's origin for CORS on the token endpoint, since the
+browser makes that call. Add the groups claim to the ID token.
+
+**Failure modes.**
+
+- *Invalid configuration* (issuer without a client id or allowlist, or a
+  non-https issuer): the collector refuses to start.
+- *Provider unreachable*: Chronicle starts and everything read-only works.
+  Approvals fail closed with 503 and discovery is retried every 5 seconds.
+- *Token refused*: 401 with no detail (the reason is in the log). *Valid token,
+  not an approver*: 403.
+- *With OIDC on, the shared token is ignored.* It is not a second door.
+
+**Rollback.** Empty `OIDC_ISSUER_URL` and redeploy. Approvals go back to the
+shared token, and decisions already recorded keep their identity.
+
+**Limits, stated plainly.**
+
+- Group membership is read from the token, so removing someone from a group
+  takes effect when their token ages out (at most `OIDC_MAX_TOKEN_AGE`).
+- The ID token lives in the tab's `sessionStorage`; a script injected into the
+  console could read it. The console loads no third-party script.
+- One approver may approve a proposal alone; there is no second-person rule.
+- The server was tested against a fake provider that signs real tokens, and
+  the console flow under Node with a fake window. **It has not been run against a
+  real identity provider** (Keycloak, Dex, Google, Okta); do that before
+  relying on it, especially the groups claim and CORS on the token endpoint.
 
 ## Deploying
 
@@ -210,7 +273,7 @@ tested).
 | 2 | Stale approvals | **Fixed** | Deadline on approval and execution, plus live-state checks: `TestOnlyApprovedUnexpiredDecisionsExecute`, `TestRollbackNeverOverwritesALaterDeploy`, `TestRestartRevalidatesThePod` |
 | 3 | One outage, many decisions | **Fixed** | `TestOneProposalPerOutage`, `TestPostgresProposalsAreCountedPerOutage` |
 | 4 | No execution-time limits | **Fixed** | `TestPostgresClaimEnforcesLimitsAtomically`, `TestAClaimRefusalBlocksWithoutExecuting` |
-| 5 | Restart is a raw delete | **Partial** | Controller-owner, readiness and UID checks are done. Still deferred: the Eviction API (PDBs) and verifying the replacement became ready. |
+| 5 | Restart is a raw delete | **Fixed** | Eviction API with a UID precondition, so PodDisruptionBudgets apply; recovery means the owner's replicas are all ready again: `TestRestartEvictsAndNeverDeletes`, `TestADisruptionBudgetRefusalIsReportedAndRetryable`, `TestVerificationRequiresTheWorkloadToRecover`, `TestRealClusterEvictionHonoursTheDisruptionBudget` (real API server) |
 | 6 | Execution inside HTTP | **Fixed** | Worker plus separate verify budget: `TestTheWorkerExecutesNothingWhileLiveIsOff`. Still deferred: post-action symptom check and auto-revert. |
 | 7 | Image-only rollback | **Fixed** | `TestRollbackRestoresThePreviousPodTemplate` plus GitOps refusal |
 | 8 | Memory bump unworkable | **Partial** | No longer planned without evidence, and the container is chosen by name. Still deferred: the collector recording the original limit, and a cumulative cap. |
@@ -231,7 +294,7 @@ tested).
 | 23 | Restart rule fires on any unready pod | Deferred | Needs a "running, unready, no restarts for N minutes" precondition. |
 | 24 | Duplicate-insert race returns a phantom ID | Deferred | |
 | 25 | Re-analysis hides the existing decision | Deferred | |
-| 26 | Approver identity is self-declared | Deferred | Needs real authentication (OIDC) |
+| 26 | Approver identity is self-declared | **Fixed** (with limits) | OIDC: `TestTheApproverIsTheVerifiedIdentityNotTheBody`, `TestTheSharedTokenStopsWorkingOnceOIDCIsConfigured`, `TestTokensThatDoNotVerifyAreRefused`, `TestPostgresRecordsTheVerifiedApprover`. Not run against a real provider; see *Approver authentication* |
 | 27 | Slack failures silent, no action link | **Partial** | Failures are now logged. A link is still missing. |
 | 28 | Console claims dry-run regardless of mode | **Fixed** | The banner reads the live, kill-switch, TTL, cap and cooldown values from `/api/heal/rules`. |
 | 29 | RBAC wider than needed | **Fixed** | `TestDefaultRBACGrantsNoWritesOutsideChronicle`, `TestExecutorRBACIsNamespaced` |
@@ -371,6 +434,51 @@ winner's `executing` row. A claim now first checks that the decision is still
 claimable, and a completion is written only from the state it is made from
 (a refusal only over `approved`, a result only over `executing`).
 
+## Live RCA-to-remediation campaign (disposable cluster, 2026-10-17)
+
+A fresh kind cluster with the `deploy/e2e` overlay: Keycloak 26.6.4 as the
+identity provider, live healing on, approval required, test-only gates (see
+`deploy/e2e/README.md`). `scripts/e2e-heal.sh` injected each fault, let the
+deployed Chronicle diagnose it, tried to decide the proposal with no token
+and with a non-approver, decided it as the approver, waited for the worker,
+and checked recovery before the harness restored anything. Logs:
+`chaos-results/heal-campaign-{1,2,3}.jsonl` (local, not committed).
+
+| Fault | RCA (top cause, confidence) | Proposal | Decision | Final | What it shows |
+|---|---|---|---|---|---|
+| redis scaled to zero | scale:redis, 0.68 | restore_replicas | approved | **succeeded**; outage gone 66 s later, no harness help | the whole path works |
+| redis scaled to zero again, 5 min later | scale:redis, **0.38 inconclusive** | blocked by the 0.65 floor | — | blocked | the floor refuses an uncertain diagnosis (a repeat outage's earlier events compete) |
+| api bad release | deploy:api, 0.93 | rollback_deployment | approved | **succeeded**; outage gone 55 s later | template rollback works |
+| redis deadlocked, strict PDB | became_unready:redis pod, **0.39** | blocked by the 0.80 floor | — | blocked | a bare failure 5 hops upstream scores low; the PDB path was not reached (tested on a real API server instead) |
+| api two bad releases, 9.5 min after the rollback | deploy:api, 0.96 | rollback_deployment | approved | **blocked: cooldown** ("acted on 9m30s ago") | the per-workload cooldown, live |
+| same, 25 min later | deploy:api (release **a**), 1.00 | rollback_deployment | approved | **failed: "refusing to roll back: api now runs release b"** | the executor's re-read refuses stale evidence |
+| worker scaled to zero | scale:worker, 0.73 | restore_replicas | **denied** | denied; nothing ran | denial is final |
+| api bad config | config_change:api, 0.92 | none ("no rule for config_change") | — | none | nothing is proposed without a rule (the harness first mislabelled this; fixed) |
+| redis deadlocked | became_unready:redis pod, 0.39 | blocked by the 0.80 floor | — | blocked | as above |
+| worker scaled to zero under a pod quota | scale:worker, 0.77 | restore_replicas | approved | **failed: "rollout did not complete: 0 of 1 replicas updated"** after 185 s | a remediation that runs and does not work is recorded as failed |
+
+Every time a proposal was pending, the request without a token got **401** and
+the non-approver (`vic`) **403**, and the proposal stayed pending; every
+decision was recorded as `ana@chronicle.test` with her Keycloak subject,
+whatever name the request body claimed. Every experiment's cluster returned to
+its steady state. RCA ranked the true cause first in all ten.
+
+**Final run, on the final build** (`chaos-results/heal-campaign-final.jsonl`,
+the suite as it now stands): RCA top-1 correct in 8 of 8; 6 of 8 remediations
+ended as pre-registered (restore and rollback succeeded and healed in 60 s
+each; the quota-blocked restore and the stale-evidence rollback failed with
+the expected reasons; the denial held; the config typo proposed nothing). The
+2 mismatches are both deadlock steps, refused by the restart floor at 0.40 and
+0.39. The `api-two-bad-releases` expectation was revised after the first live
+run showed which release RCA names; that is recorded in `HealSuite`.
+
+**What it did not show.** `restart_pod` never ran: its proposals were refused
+by the floor. The controller's `ProgressDeadlineExceeded` fast path did not
+fire (Kubernetes does not apply the progress deadline to a scale-up of a
+complete Deployment), so the quota failure was caught by the verify timeout.
+Outcome labels: Chronicle's own executions are labelled `unknown` by design
+(finding 20), so no symptom check follows Chronicle's own actions yet.
+
 ## Also fixed in this round
 
 - **`TestPostgresRCAAndHistoricalGraph` failed against a real database.** Two
@@ -401,12 +509,13 @@ Not fixed, and not claimed as fixed.
 | Item | Why it is open |
 |---|---|
 | Findings 5, 8, 9, 27 | partial; what remains is in the table above |
-| Findings 14, 15, 21-26, 30 | deferred; each needs data or a design decision |
+| Findings 14, 15, 21-25, 30 | deferred; each needs data or a design decision |
 | An Argo CD Application and a Helm release that share a *name* | the instance label cannot tell them apart; the workload is then treated as Argo-managed, which errs on the side of refusing to write it |
 | A failed precondition is recorded as `failed`, not `blocked` | a stale workload is a refusal, not an execution error; the state machine treats both as final |
 | The migration runner is a shell loop in an init container | a real migration tool with a version table would replace per-file idempotence |
 | Kyverno policies are tested only on a one-node cluster | webhook latency, Kyverno outages and upgrades are untested |
-| Live execution is not enabled anywhere | the worker's real-cluster path (claim, limits, executor) has been tested in two halves, not together on a cluster |
+| `restart_pod` has never run through RCA live | a bare failure (`became_unready`) several hops upstream scores about 0.4, under the 0.80 floor, so the floor refuses; the executor's eviction path is tested against a real API server instead. Lowering the floor is a calibration decision, not made here |
+| Live healing runs only in the disposable e2e cluster | `deploy/e2e` waives the observation and evidence gates there; the base manifests keep live off |
 
 ## Running the tests
 
@@ -414,6 +523,7 @@ Not fixed, and not claimed as fixed.
 |---|---|---|
 | everything that needs nothing | `go test ./...` | nothing |
 | Postgres integration (heal, RCA) | `CHRONICLE_TEST_POSTGRES_URL=postgres://... go test ./internal/heal ./internal/rca` | a scratch database with all migrations applied |
+| RCA-to-remediation campaign, live | `./scripts/e2e-heal.sh` | the `deploy/e2e` disposable cluster and its port-forwards |
 | executors on a real cluster | `HEAL_TEST_KUBE_CONTEXT=kind-kyverno-test go test ./internal/heal -run RealCluster` | a disposable `kind-kyverno-test*` cluster |
 | Kyverno policies, CLI | `make kyverno-test` | the `kyverno` CLI |
 | Kyverno policies, real admission controller | `make kyverno-live-test` | docker, kind, kubectl, helm |

@@ -12,6 +12,10 @@ import (
 	"fmt"
 	"time"
 
+	policyv1 "k8s.io/api/policy/v1"
+
+	"github.com/Halcyonic-01/Chronicle/internal/heal"
+
 	"github.com/Halcyonic-01/Chronicle/internal/rca/benchdata/eval"
 )
 
@@ -45,6 +49,8 @@ type Experiment struct {
 	Restore []Action
 	// Requires refuses to run when the fault could hit more than its target.
 	Requires func(ctx context.Context, c *Cluster) error
+	// Heal, in heal mode, is how the proposal is decided and how it should end.
+	Heal *HealExpectation
 }
 
 // Expected is the verdict the truth calls for.
@@ -53,6 +59,86 @@ func Expected(truth []Root) string {
 		return eval.NoRootCause
 	}
 	return eval.RootCause
+}
+
+// HealSuite is the RCA-to-remediation campaign, in a fixed order so steps on
+// one workload stay apart. Each fault is decided by a real OIDC identity and
+// carried out by Chronicle's worker; see deploy/e2e.
+func HealSuite() []Experiment {
+	byName := map[string]Experiment{}
+	for _, e := range Catalog() {
+		byName[e.Name] = e
+	}
+	with := func(e Experiment, decide, expect, why string) Experiment {
+		e.Heal = &HealExpectation{Decide: decide, Expect: expect, Why: why}
+		return e
+	}
+	because := func(e Experiment, reason string) Experiment {
+		e.Heal.Reason = reason
+		return e
+	}
+	// Steps on one workload are spaced past the 10-minute cooldown. (A repeat
+	// outage of the same kind minutes later comes out inconclusive, so the
+	// cooldown is not tested by a deliberate repeat; see internal/heal/README.md.)
+	return []Experiment{
+		with(byName["redis-scaled-to-zero"], "approve", heal.StatusSucceeded, "restore_replicas brings redis back"),
+		with(byName["api-bad-release"], "approve", heal.StatusSucceeded, "rollback_deployment restores the previous pod template"),
+		because(with(RedisDeadlockedStrictBudget(), "approve", heal.StatusFailed, "the disruption budget refuses to evict the unready pod"), "PodDisruptionBudget"),
+		because(with(WorkerRestoreBlockedByQuota(), "approve", heal.StatusFailed, "the restore is applied but no pod can be created; verification fails"), "rollout"),
+		with(byName["postgres-scaled-to-zero"], "deny", heal.StatusDenied, "a denied proposal never runs; the harness restores"),
+		// Revised after the first live run: RCA names the first release, which
+		// started the outage, and the executor refuses to act on evidence about
+		// an image that is no longer running. Spaced past the api cooldown.
+		because(with(byName["api-two-bad-releases"], "approve", heal.StatusFailed, "the decision is about release a; release b now runs, so the executor refuses"), "refusing to roll back"),
+		with(byName["api-bad-config"], "approve", "none", "no rule acts on a config change, so nothing is proposed"),
+		with(byName["redis-deadlocked"], "approve", heal.StatusSucceeded, "restart_pod evicts the unready pod; its replacement is ready"),
+	}
+}
+
+// WorkerRestoreBlockedByQuota is a scale to zero Chronicle diagnoses correctly
+// whose remedy cannot work: a pod quota, which Chronicle does not watch, stops
+// the restored replica from being created. The restore is applied and recovery
+// verification fails.
+func WorkerRestoreBlockedByQuota() Experiment {
+	return Experiment{
+		Name: "worker-restore-blocked-by-quota", Category: ObservableChange,
+		Hypothesis: "the scale of worker to zero is named; restoring it cannot succeed under the quota",
+		Truth:      fixed(Root{"scale", "worker"}),
+		Setup:      []Action{SetProgressDeadline("worker", 60)},
+		Inject:     []Action{Scale("worker", 0), CapPods("chaos-pod-cap", "worker")},
+		Restore:    []Action{RemoveQuota("chaos-pod-cap")},
+	}
+}
+
+// redisDeadlocked stops redis answering anything, its readiness probe
+// included, without crashing it: the pod turns unready and no probe restarts
+// it. Nothing changed, so the failure itself is where it began.
+func redisDeadlocked() Experiment {
+	return Experiment{
+		Name: "redis-deadlocked", Category: ObservableFailure,
+		Hypothesis: "a redis that stopped answering is named, as its pod becoming unready",
+		Truth: func(ctx context.Context, c *Cluster) ([]Root, error) {
+			pod, err := c.Pod(ctx, "redis")
+			if err != nil {
+				return nil, err
+			}
+			return []Root{{"became_unready", pod.Name}}, nil
+		},
+		// ALL also holds back CLIENT UNPAUSE, so the restore replaces the pod.
+		Inject:  []Action{Exec("redis", "redis", "redis-cli", "CLIENT", "PAUSE", "900000", "ALL")},
+		Restore: []Action{DeletePodsOf("redis")},
+	}
+}
+
+// RedisDeadlockedStrictBudget is redis-deadlocked under a disruption budget
+// that refuses to evict an unready pod: a restart that cannot be carried out.
+func RedisDeadlockedStrictBudget() Experiment {
+	e := redisDeadlocked()
+	e.Name = "redis-deadlocked-strict-budget"
+	e.Hypothesis = "as redis-deadlocked; the budget makes the restart fail, and the failure is recorded"
+	e.Setup = []Action{SetUnhealthyEviction("redis", policyv1.IfHealthyBudget)}
+	e.Restore = []Action{SetUnhealthyEviction("redis", policyv1.AlwaysAllow), DeletePodsOf("redis")}
+	return e
 }
 
 func fixed(roots ...Root) func(context.Context, *Cluster) ([]Root, error) {
@@ -144,6 +230,19 @@ func Catalog() []Experiment {
 				Try(Exec("redis", "redis", "redis-cli", "shutdown", "nosave")), Wait(15 * time.Second),
 				Try(Exec("redis", "redis", "redis-cli", "shutdown", "nosave")),
 			},
+		},
+		redisDeadlocked(),
+		{
+			// A rollback that lands on a revision just as broken: the remediation
+			// runs and does not fix anything. Two bad releases, the second on top
+			// of the first; a short progress deadline lets the Deployment
+			// controller itself declare the rolled-back revision failed.
+			Name: "api-two-bad-releases", Category: ObservableChange,
+			Hypothesis: "the latest of two bad releases is named as the root cause",
+			Truth:      fixed(Root{"deploy", "api"}),
+			Setup:      []Action{Recreate("api"), SetProgressDeadline("api", 60)},
+			Inject: []Action{SetImage("api", "chronicle-victim:chaos-missing-release-a"), Wait(30 * time.Second),
+				SetImage("api", "chronicle-victim:chaos-missing-release-b")},
 		},
 		{
 			// The api waits on redis with no timeout, so pausing writes hangs every

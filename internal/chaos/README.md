@@ -70,6 +70,24 @@ make chaos-report CHAOS_LOG=chaos-results/run-<time>.jsonl
 The deployed Chronicle is assumed to be built from the checked-out tree; the
 log records the commit and the RCA source hash of that tree.
 
+## Heal mode: RCA to remediation
+
+`chaos run -heal` (wrapped by `scripts/e2e-heal.sh`) runs `HealSuite`, a fixed
+list of faults each with a pre-registered expectation for its remediation:
+how the proposal is decided, how it should end, and (optionally) the reason
+that must appear. After the analysis the harness:
+
+1. finds Chronicle's proposal for the incident;
+2. tries to decide it with no token (must get 401) and as a signed-in
+   non-approver (must get 403), and checks it is still pending;
+3. approves or denies it as the approver, with a real OIDC ID token;
+4. waits for the worker to reach a final state, and on success waits for the
+   steady state to return *before* restoring anything.
+
+The snapshot restore still runs afterwards as a safety net. It needs the
+`deploy/e2e` environment (live healing, Keycloak); results are in
+`internal/heal/README.md`.
+
 ## Reading a run
 
 * **Status**: `scored` (detected and analysed), `not-detected` (the system left

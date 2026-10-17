@@ -690,3 +690,41 @@ func TestPostgresHistoryDeduplicationKeepsEveryDistinctLabel(t *testing.T) {
 		t.Fatal("the uniqueness rule is not enforced")
 	}
 }
+
+// The audit trail keeps who the identity provider vouched for, not just a
+// display name, and a shared-token decision is distinguishable by having none.
+func TestPostgresRecordsTheVerifiedApprover(t *testing.T) {
+	s, _, sx := healTestStore(t)
+	ctx, now := context.Background(), time.Now().UTC()
+
+	signed := proposal("oidc-"+sx, "c-oidc-"+sx, "redis", now)
+	shared := proposal("shared-"+sx, "c-shared-"+sx, "cache", now)
+	for _, a := range []*Action{signed, shared} {
+		if err := s.RecordAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.DecideAction(ctx, Decision{ID: signed.ID, Approved: true, By: "ana@example.com",
+		Issuer: "https://idp.example.com", Subject: "user-1", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DecisionBy != "ana@example.com" || got.DecisionIssuer != "https://idp.example.com" || got.DecisionSubject != "user-1" {
+		t.Fatalf("returned %+v", got)
+	}
+	reread, err := s.GetAction(ctx, signed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reread.DecisionIssuer != "https://idp.example.com" || reread.DecisionSubject != "user-1" {
+		t.Fatalf("not persisted: %+v", reread)
+	}
+
+	got, err = s.DecideAction(ctx, Decision{ID: shared.ID, Approved: false, By: "shared-token:ana", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DecisionBy != "shared-token:ana" || got.DecisionIssuer != "" || got.DecisionSubject != "" {
+		t.Fatalf("a shared-token decision carries an identity: %+v", got)
+	}
+}

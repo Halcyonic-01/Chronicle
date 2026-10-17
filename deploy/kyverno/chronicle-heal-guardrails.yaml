@@ -34,6 +34,9 @@ spec:
   matchConstraints:
     resourceRules:
       - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [pods]}
+      # restart_pod uses the Eviction API. Its Eviction object carries the
+      # pod's namespace; the deletion that follows bypasses validating admission.
+      - {apiGroups: [""], apiVersions: [v1], operations: [CREATE], resources: [pods/eviction]}
       - {apiGroups: [apps], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [deployments]}
   matchConditions:
     - name: chronicle-service-account
@@ -93,6 +96,8 @@ spec:
       expression: "request.userInfo.username == 'system:serviceaccount:chronicle:chronicle'"
   validations:
     # The executor requires a controller reference, so the policy does too.
+    # It sees direct deletes only: an eviction (how the executor restarts) does
+    # not carry the pod, so for evictions this check is the executor's re-read.
     - expression: "has(oldObject.metadata.ownerReferences) && oldObject.metadata.ownerReferences.exists(r, has(r.controller) && r.controller)"
       messageExpression: "'Chronicle may delete only a Pod a controller recreates; ' + oldObject.metadata.name + ' has no controller.'"
 ---

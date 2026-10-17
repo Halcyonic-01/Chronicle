@@ -21,8 +21,10 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -263,4 +265,67 @@ func TestRealClusterRestartPod(t *testing.T) {
 	if _, err := executor.restartPod(ctx, wrong); err == nil {
 		t.Fatal("deleted a pod owned by a different workload than the decision named")
 	}
+}
+
+// Restarts go through the Eviction API: a budget that refuses to evict an
+// unready pod stops the restart, and AlwaysAllow lets it through. Only a real
+// API server enforces budgets; the fake clientset does not.
+func TestRealClusterEvictionHonoursTheDisruptionBudget(t *testing.T) {
+	client, ns := realCluster(t)
+	ctx := context.Background()
+	// Running but never ready, as a deadlocked process is. (A Pending pod, say
+	// one whose image cannot be pulled, is evictable whatever the budget says.)
+	d := realDeployment(ns, "stuck", "registry.k8s.io/pause:3.10", "x", "64Mi", 1)
+	d.Spec.Template.Spec.Containers = d.Spec.Template.Spec.Containers[:1]
+	d.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
+	d.Spec.Template.Spec.Containers[0].ReadinessProbe = &corev1.Probe{PeriodSeconds: 2,
+		ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(9999)}}}
+	if _, err := client.AppsV1().Deployments(ns).Create(ctx, d, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	strict := policyv1.IfHealthyBudget
+	one := intstr.FromInt32(1)
+	pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "stuck", Namespace: ns},
+		Spec: policyv1.PodDisruptionBudgetSpec{MinAvailable: &one, UnhealthyPodEvictionPolicy: &strict,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "stuck"}}}}
+	if _, err := client.PolicyV1().PodDisruptionBudgets(ns).Create(ctx, pdb, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var pod corev1.Pod
+	waitFor(t, "a running pod and an observed budget", func() (bool, string) {
+		list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=stuck"})
+		b, berr := client.PolicyV1().PodDisruptionBudgets(ns).Get(ctx, "stuck", metav1.GetOptions{})
+		if err != nil || berr != nil || len(list.Items) == 0 || b.Status.ObservedGeneration < b.Generation {
+			return false, "not yet"
+		}
+		pod = list.Items[0]
+		if pod.Status.Phase != corev1.PodRunning {
+			return false, "pod is " + string(pod.Status.Phase)
+		}
+		return true, ""
+	})
+	executor := &KubernetesExecutor{Client: client}
+	action := &Action{ActionType: ActionRestartPod, Namespace: ns, Target: pod.Name, Approval: ApprovalApproved, Payload: []byte(`{"owner":"stuck"}`)}
+	_, err := executor.restartPod(ctx, action)
+	if err == nil || !strings.Contains(err.Error(), "PodDisruptionBudget") {
+		t.Fatalf("the budget should have refused the eviction: %v", err)
+	}
+	if _, err := client.CoreV1().Pods(ns).Get(ctx, pod.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("the pod is gone despite the refusal: %v", err)
+	}
+
+	allow := policyv1.AlwaysAllow
+	b, _ := client.PolicyV1().PodDisruptionBudgets(ns).Get(ctx, "stuck", metav1.GetOptions{})
+	b.Spec.UnhealthyPodEvictionPolicy = &allow
+	if _, err := client.PolicyV1().PodDisruptionBudgets(ns).Update(ctx, b, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "an eviction the budget allows", func() (bool, string) {
+		got, err := executor.restartPod(ctx, action)
+		if err != nil {
+			return false, err.Error()
+		}
+		t.Log(got)
+		return true, ""
+	})
 }

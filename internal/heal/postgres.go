@@ -25,9 +25,13 @@ type Decision struct {
 	ID       string
 	Approved bool
 	By       string
-	Reason   string
-	Result   string
-	Now      time.Time
+	// Issuer and Subject identify the approver as the identity provider
+	// vouched for them; empty when the decision came from the shared token.
+	Issuer  string
+	Subject string
+	Reason  string
+	Result  string
+	Now     time.Time
 }
 
 // Why a decision could not be recorded.
@@ -111,7 +115,7 @@ func (s *PostgresAuditStore) RecordAction(ctx context.Context, a *Action) error 
 
 const actionColumns = `id, incident_id, rule, cause_type, action_type, namespace, target, confidence, reasoning, status, result,
 	COALESCE(error,''), COALESCE(approval,'not_required'), COALESCE(payload,'null'::jsonb), dry_run, created_at,
-	COALESCE(decided_by,''), COALESCE(decision_reason,''), decided_at, started_at, finished_at, COALESCE(verification,''), attempts,
+	COALESCE(decided_by,''), COALESCE(decided_by_issuer,''), COALESCE(decided_by_subject,''), COALESCE(decision_reason,''), decided_at, started_at, finished_at, COALESCE(verification,''), attempts,
 	COALESCE(cause_event_id,''), workload, proposed, expires_at, related,
 	COALESCE(outcome,''), COALESCE(outcome_detail,''), COALESCE(outcome_labeller,''), outcome_at`
 
@@ -120,7 +124,7 @@ func scanAction(row pgx.Row) (Action, error) {
 	var reasoningJSON, relatedJSON []byte
 	if err := row.Scan(&a.ID, &a.IncidentID, &a.Rule, &a.CauseType, &a.ActionType, &a.Namespace, &a.Target, &a.Confidence,
 		&reasoningJSON, &a.Status, &a.Result, &a.Error, &a.Approval, &a.Payload, &a.DryRun, &a.CreatedAt,
-		&a.DecisionBy, &a.DecisionReason, &a.DecidedAt, &a.StartedAt, &a.FinishedAt, &a.Verification, &a.Attempts,
+		&a.DecisionBy, &a.DecisionIssuer, &a.DecisionSubject, &a.DecisionReason, &a.DecidedAt, &a.StartedAt, &a.FinishedAt, &a.Verification, &a.Attempts,
 		&a.CauseEventID, &a.Workload, &a.Proposed, &a.ExpiresAt, &relatedJSON,
 		&a.Outcome, &a.OutcomeDetail, &a.OutcomeLabeller, &a.OutcomeAt); err != nil {
 		return a, err
@@ -181,9 +185,9 @@ func (s *PostgresAuditStore) DecideAction(ctx context.Context, d Decision) (*Act
 	}
 	a, err := scanAction(s.pool.QueryRow(ctx, `
 		UPDATE heal_actions
-		SET approval=$2, status=$3, result=$4, decided_by=NULLIF($5,''), decision_reason=NULLIF($6,''), decided_at=$7
+		SET approval=$2, status=$3, result=$4, decided_by=NULLIF($5,''), decided_by_issuer=NULLIF($8,''), decided_by_subject=NULLIF($9,''), decision_reason=NULLIF($6,''), decided_at=$7
 		WHERE id=$1 AND approval='pending' AND status='would_run' AND expires_at > $7
-		RETURNING `+actionColumns, d.ID, approval, status, result, d.By, d.Reason, d.Now))
+		RETURNING `+actionColumns, d.ID, approval, status, result, d.By, d.Reason, d.Now, d.Issuer, d.Subject))
 	if err == nil {
 		return &a, nil
 	}

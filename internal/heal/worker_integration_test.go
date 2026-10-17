@@ -16,7 +16,9 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -58,6 +60,16 @@ func newWorkerEnv(t *testing.T, workloads map[string]int32) *workerEnv {
 		}
 	}
 	client.ClearActions()
+	// The fake has no Deployment controller, and verification waits for the
+	// rollout. This stands in for it: an update is rolled out at once.
+	client.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		// A workload named "stuck" never rolls out, as under a quota.
+		if d, ok := action.(k8stesting.UpdateAction).GetObject().(*appsv1.Deployment); ok && d.Spec.Replicas != nil && d.Name != "stuck" {
+			n := *d.Spec.Replicas
+			d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: n, UpdatedReplicas: n, ReadyReplicas: n, AvailableReplicas: n}
+		}
+		return false, nil, nil
+	})
 
 	e := &workerEnv{t: t, store: store, pool: pool, client: client, sx: sx, now: time.Now().UTC()}
 	targets := map[string]bool{}
@@ -346,5 +358,27 @@ func TestWorkerNeverExecutesDeniedOrBlockedDecisions(t *testing.T) {
 	e.tick()
 	if e.writes() != 0 || e.status(denied.ID).Status != StatusDenied || e.status(blocked.ID).Status != StatusBlocked {
 		t.Fatalf("a denied or blocked decision was touched: writes=%d denied=%s blocked=%s", e.writes(), e.status(denied.ID).Status, e.status(blocked.ID).Status)
+	}
+}
+
+// A remediation that is applied and never recovers is recorded as failed, with
+// the verification's reason, and is not retried.
+func TestWorkerRecordsARemediationThatDoesNotRecover(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"stuck": 0})
+	a := e.approved("norecover", "c-norecover", "stuck")
+	e.tick()
+	got := e.status(a.ID)
+	if got.Status != StatusFailed || !strings.Contains(got.Error, "rollout did not complete") {
+		t.Fatalf("expected failed on verification, got status=%s error=%q", got.Status, got.Error)
+	}
+	if e.replicas("stuck") != 3 || e.writes() != 1 {
+		t.Fatalf("the change should be applied once: replicas=%d writes=%d", e.replicas("stuck"), e.writes())
+	}
+	for i := 0; i < 3; i++ {
+		e.advance(time.Minute)
+		e.tick()
+	}
+	if e.writes() != 1 || e.status(a.ID).Status != StatusFailed {
+		t.Fatalf("a failed remediation was retried: writes=%d status=%s", e.writes(), e.status(a.ID).Status)
 	}
 }

@@ -30,6 +30,7 @@ import (
 	"net/http"
 
 	chronicleapi "github.com/Halcyonic-01/Chronicle/internal/api"
+	"github.com/Halcyonic-01/Chronicle/internal/auth"
 	"github.com/Halcyonic-01/Chronicle/internal/collect"
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
@@ -411,6 +412,18 @@ func main() {
 
 	apiHandler := chronicleapi.NewHandler(replayer, analyzer, rcaDB, healer, graphStore, healStore, k8sClient, healController).
 		WithRecentCache(recentCache)
+	// With an issuer configured, approvals need an OIDC identity and the shared
+	// approval token is ignored. A configuration that would admit nobody (or
+	// everybody) stops start-up rather than failing at the first approval.
+	if oidcConfig, configured := auth.ConfigFromEnv(); configured {
+		verifier, err := auth.NewOIDC(oidcConfig)
+		if err != nil {
+			slog.Error("invalid OIDC approver configuration", "err", err)
+			os.Exit(1)
+		}
+		apiHandler.WithOIDC(verifier)
+		slog.Info("approvals require an OIDC identity", "issuer", oidcConfig.Issuer)
+	}
 
 	// The API surface is gated as one unit so a new endpoint cannot be added
 	// outside the authentication check by accident.
@@ -424,13 +437,16 @@ func main() {
 	apiMux.HandleFunc("/api/heal/rules", apiHandler.HealingRules)
 	apiMux.HandleFunc("/api/heal/calibration", apiHandler.HealingCalibration)
 	apiMux.HandleFunc("/api/heal/actions/", apiHandler.DecideHealingAction)
+	apiMux.HandleFunc("/api/auth/config", apiHandler.AuthConfig)
+	apiMux.HandleFunc("/api/auth/me", apiHandler.AuthMe)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", chronicleweb.Handler())
 	mux.Handle("/api/", chronicleapi.RequireAPIToken(apiMux))
 	g.Go(func() error {
 		slog.Info("Chronicle API listening", "addr", ":8181")
-		srv := &http.Server{Addr: ":8181", Handler: mux}
+		// Header and idle timeouts, so slow clients cannot hold connections open.
+		srv := &http.Server{Addr: ":8181", Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 		go func() {
 			<-gctx.Done()
 			srv.Close()

@@ -10,6 +10,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -205,6 +207,98 @@ func PauseNodeOf(dep string) Action {
 		c.markPaused(node)
 		return nil
 	}}
+}
+
+// SetProgressDeadline sets how long the Deployment controller waits before it
+// declares a rollout failed, which Chronicle does not record.
+func SetProgressDeadline(dep string, seconds int32) Action {
+	return step{fmt.Sprintf("set deployment/%s progressDeadlineSeconds to %d", dep, seconds), func(ctx context.Context, c *Cluster) error {
+		return updateDeployment(ctx, c, dep, func(d *appsv1.Deployment) error {
+			d.Spec.ProgressDeadlineSeconds = &seconds
+			return nil
+		})
+	}}
+}
+
+// SetUnhealthyEviction sets a PodDisruptionBudget's unhealthyPodEvictionPolicy:
+// IfHealthyBudget refuses to evict an unready pod while the budget is unmet.
+func SetUnhealthyEviction(pdb string, policy policyv1.UnhealthyPodEvictionPolicyType) Action {
+	return step{fmt.Sprintf("set poddisruptionbudget/%s unhealthyPodEvictionPolicy to %s", pdb, policy), func(ctx context.Context, c *Cluster) error {
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			b, err := c.Client.PolicyV1().PodDisruptionBudgets(c.Namespace).Get(ctx, pdb, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			b.Spec.UnhealthyPodEvictionPolicy = &policy
+			_, err = c.Client.PolicyV1().PodDisruptionBudgets(c.Namespace).Update(ctx, b, metav1.UpdateOptions{})
+			return err
+		})
+	}}
+}
+
+// DeletePodsOf deletes a deployment's pods so they are recreated: how the
+// harness undoes a fault that lives in a process, not in a spec.
+func DeletePodsOf(dep string) Action {
+	return step{fmt.Sprintf("delete the pods of deployment/%s", dep), func(ctx context.Context, c *Cluster) error {
+		d, err := c.Client.AppsV1().Deployments(c.Namespace).Get(ctx, dep, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		selector := labelString(d.Spec.Selector.MatchLabels)
+		return c.Client.CoreV1().Pods(c.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector})
+	}}
+}
+
+// CapPods creates a ResourceQuota holding the namespace at the pods it runs
+// now, not counting deployment except's: once except's pods are gone, none can
+// be created again. Chronicle does not watch quotas.
+func CapPods(name, except string) Action {
+	return step{fmt.Sprintf("create resourcequota/%s capping pods at the current count, less deployment/%s", name, except), func(ctx context.Context, c *Cluster) error {
+		d, err := c.Client.AppsV1().Deployments(c.Namespace).Get(ctx, except, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		pods, err := c.Client.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		n := 0
+		for _, p := range pods.Items {
+			terminal := p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
+			if p.DeletionTimestamp == nil && !terminal && !matches(d.Spec.Selector.MatchLabels, p.Labels) {
+				n++
+			}
+		}
+		quota := &corev1.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.Namespace, Labels: map[string]string{chaosLabel: "true"}},
+			Spec:       corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{corev1.ResourcePods: *resource.NewQuantity(int64(n), resource.DecimalSI)}},
+		}
+		_, err = c.Client.CoreV1().ResourceQuotas(c.Namespace).Create(ctx, quota, metav1.CreateOptions{})
+		return err
+	}}
+}
+
+// RemoveQuota deletes a quota CapPods created.
+func RemoveQuota(name string) Action {
+	return step{fmt.Sprintf("delete resourcequota/%s", name), func(ctx context.Context, c *Cluster) error {
+		err := c.Client.CoreV1().ResourceQuotas(c.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}}
+}
+
+func matches(selector, labels map[string]string) bool {
+	if len(selector) == 0 {
+		return false
+	}
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // Wait pauses between steps.

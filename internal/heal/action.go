@@ -50,26 +50,29 @@ type Action struct {
 	CauseType  string `json:"cause_type"`
 	// CauseEventID identifies the outage, so decisions about one failure are
 	// not counted as independent evidence.
-	CauseEventID   string          `json:"cause_event_id,omitempty"`
-	ActionType     string          `json:"action_type"`
-	Namespace      string          `json:"namespace"`
-	Target         string          `json:"target"`
-	Confidence     float64         `json:"confidence"`
-	Reasoning      []string        `json:"reasoning"`
-	Status         string          `json:"status"`
-	Result         string          `json:"result"`
-	Error          string          `json:"error,omitempty"`
-	Approval       string          `json:"approval"`
-	Payload        json.RawMessage `json:"payload,omitempty"`
-	DryRun         bool            `json:"dry_run"`
-	CreatedAt      time.Time       `json:"created_at"`
-	DecisionBy     string          `json:"decision_by,omitempty"`
-	DecisionReason string          `json:"decision_reason,omitempty"`
-	DecidedAt      *time.Time      `json:"decided_at,omitempty"`
-	StartedAt      *time.Time      `json:"started_at,omitempty"`
-	FinishedAt     *time.Time      `json:"finished_at,omitempty"`
-	Verification   string          `json:"verification,omitempty"`
-	Attempts       int             `json:"attempts"`
+	CauseEventID string          `json:"cause_event_id,omitempty"`
+	ActionType   string          `json:"action_type"`
+	Namespace    string          `json:"namespace"`
+	Target       string          `json:"target"`
+	Confidence   float64         `json:"confidence"`
+	Reasoning    []string        `json:"reasoning"`
+	Status       string          `json:"status"`
+	Result       string          `json:"result"`
+	Error        string          `json:"error,omitempty"`
+	Approval     string          `json:"approval"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	DryRun       bool            `json:"dry_run"`
+	CreatedAt    time.Time       `json:"created_at"`
+	DecisionBy   string          `json:"decision_by,omitempty"`
+	// Who the identity provider says decided; empty for a shared-token decision.
+	DecisionIssuer  string     `json:"decision_issuer,omitempty"`
+	DecisionSubject string     `json:"decision_subject,omitempty"`
+	DecisionReason  string     `json:"decision_reason,omitempty"`
+	DecidedAt       *time.Time `json:"decided_at,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	Verification    string     `json:"verification,omitempty"`
+	Attempts        int        `json:"attempts"`
 	// Workload is what the action changes: a Pod action names its owner. The
 	// allowlist and the per-target cooldown key on it.
 	Workload string `json:"workload,omitempty"`

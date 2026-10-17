@@ -72,7 +72,7 @@ type options struct {
 	only, api, prom, namespace, kubeContext, allowContext, out string
 	trials, extra                                              int
 	seed                                                       int64
-	skipMetrics                                                bool
+	skipMetrics, heal                                          bool
 	cfg                                                        chaos.Config
 }
 
@@ -85,6 +85,7 @@ func parse(name string, args []string) (*options, []chaos.Planned, error) {
 	fs.StringVar(&o.api, "api", "http://localhost:8181", "Chronicle API")
 	fs.StringVar(&o.prom, "prom", "http://localhost:9090", "Prometheus, for the steady-state check")
 	fs.BoolVar(&o.skipMetrics, "skip-metrics", false, "judge health by rollouts alone (blind to errors and latency)")
+	fs.BoolVar(&o.heal, "heal", false, "run the RCA-to-remediation suite (fixed order): Chronicle's proposals are decided with OIDC tokens and executed by its worker; needs deploy/e2e")
 	fs.StringVar(&o.namespace, "namespace", "default", "the victim application's namespace")
 	fs.StringVar(&o.kubeContext, "context", "", "kube context (default: the current one; only kind-* is allowed)")
 	fs.StringVar(&o.allowContext, "allow-context", "", "allow this one non-kind context, deliberately")
@@ -99,6 +100,18 @@ func parse(name string, args []string) (*options, []chaos.Planned, error) {
 	var names []string
 	if o.only != "" {
 		names = strings.Split(o.only, ",")
+	}
+	if o.heal {
+		// Fixed order: the cooldown step depends on the one before it.
+		var planned []chaos.Planned
+		trial := map[string]int{}
+		for _, e := range chaos.HealSuite() {
+			if len(names) == 0 || contains(names, e.Name) {
+				trial[e.Name]++
+				planned = append(planned, chaos.Planned{Experiment: e, Trial: trial[e.Name]})
+			}
+		}
+		return o, planned, nil
 	}
 	exps, err := chaos.Select(chaos.Catalog(), names)
 	if err != nil {
@@ -197,6 +210,13 @@ func run(args []string) error {
 	fmt.Printf("chaos run: %d experiment runs against %s/%s, seed %d, log %s\n", len(planned), o.kubeContext, o.namespace, o.seed, o.out)
 	fmt.Println("the deployed Chronicle is assumed to be built from this tree (make deploy-chronicle); Ctrl-C restores and stops")
 	runner := &chaos.Runner{Cluster: cluster, Chronicle: api, Steady: steady, Config: o.cfg, Out: file, Log: os.Stdout}
+	if o.heal {
+		healer, err := healerFromEnv(ctx)
+		if err != nil {
+			return err
+		}
+		runner.Healer = healer
+	}
 	runErr := runner.Run(ctx, planned, info)
 	if err := file.Sync(); err != nil {
 		return err
@@ -208,6 +228,50 @@ func run(args []string) error {
 		fmt.Print(chaos.Report(records))
 	}
 	return runErr
+}
+
+// healerFromEnv reads the test identities. Passwords come from the
+// environment, never flags, so they do not show in the process list.
+func healerFromEnv(ctx context.Context) (*chaos.Healer, error) {
+	tokenURL := os.Getenv("E2E_OIDC_TOKEN_URL")
+	if tokenURL == "" {
+		tokenURL = "http://127.0.0.1:8180/realms/chronicle/protocol/openid-connect/token"
+	}
+	client := os.Getenv("E2E_OIDC_CLIENT_ID")
+	if client == "" {
+		client = "chronicle"
+	}
+	grant := func(user, pass string) (chaos.PasswordGrant, error) {
+		u, p := os.Getenv(user), os.Getenv(pass)
+		if u == "" || p == "" {
+			return chaos.PasswordGrant{}, fmt.Errorf("heal mode needs %s and %s (see deploy/e2e/README.md)", user, pass)
+		}
+		return chaos.PasswordGrant{TokenURL: tokenURL, ClientID: client, Username: u, Password: p}, nil
+	}
+	approver, err := grant("E2E_APPROVER_USER", "E2E_APPROVER_PASSWORD")
+	if err != nil {
+		return nil, err
+	}
+	viewer, err := grant("E2E_VIEWER_USER", "E2E_VIEWER_PASSWORD")
+	if err != nil {
+		return nil, err
+	}
+	// Fail before any fault is injected, not halfway through the campaign.
+	for _, g := range []chaos.PasswordGrant{approver, viewer} {
+		if _, err := g.Token(ctx); err != nil {
+			return nil, fmt.Errorf("identity provider at %s (port-forward Keycloak first): %w", tokenURL, err)
+		}
+	}
+	return &chaos.Healer{Approver: approver, NonApprover: viewer, Terminal: 6 * time.Minute}, nil
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if strings.TrimSpace(v) == s {
+			return true
+		}
+	}
+	return false
 }
 
 func report(args []string) error {

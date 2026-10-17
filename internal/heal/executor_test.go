@@ -3,6 +3,7 @@ package heal
 import (
 	"context"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,7 +34,7 @@ func TestAwaitRolloutRejectsAnIncompleteRollout(t *testing.T) {
 		e := &KubernetesExecutor{Client: fake.NewSimpleClientset(d)}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // the deployment never progresses, so do not wait on it
-		if _, err := e.awaitRollout(ctx, "default", "api"); err == nil {
+		if _, err := e.awaitRollout(ctx, "default", "api", time.Time{}); err == nil {
 			t.Errorf("%s: verification should not report success", name)
 		}
 	}
@@ -41,7 +42,7 @@ func TestAwaitRolloutRejectsAnIncompleteRollout(t *testing.T) {
 
 func TestAwaitRolloutAcceptsACompletedRollout(t *testing.T) {
 	e := &KubernetesExecutor{Client: fake.NewSimpleClientset(rolledOut("api", 2, 2, 2, 2, 2, 2))}
-	got, err := e.awaitRollout(context.Background(), "default", "api")
+	got, err := e.awaitRollout(context.Background(), "default", "api", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

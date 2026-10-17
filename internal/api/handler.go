@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Halcyonic-01/Chronicle/internal/auth"
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	"github.com/Halcyonic-01/Chronicle/internal/heal"
@@ -34,6 +35,7 @@ type Handler struct {
 	k8s       kubernetes.Interface
 	execution *heal.Controller
 	recent    *store.RecentCache
+	oidc      *auth.OIDC
 }
 
 func NewHandler(replayer *replay.Replayer, analyzer *rca.Analyzer, rcaDB *rca.PostgresEventSource, healer *heal.Engine, graphStore *store.GraphStore, actionStore heal.ActionStore, k8sClient kubernetes.Interface, execution ...*heal.Controller) *Handler {
@@ -661,8 +663,20 @@ func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"use POST"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	if !heal.ApprovalAuthorized(r) {
-		http.Error(w, `{"error":"approval authentication required"}`, http.StatusUnauthorized)
+	// Authentication comes first: a caller who cannot approve learns nothing
+	// about the store or which actions exist.
+	var input struct {
+		By     string `json:"by"`
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&input)
+	}
+	// Who decided comes from the verified token. input.By is read only for the
+	// shared-token mode, where nothing better exists.
+	who, status, message := h.authenticateApprover(r, input.By)
+	if status != 0 {
+		writeJSONError(w, status, message)
 		return
 	}
 	if h.actions == nil {
@@ -674,16 +688,6 @@ func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid healing action path"}`, http.StatusBadRequest)
 		return
 	}
-	var input struct {
-		By     string `json:"by"`
-		Reason string `json:"reason"`
-	}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&input)
-	}
-	if strings.TrimSpace(input.By) == "" {
-		input.By = "local-reviewer"
-	}
 	// Approval only records the decision. The execution worker re-checks
 	// every gate before acting, outside this request.
 	now := time.Now().UTC()
@@ -692,7 +696,7 @@ func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 		result = "APPROVED; waiting for the execution worker, which re-checks every safety gate first"
 	}
 	action, err := h.actions.DecideAction(r.Context(), heal.Decision{
-		ID: parts[3], Approved: parts[4] == "approve", By: input.By, Reason: input.Reason, Result: result, Now: now,
+		ID: parts[3], Approved: parts[4] == "approve", By: who.display, Issuer: who.issuer, Subject: who.subject, Reason: input.Reason, Result: result, Now: now,
 	})
 	switch {
 	case errors.Is(err, heal.ErrActionNotFound):

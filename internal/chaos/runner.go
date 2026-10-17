@@ -83,13 +83,14 @@ type Record struct {
 
 	Run *RunInfo `json:"run,omitempty"`
 
-	Experiment string   `json:"experiment,omitempty"`
-	Category   string   `json:"category,omitempty"`
-	Trial      int      `json:"trial,omitempty"`
-	Hypothesis string   `json:"hypothesis,omitempty"`
-	Truth      []Root   `json:"truth,omitempty"`
-	Expected   string   `json:"expected,omitempty"`
-	Actions    []string `json:"actions,omitempty"`
+	Experiment string           `json:"experiment,omitempty"`
+	Category   string           `json:"category,omitempty"`
+	Trial      int              `json:"trial,omitempty"`
+	Hypothesis string           `json:"hypothesis,omitempty"`
+	Truth      []Root           `json:"truth,omitempty"`
+	Expected   string           `json:"expected,omitempty"`
+	Actions    []string         `json:"actions,omitempty"`
+	Heal       *HealExpectation `json:"heal,omitempty"`
 
 	Result *Outcome `json:"result,omitempty"`
 }
@@ -128,12 +129,14 @@ type Outcome struct {
 	AlertSeenAfter float64 `json:"alert_seen_after_seconds,omitempty"`
 	AnalysedAfter  float64 `json:"analysed_after_seconds,omitempty"`
 
-	Headline     *Analysis  `json:"headline,omitempty"`
-	Narrative    string     `json:"narrative,omitempty"`
-	Row          *eval.Row  `json:"row,omitempty"`
-	ServerAction string     `json:"server_action,omitempty"`
-	Others       []Analysis `json:"other_symptoms,omitempty"`
-	Consistency  float64    `json:"consistency,omitempty"` // share of analysed symptoms answered well
+	Headline     *Analysis    `json:"headline,omitempty"`
+	Narrative    string       `json:"narrative,omitempty"`
+	Row          *eval.Row    `json:"row,omitempty"`
+	ServerAction string       `json:"server_action,omitempty"`
+	ProposalID   string       `json:"proposal_id,omitempty"`
+	Heal         *HealOutcome `json:"heal,omitempty"`
+	Others       []Analysis   `json:"other_symptoms,omitempty"`
+	Consistency  float64      `json:"consistency,omitempty"` // share of analysed symptoms answered well
 
 	Restored       []string `json:"restored,omitempty"`
 	RestoreError   string   `json:"restore_error,omitempty"`
@@ -153,6 +156,9 @@ type Runner struct {
 	Out       io.Writer // the JSONL log
 	Log       io.Writer // progress for a person
 	Now       func() time.Time
+	// Healer, when set, runs heal mode for experiments that carry a Heal
+	// expectation.
+	Healer *Healer
 }
 
 func (r *Runner) now() time.Time {
@@ -250,7 +256,7 @@ func (r *Runner) runOne(ctx context.Context, p Planned) (out Outcome, abort erro
 		return Outcome{Status: StatusError, Reason: "resolve the truth: " + err.Error(), Recovered: true}, nil
 	}
 	if err := r.write(Record{Kind: "start", Experiment: exp.Name, Category: exp.Category, Trial: p.Trial, Hypothesis: exp.Hypothesis,
-		Truth: truth, Expected: Expected(truth), Actions: describeActions(exp)}); err != nil {
+		Truth: truth, Expected: Expected(truth), Actions: describeActions(exp), Heal: exp.Heal}); err != nil {
 		return Outcome{Status: StatusError, Reason: err.Error(), Recovered: true}, err
 	}
 
@@ -274,7 +280,23 @@ func (r *Runner) runOne(ctx context.Context, p Planned) (out Outcome, abort erro
 		}
 	}
 	r.observe(ctx, &out, exp, truth)
+	if r.Healer != nil && exp.Heal != nil && out.Status == StatusScored {
+		out.Heal = r.heal(ctx, &out, *exp.Heal)
+		r.logf("    heal: %s", describeHeal(out.Heal))
+	}
 	return out, nil
+}
+
+func describeHeal(h *HealOutcome) string {
+	verdict := "as expected"
+	if !h.Matches {
+		verdict = "NOT as expected (" + h.Expected.Expect + ")"
+	}
+	s := fmt.Sprintf("%s %s on %s -> %s, %s", h.Rule, h.ActionType, h.Target, h.Final, verdict)
+	if h.Problem != "" {
+		s += "; " + h.Problem
+	}
+	return s
 }
 
 func describeActions(exp Experiment) []string {
@@ -393,6 +415,7 @@ func (r *Runner) observe(ctx context.Context, out *Outcome, exp Experiment, trut
 	out.AnalysedAfter = r.now().Sub(since).Seconds()
 	if action != nil {
 		out.ServerAction = action.Status + ": " + action.Result
+		out.ProposalID = action.ID
 	}
 	good := 0
 	if goodOutcome(row.Outcome) {

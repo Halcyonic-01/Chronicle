@@ -10,6 +10,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +40,11 @@ func NewKubernetesExecutor(client kubernetes.Interface) *KubernetesExecutor {
 }
 
 var updateOptions = metav1.UpdateOptions{FieldManager: FieldManager}
+
+// MaxRestoreReplicas is the most replicas a restore writes: the same ceiling
+// the Kyverno replica guardrail enforces, and a bound on evidence read from an
+// event before it is narrowed to int32.
+const MaxRestoreReplicas = 20
 
 // refuseGitOps stops a write a GitOps controller would revert, or that would
 // hide drift from it. The engine checks the event's evidence; this checks the
@@ -104,11 +110,21 @@ func (e *KubernetesExecutor) restartPod(ctx context.Context, action *Action) (st
 	if podReady(pod) {
 		return "", fmt.Errorf("refusing to restart: pod %s is ready again", action.Target)
 	}
+	// The Eviction API, not a delete: a PodDisruptionBudget can refuse it. A
+	// budget with unhealthyPodEvictionPolicy: AlwaysAllow still lets an unready
+	// pod go, which is the case this action is for.
 	uid := pod.UID
-	if err := e.Client.CoreV1().Pods(action.Namespace).Delete(ctx, action.Target, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil {
+	eviction := &policyv1.Eviction{
+		ObjectMeta:    metav1.ObjectMeta{Name: action.Target, Namespace: action.Namespace},
+		DeleteOptions: &metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}},
+	}
+	if err := e.Client.CoreV1().Pods(action.Namespace).EvictV1(ctx, eviction); err != nil {
+		if apierrors.IsTooManyRequests(err) {
+			return "", fmt.Errorf("a PodDisruptionBudget refused the eviction of %s: %w", action.Target, err)
+		}
 		return "", err
 	}
-	return fmt.Sprintf("deleted pod %s/%s; %s %s recreates it", action.Namespace, action.Target, owner.Kind, owner.Name), nil
+	return fmt.Sprintf("evicted pod %s/%s; %s %s recreates it", action.Namespace, action.Target, owner.Kind, owner.Name), nil
 }
 
 // ownerWorkload names the workload behind a pod's controller: a ReplicaSet
@@ -131,8 +147,14 @@ func podReady(p *corev1.Pod) bool {
 	return false
 }
 
+// Verify checks that the workload recovered, not merely that the change was
+// accepted: every replica updated, ready and available.
 func (e *KubernetesExecutor) Verify(ctx context.Context, action *Action) (string, error) {
-	if action.ActionType == ActionRestoreReplicas {
+	// A progress-deadline failure older than this is the fault being fixed.
+	since := time.Now().Add(-time.Second)
+	switch action.ActionType {
+	case ActionRestoreReplicas:
+		// Zero of zero replicas available would otherwise read as recovered.
 		d, err := e.Client.AppsV1().Deployments(action.Namespace).Get(ctx, action.Target, metav1.GetOptions{})
 		if err != nil {
 			return "", err
@@ -140,31 +162,42 @@ func (e *KubernetesExecutor) Verify(ctx context.Context, action *Action) (string
 		if d.Spec.Replicas == nil || *d.Spec.Replicas == 0 {
 			return "", fmt.Errorf("%s is still scaled to zero after the restore", action.Target)
 		}
-		return fmt.Sprintf("%s is at %d replica(s)", action.Target, *d.Spec.Replicas), nil
-	}
-	if action.ActionType == ActionBumpMemory || action.ActionType == ActionRollbackDeployment {
-		target := action.Target
-		if action.ActionType == ActionBumpMemory {
-			target = gjson.GetBytes(action.Payload, "owner").String()
+		return e.awaitRollout(ctx, action.Namespace, action.Target, since)
+	case ActionRollbackDeployment:
+		return e.awaitRollout(ctx, action.Namespace, action.Target, since)
+	case ActionBumpMemory:
+		return e.awaitRollout(ctx, action.Namespace, gjson.GetBytes(action.Payload, "owner").String(), since)
+	case ActionRestartPod:
+		owner := gjson.GetBytes(action.Payload, "owner").String()
+		if owner == "" {
+			return "", fmt.Errorf("cannot verify recovery: the decision does not name the pod's workload")
 		}
-		return e.awaitRollout(ctx, action.Namespace, target)
+		if err := e.awaitGone(ctx, action.Namespace, action.Target); err != nil {
+			return "", err
+		}
+		got, err := e.awaitRollout(ctx, action.Namespace, owner, since)
+		if err != nil {
+			return "", fmt.Errorf("pod %s is gone, but %s did not recover: %w", action.Target, owner, err)
+		}
+		return "pod " + action.Target + " replaced; " + got, nil
 	}
-	if action.ActionType != ActionRestartPod {
-		return "not applicable", nil
-	}
+	return "not applicable", nil
+}
+
+func (e *KubernetesExecutor) awaitGone(ctx context.Context, namespace, name string) error {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		_, err := e.Client.CoreV1().Pods(action.Namespace).Get(ctx, action.Target, metav1.GetOptions{})
+		_, err := e.Client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			return "pod deletion verified", nil
+			return nil
 		}
 		if err != nil {
-			return "", err
+			return err
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return fmt.Errorf("pod %s was not removed: %w", name, ctx.Err())
 		case <-ticker.C:
 		}
 	}
@@ -174,8 +207,10 @@ func (e *KubernetesExecutor) Verify(ctx context.Context, action *Action) (string
 // status.conditions alone is not dependable, so this checks the same set of
 // fields kubectl rollout status does: the controller has observed this
 // generation, every replica is on the new template, all of them are available,
-// and no replicas from the previous version are still running.
-func (e *KubernetesExecutor) awaitRollout(ctx context.Context, namespace, name string) (string, error) {
+// and no replicas from the previous version are still running. A rollout the
+// Deployment controller itself declares failed (progressDeadlineSeconds) after
+// since fails at once instead of at the timeout.
+func (e *KubernetesExecutor) awaitRollout(ctx context.Context, namespace, name string, since time.Time) (string, error) {
 	if namespace == "" || name == "" {
 		return "", fmt.Errorf("rollout verification requires a namespace and deployment")
 	}
@@ -190,6 +225,9 @@ func (e *KubernetesExecutor) awaitRollout(ctx context.Context, namespace, name s
 		desired := int32(1)
 		if d.Spec.Replicas != nil {
 			desired = *d.Spec.Replicas
+		}
+		if c := progressFailure(d, since); c != "" {
+			return "", fmt.Errorf("rollout failed: %s", c)
 		}
 		switch {
 		case d.Status.ObservedGeneration < d.Generation:
@@ -209,6 +247,21 @@ func (e *KubernetesExecutor) awaitRollout(ctx context.Context, namespace, name s
 		case <-ticker.C:
 		}
 	}
+}
+
+// progressFailure is the controller's own verdict that a rollout stalled, if
+// it reached it for the current generation after since.
+func progressFailure(d *appsv1.Deployment, since time.Time) string {
+	if d.Status.ObservedGeneration < d.Generation {
+		return ""
+	}
+	for _, c := range d.Status.Conditions {
+		if c.Type == appsv1.DeploymentProgressing && c.Status == corev1.ConditionFalse &&
+			c.Reason == "ProgressDeadlineExceeded" && !c.LastUpdateTime.Time.Before(since) {
+			return c.Message
+		}
+	}
+	return ""
 }
 
 func (e *KubernetesExecutor) bumpMemory(ctx context.Context, action *Action) (string, error) {
@@ -278,6 +331,9 @@ func (e *KubernetesExecutor) restoreReplicas(ctx context.Context, action *Action
 	current := gjson.GetBytes(action.Payload, "new_replicas").Int()
 	if previous <= 0 {
 		return "", fmt.Errorf("restore requires old_replicas evidence above zero")
+	}
+	if previous > MaxRestoreReplicas {
+		return "", fmt.Errorf("refusing to restore %d replicas: above the ceiling of %d", previous, MaxRestoreReplicas)
 	}
 	// Only a scale to zero is a fault. Going from ten replicas to three is
 	// somebody managing capacity, and undoing it would fight them.

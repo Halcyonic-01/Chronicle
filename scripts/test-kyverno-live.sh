@@ -92,7 +92,7 @@ kind: ClusterRole
 metadata: {name: chronicle-broad-test}
 rules:
 - apiGroups: ["", "apps", "batch"]
-  resources: [pods, deployments, replicasets, statefulsets, daemonsets, jobs, cronjobs]
+  resources: [pods, pods/eviction, deployments, replicasets, statefulsets, daemonsets, jobs, cronjobs]
   verbs: [get, list, watch, create, update, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -115,6 +115,13 @@ EOF
 }
 
 patch() { local ns="$1" name="$2" body="$3"; shift 3; $K "$@" -n "$ns" patch deploy "$name" --type=merge -p "$body"; }
+
+# evict NAMESPACE POD [kubectl flags]: the Eviction API, as restart_pod uses it.
+evict() {
+	local ns="$1" name="$2"; shift 2
+	printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"%s"}}' "$name" "$ns" |
+		$K "$@" create --raw "/api/v1/namespaces/$ns/pods/$name/eviction" -f -
+}
 
 # Expectations: "Kind|namespace|name|policy" (policy "none" = no violation).
 EXPECT=()
@@ -202,6 +209,11 @@ deny_phase() {
 	denied  "scale past the ceiling"       "ceiling of 20" -- patch default d-dn-replicas '{"spec":{"replicas":21}}' $AS
 	denied  "change a deployment in staging" "allowlist" -- patch staging stg-dep '{"spec":{"minReadySeconds":9}}' $AS
 	allowed "delete a controller-owned pod" -- $K $AS -n default delete pod "$ctl" --wait=false
+	local stg; stg=$($K -n staging get pod -l app=stg-dep -o jsonpath='{.items[0].metadata.name}')
+	denied  "evict a pod in staging"       "allowlist" -- evict staging "$stg" $AS
+	$K -n default rollout status deploy/d-dn-ok --timeout=60s >/dev/null 2>&1
+	ctl=$($K -n default get pod -l app=d-dn-ok --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+	allowed "evict a pod in default"        -- evict default "$ctl" $AS
 	allowed "legitimate update + restore"   -- patch default d-dn-ok '{"spec":{"minReadySeconds":4,"replicas":2}}' $AS
 	allowed "ADMIN adds hostNetwork"        -- patch default d-dn-host '{"spec":{"template":{"spec":{"hostNetwork":true}}}}'
 	$K apply -f "$POLICIES" >/dev/null

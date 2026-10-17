@@ -11,10 +11,14 @@ metadata:
   name: chronicle-heal-executor
   namespace: default
 rules:
-# restart_pod re-reads the pod, then deletes it with a UID precondition.
+# restart_pod re-reads the pod, then evicts it with a UID precondition, so a
+# PodDisruptionBudget can refuse. No plain delete.
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["get", "delete"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/eviction"]
+  verbs: ["create"]
 # restore_replicas, bump_memory, rollback_deployment.
 - apiGroups: ["apps"]
   resources: ["deployments"]

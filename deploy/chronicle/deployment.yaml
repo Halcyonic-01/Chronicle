@@ -37,8 +37,15 @@ spec:
           image: postgres:16-alpine
           imagePullPolicy: IfNotPresent
           env:
+            # The password comes from the PostgreSQL chart's own Secret and is
+            # expanded into the URL, so it never appears in this manifest.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-postgresql
+                  key: postgres-password
             - name: POSTGRES_URL
-              value: postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
+              value: postgres://postgres:$(POSTGRES_PASSWORD)@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
           command: ["/bin/sh", "-ec"]
           args:
             - |
@@ -73,8 +80,15 @@ spec:
           env:
             - name: CHRONICLE_UI_DIR
               value: /ui
+            # The password comes from the PostgreSQL chart's own Secret and is
+            # expanded into the URL, so it never appears in this manifest.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-postgresql
+                  key: postgres-password
             - name: POSTGRES_URL
-              value: postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
+              value: postgres://postgres:$(POSTGRES_PASSWORD)@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
             - name: PROMETHEUS_URL
               value: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
             - name: LOKI_URL
@@ -156,12 +170,30 @@ spec:
               value: "false"
             - name: HEAL_KILL_SWITCH
               value: "true"
+            # Shared approval token: used only while OIDC_ISSUER_URL is empty.
+            # Once an issuer is set it is ignored.
             - name: HEAL_APPROVAL_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: chronicle-config
                   key: HEAL_APPROVAL_TOKEN
                   optional: true
+            # Approver sign-in (OpenID Connect). Empty issuer keeps the shared
+            # token. With an issuer set, OIDC_CLIENT_ID and at least one of the
+            # allowlists are required, or the collector refuses to start. There
+            # is no client secret: the console is a public PKCE client.
+            - name: OIDC_ISSUER_URL
+              value: ""
+            - name: OIDC_CLIENT_ID
+              value: ""
+            - name: OIDC_ALLOWED_GROUPS
+              value: ""
+            - name: OIDC_ALLOWED_EMAILS
+              value: ""
+            - name: OIDC_GROUPS_CLAIM
+              value: groups
+            - name: OIDC_MAX_TOKEN_AGE
+              value: 1h
             - name: HEAL_ALLOWED_NAMESPACES
               value: default
             - name: HEAL_ALLOWED_ACTIONS

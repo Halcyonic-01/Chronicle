@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/heal"
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 )
 
@@ -284,6 +285,13 @@ type fakeChronicle struct {
 	signals  []rca.Signal
 	results  map[string]rca.Result
 	analysed map[string]time.Time
+
+	// Heal mode: the proposal the analysis records, what the worker makes of
+	// an approval, and every decision attempt as "verb:token".
+	proposal  *heal.Action
+	workerEnd string
+	attempts  []string
+	tokens    map[string]int // token -> status for a decision; default 401
 }
 
 func (f *fakeChronicle) arm(at time.Time) { f.mu.Lock(); f.base = at; f.mu.Unlock() }
@@ -308,8 +316,43 @@ func (f *fakeChronicle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("event_id")
 		f.analysed[id] = now
 		res := f.results[id]
-		_ = json.NewEncoder(w).Encode(res)
+		body := map[string]any{}
+		raw, _ := json.Marshal(res)
+		_ = json.Unmarshal(raw, &body)
+		if f.proposal != nil && f.proposal.CreatedAt.IsZero() {
+			f.proposal.CreatedAt = now
+			body["action"] = f.proposal
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	case "/api/heal/actions":
+		list := []heal.Action{}
+		if f.proposal != nil && !f.proposal.CreatedAt.IsZero() {
+			list = append(list, *f.proposal)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"actions": list})
 	default:
+		if f.proposal != nil && strings.HasPrefix(r.URL.Path, "/api/heal/actions/"+f.proposal.ID+"/") {
+			verb := strings.TrimPrefix(r.URL.Path, "/api/heal/actions/"+f.proposal.ID+"/")
+			token := r.Header.Get("X-Chronicle-Heal-Token")
+			f.attempts = append(f.attempts, verb+":"+token)
+			status, ok := f.tokens[token]
+			if !ok {
+				status = http.StatusUnauthorized
+			}
+			if status != http.StatusOK {
+				w.WriteHeader(status)
+				return
+			}
+			f.proposal.DecisionBy, f.proposal.DecisionSubject = "ana@chronicle.test", "sub-ana"
+			if verb == "deny" {
+				f.proposal.Status, f.proposal.State = heal.StatusDenied, heal.StatusDenied
+			} else {
+				// The worker finishes by the next poll.
+				f.proposal.Status, f.proposal.State = f.workerEnd, f.workerEnd
+			}
+			_ = json.NewEncoder(w).Encode(f.proposal)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }

@@ -1,0 +1,29 @@
+{
+  "realm": "chronicle",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 600,
+  "groups": [{"name": "chronicle-approvers"}, {"name": "chronicle-viewers"}],
+  "users": [
+    {"username": "ana", "enabled": true, "email": "ana@chronicle.test", "emailVerified": true,
+     "firstName": "Ana", "lastName": "Approver",
+     "credentials": [{"type": "password", "value": "e2e-approver-only", "temporary": false}],
+     "groups": ["/chronicle-approvers"]},
+    {"username": "vic", "enabled": true, "email": "vic@chronicle.test", "emailVerified": true,
+     "firstName": "Vic", "lastName": "Viewer",
+     "credentials": [{"type": "password", "value": "e2e-viewer-only", "temporary": false}],
+     "groups": ["/chronicle-viewers"]}
+  ],
+  "clients": [
+    {"clientId": "chronicle", "name": "Chronicle console", "enabled": true, "publicClient": true,
+     "protocol": "openid-connect", "standardFlowEnabled": true,
+     "directAccessGrantsEnabled": true,
+     "redirectUris": ["http://localhost:8181/*"], "webOrigins": ["http://localhost:8181"],
+     "attributes": {"pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "http://localhost:8181/*"},
+     "protocolMappers": [
+       {"name": "groups", "protocol": "openid-connect", "protocolMapper": "oidc-group-membership-mapper",
+        "config": {"claim.name": "groups", "full.path": "false", "id.token.claim": "true",
+                   "access.token.claim": "true", "userinfo.token.claim": "true"}}
+     ]}
+  ]
+}

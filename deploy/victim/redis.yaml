@@ -32,6 +32,27 @@ spec:
         image: redis:7-alpine
         ports:
         - containerPort: 6379
+        # Readiness only. A redis that stops answering turns unready and stays
+        # so, which is the deadlock restart_pod exists for (redis-deadlocked).
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
+---
+# Voluntary disruptions may not take the only healthy redis. An unready one
+# may still be evicted (AlwaysAllow), so restarting a deadlocked pod works.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: redis
 ---
 apiVersion: v1
 kind: Service

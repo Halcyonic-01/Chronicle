@@ -161,7 +161,7 @@ general changes in RCA: the lateness allowance 30s to 60s (node failures are
 declared ~50s after their last heartbeat), a rule that a pod which served
 healthily longer than the flap window is established (not "new"), and the
 episode-onset fix below. None names a fixture, nothing was tuned on this set, and
-the set was run once after each state. RCA source hash `64264b07878b7b87`, rows in
+the set was run once after each state. RCA source hash `bce5bc2fae7bf3da`, rows in
 `internal/rca/testdata/independent_postonsetfix_run.json`.
 
 **The onset fix.** A restart on another entity used to extend an episode backwards
@@ -174,7 +174,7 @@ the real incident in `internal/rca/testdata/postgres_after_linkerd_blip.json`).
 
 Inside the documented contract (111 incidents):
 
-| Metric | First run (`e43c3425e9c4f0b9`) | Post-fix (`38cf5a83b12ecbfa`) | Post-onset-fix (`64264b07878b7b87`) |
+| Metric | First run (`e43c3425e9c4f0b9`) | Post-fix (`38cf5a83b12ecbfa`) | Post-onset-fix (`bce5bc2fae7bf3da`) |
 |---|---|---|---|
 | Top-1, single-cause | 76/78 | 76/78 | 76/78 |
 | Top-3, single-cause | 78/78 | 78/78 | 78/78 |
@@ -187,7 +187,7 @@ All 117: Top-1 77/84, then 78/84 (92.9%), Top-3 80/84.
 
 **What the onset fix did on this set: nothing.** The run with only that rule
 switched off (`testdata/independent_postonsetfix_off_run.json`, hash
-`1b69e68fd0da2fb9`) differs from the run with it on in 0 of 117 incidents. The
+`1b69e68fd0da2fb9`, taken before approver-identity fields were added to `heal/action.go`, which is part of the hash but not of RCA behaviour; the on-run was repeated afterwards with identical rows) differs from the run with it on in 0 of 117 incidents. The
 one incident that changed since the post-fix run, `delayed/cause-recorded-120s-late`
 (missed to correct), is due to the lateness allowance, as that incident is about a
 cause recorded 120s late. The development and held-out reports are byte-identical

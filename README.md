@@ -34,6 +34,9 @@ collectors ─┬→ Kafka ─→ writer ─→ PostgreSQL (events) ─┐
             │  snapshotter  ─→ PostgreSQL (snapshots)   └→ healing → /api/heal/actions
 ```
 
+The full signal-to-remediation path, with a diagram and the reasons each tool
+was kept, replaced or added, is in [docs/architecture.md](docs/architecture.md).
+
 Chronicle runs with two replicas. Every replica serves the API and console; a
 Kubernetes Lease elects one leader to run the singleton workloads (collectors,
 graph sync, snapshotter, database writer). Losing the lease costs a replica
@@ -72,6 +75,7 @@ Kubernetes connections, which fall back to in-cluster and local-kind defaults.
 | `GITHUB_TOKEN`, `ARGOCD_*`, `TERRAFORM_*` | Optional collectors; each is skipped when its URL or token is unset. |
 | `RCA_DECAY_DIVISOR` | How sharply causal plausibility decays across the window. The time constant is the symptom's own lookback divided by this; default 3 puts three e-folds across the window. |
 | `CHRONICLE_API_TOKEN` | When set, every `/api/*` request must present `Authorization: Bearer <token>`. |
+| `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_ALLOWED_GROUPS`, `OIDC_ALLOWED_EMAILS` | Approver sign-in. With an issuer set, approvals need a verified OIDC identity and the shared token is ignored. See `internal/heal/README.md`. |
 | `CHRONICLE_ALLOWED_ORIGIN` | CORS origin. Empty (the default) sends no CORS header; the console is same-origin. |
 | `HEAL_*` | Healing safety gates — see below. |
 
@@ -82,13 +86,21 @@ Chronicle touches Kubernetes:
 
 - `HEAL_LIVE_ENABLED=true` and `HEAL_KILL_SWITCH=false`
 - a 30-day dry-run observation period has elapsed since `HEAL_OBSERVATION_STARTED_AT`
+- enough past decisions have a judged outcome (20 decisive, 80% right by default)
 - the action type, namespace and exact target are all allowlisted
 - the RCA confidence clears the rule's floor and the rule is under its hourly limit
-- a reviewer has approved the action with `HEAL_APPROVAL_TOKEN`, sent as
-  `X-Chronicle-Heal-Token` (a bearer token in `Authorization` is also accepted)
+- a reviewer has approved the action: with an OIDC sign-in when `OIDC_ISSUER_URL`
+  is set (the recorded approver is the verified identity), otherwise with
+  `HEAL_APPROVAL_TOKEN`, sent as `X-Chronicle-Heal-Token`
 
-Only pod restart is executable today. Every decision — including the ones that
-were blocked and why — is written to `heal_actions` before anything happens.
+Four actions can execute: restore a workload scaled to zero, roll a Deployment
+back to its previous pod template, evict an unready pod (so PodDisruptionBudgets
+apply), and raise a memory limit (never proposed yet: the collector does not
+record the original limit the bump is bounded by). Each re-reads its target first and succeeds
+only once the workload is whole again. Approval never executes anything: a
+leader-only worker re-checks every gate and claims the action atomically.
+Every decision, including the ones that were blocked and why, is written to
+`heal_actions` before anything happens. See `internal/heal/README.md`.
 
 Chronicle never reads Secret contents and its ClusterRole does not grant access
 to them; Secrets appear in the dependency graph only through the pod specs that
@@ -101,6 +113,9 @@ go test ./...
 ```
 
 `make test-phase4` exercises RCA end-to-end against a running cluster.
+The RCA-to-remediation chaos campaign (real faults, a real Keycloak, live
+approval-gated healing) runs in a disposable kind cluster: see
+[deploy/e2e/README.md](deploy/e2e/README.md).
 `make test-phase5-kind` is a destructive healing E2E and is opt-in via
 `CHRONICLE_RUN_KIND_E2E=true`.
 

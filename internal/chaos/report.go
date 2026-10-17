@@ -120,6 +120,7 @@ func Report(records []Record) string {
 			fmt.Fprintf(&sb, "      NOT RECOVERED: %s\n", o.RestoreError)
 		}
 	}
+	sb.WriteString(healReport(results))
 	return sb.String()
 }
 
@@ -157,4 +158,47 @@ func maxOf(v []float64) float64 {
 		}
 	}
 	return m
+}
+
+// healReport lists what happened to each proposal in heal mode.
+func healReport(results []Record) string {
+	var sb strings.Builder
+	n, matched := 0, 0
+	for _, rec := range results {
+		h := rec.Result.Heal
+		if h == nil {
+			continue
+		}
+		if n == 0 {
+			sb.WriteString("\nREMEDIATION (heal mode)\n")
+			fmt.Fprintf(&sb, "  %-32s %-19s %-9s %-10s %-10s %-6s %-7s %s\n", "experiment", "action", "decided", "final", "expected", "auth", "healed", "decided by")
+		}
+		n++
+		if h.Matches {
+			matched++
+		}
+		auth := "-"
+		if h.NoTokenStatus != 0 {
+			auth = fmt.Sprintf("%d/%d", h.NoTokenStatus, h.NonApproverStatus)
+		}
+		healed := "-"
+		if h.Final == "succeeded" {
+			healed = fmt.Sprintf("%v %.0fs", h.HealedWithoutRestore, h.HealedAfter)
+		}
+		mark := "ok"
+		if !h.Matches {
+			mark = "MISMATCH"
+		}
+		fmt.Fprintf(&sb, "  %-32s %-19s %-9s %-10s %-10s %-6s %-7s %s  %s\n", fmt.Sprintf("%s#%d", rec.Experiment, rec.Trial),
+			orDash(h.ActionType), h.Expected.Decide, h.Final, h.Expected.Expect, auth, healed, orDash(h.DecidedBy), mark)
+		for _, detail := range []string{h.Result, h.Error, h.Verification, h.Problem} {
+			if detail != "" {
+				fmt.Fprintf(&sb, "      %s\n", trim(detail, 160))
+			}
+		}
+	}
+	if n > 0 {
+		fmt.Fprintf(&sb, "  %d of %d remediations ended as expected\n", matched, n)
+	}
+	return sb.String()
 }

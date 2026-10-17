@@ -22,8 +22,10 @@ kubectl --context kind-chronicle taint node chronicle-worker2 chronicle.io/chaos
 
 # 2. Install monitoring stack (Prometheus, Grafana, Alertmanager)
 echo "Installing Prometheus and Grafana..."
+# Update only the repos this script uses: a plain `helm repo update` fails on
+# any unreachable repo configured on the machine, however unrelated.
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
+helm repo update prometheus-community
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
     --namespace monitoring --create-namespace \
     --set prometheus.service.type=NodePort \
@@ -34,7 +36,7 @@ helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
 # 3. Install Loki (for logs)
 echo "Installing Loki..."
 helm repo add grafana https://grafana.github.io/helm-charts
-helm repo update
+helm repo update grafana
 helm upgrade --install loki grafana/loki-stack --namespace monitoring \
     --set loki.isDefault=false
 
@@ -42,7 +44,7 @@ helm upgrade --install loki grafana/loki-stack --namespace monitoring \
 # 4. Install Kafka and PostgreSQL for Chronicle storage
 echo "Installing Kafka and PostgreSQL..."
 helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
+helm repo update bitnami
 
 # The chart composes its image as <image.registry>/<image.repository>:<image.tag>
 # and defaults the registry to docker.io, so image.repository must stay

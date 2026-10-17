@@ -250,10 +250,10 @@ function settings(){
       </tbody></table>
       <div class="sec-h" style="border-top:1px solid var(--line2)"><b>Safety</b><span>DEFAULT DENY</span></div>
       <table class="dt spec"><thead><tr><th>Gate</th><th>Value</th><th>Note</th></tr></thead><tbody>
-        ${row('Healing mode','dry run','plans and audits actions, never executes')}
-        ${row('Kill switch','enabled','blocks execution regardless of every other gate')}
+        ${row('Healing mode',(state.healMode||{}).live_enabled?'live':'dry run',(state.healMode||{}).live_enabled?'approved actions execute after every gate is re-checked':'plans and audits actions, never executes')}
+        ${row('Kill switch',(state.healMode||{}).kill_switch===false?'off':'enabled','blocks execution regardless of every other gate')}
         ${row('Observation period','30 days','must elapse before any live action')}
-        ${row('Approval','token required','sent as X-Chronicle-Heal-Token')}
+        ${row('Approval',state.authMode==='oidc'?'OIDC sign-in':'shared token','oidc: the approver is the verified identity; shared token: a name the caller types')}
         ${row('API auth','set CHRONICLE_API_TOKEN','unset means anything reaching the Service can read')}
         ${row('Secrets','not readable','Chronicle has no cluster-wide Secret access')}
       </tbody></table>
@@ -344,7 +344,7 @@ async function loadEvents(){
     state.signals=r.ok?(d.events||[]):[];
     state.totalSignals=r.ok&&Number.isFinite(d.total)?d.total:state.signals.length;
   }catch(_){ state.signals=[]; state.totalSignals=0; }
-  await Promise.all([loadGraph(),loadActions(),loadHealRules(),loadPosture()]);
+  await Promise.all([loadGraph(),loadActions(),loadHealRules(),loadPosture()]); showMode();
   state.loading=false; render();
 }
 async function loadGraph(){ try { const r=await api('/api/graph'); state.graph=r.ok?await r.json():{nodes:[],edges:[]}; } catch (_) { state.graph={nodes:[],edges:[]}; } }
@@ -352,6 +352,17 @@ async function loadPosture(){ state.postureLoading=true; try { const r=await api
 async function loadActions(){ try { const r=await api('/api/heal/actions'); state.actions=r.ok?(await r.json()).actions||[]:[]; } catch (_) { state.actions=[]; } }
 // The rules come from the engine that enforces them, never from a copy here.
 async function loadHealRules(){ try { const r=await api('/api/heal/rules'); const body=r.ok?await r.json():null; state.healRules=body?body.rules||[]:null; state.healMode=body; } catch (_) { state.healRules=null; state.healMode=null; } }
+
+// The sidebar states the mode the server reports, never an assumption.
+function showMode(){
+  const box=document.querySelector('.system-state'); if(!box)return;
+  const m=state.healMode;
+  const live=m&&m.live_enabled&&!m.kill_switch;
+  const [dot,title,note]=!m?['amber','Mode unknown','healing rules could not be read']
+    :live?['red','Live healing','approved actions execute after every gate']
+    :['amber','Dry-run mode',m.live_enabled?'kill switch on: nothing executes':'healing execution disabled'];
+  box.innerHTML=`<span class="dot dot-${dot}"></span><span><strong>${title}</strong><small>${note}</small></span>`;
+}
 
 // Only a proposal still inside its deadline can be approved; the server
 // enforces this too.
@@ -371,11 +382,23 @@ async function loadMoreEvents(){
 
 async function decide(id,approved){
   try{
-    let token=sessionStorage.getItem('chronicle_heal_token')||window.prompt('Healing approval token');
-    if(!token)return;
-    sessionStorage.setItem('chronicle_heal_token',token);
-    const r=await api(`/api/heal/actions/${encodeURIComponent(id)}/${approved?'approve':'deny'}`,{method:'POST',headers:{'Content-Type':'application/json','X-Chronicle-Heal-Token':token},body:JSON.stringify({by:'local-reviewer'})});
-    if(r.status===401){sessionStorage.removeItem('chronicle_heal_token');throw new Error('Invalid approval token');}
+    const cfg=await ChronicleAuth.config(api);
+    const path=`/api/heal/actions/${encodeURIComponent(id)}/${approved?'approve':'deny'}`;
+    let r;
+    if(cfg.mode==='oidc'){
+      // Who decided comes from the signed-in identity; the server ignores any name sent.
+      const token=ChronicleAuth.token();
+      if(!token){ showToast('Redirecting to sign in'); await ChronicleAuth.login(cfg); return; }
+      // Not through api(): its 401 handling asks for the API token, which is not what failed here.
+      r=await fetch(path,withToken({method:'POST',headers:{'Content-Type':'application/json','X-Chronicle-Heal-Token':token},body:'{}'},apiToken()));
+      if(r.status===401){ ChronicleAuth.signOut(); showToast('Your sign-in expired or was refused; signing in again'); await ChronicleAuth.login(cfg); return; }
+    }else{
+      let token=sessionStorage.getItem('chronicle_heal_token')||window.prompt('Healing approval token');
+      if(!token)return;
+      sessionStorage.setItem('chronicle_heal_token',token);
+      r=await api(path,{method:'POST',headers:{'Content-Type':'application/json','X-Chronicle-Heal-Token':token},body:JSON.stringify({by:'local-reviewer'})});
+      if(r.status===401){sessionStorage.removeItem('chronicle_heal_token');throw new Error('Invalid approval token');}
+    }
     const body=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(body.error||'Action is no longer pending');
     await Promise.all([loadActions(),loadHealRules()]); render();
@@ -408,4 +431,28 @@ $('#refresh').onclick=()=>loadEvents();
 window.addEventListener('hashchange',()=>{ state.page=hashPage(); render(); });
 // The first render waits for incidents.js, replay.js and graph.js to install
 // their views, otherwise a deep link renders this file's fallback.
-document.addEventListener('DOMContentLoaded',()=>loadEvents());
+document.addEventListener('DOMContentLoaded',async()=>{
+  // Returning from the identity provider: finish signing in before anything renders.
+  try{
+    const who=await ChronicleAuth.finishLogin(api);
+    if(who)showToast(`Signed in as ${who}; press approve or deny again`);
+  }catch(e){ showToast(e.message); }
+  try{ state.authMode=(await ChronicleAuth.config(api)).mode; }catch(_){}
+  showApprover();
+  loadEvents();
+});
+
+// The top-right badge shows who is signed in, or nothing claims to be you.
+// With OIDC it is also the sign-in and sign-out control.
+function showApprover(){
+  const badge=document.querySelector('.avatar'); if(!badge)return;
+  const name=ChronicleAuth.signedInAs();
+  const oidc=state.authMode==='oidc';
+  badge.textContent=name?name.slice(0,2).toUpperCase():'–';
+  badge.title=name?`Signed in as ${name}${oidc?' (click to sign out)':''}`:(oidc?'Sign in to approve':'Not signed in');
+  badge.style.cursor=oidc?'pointer':'default';
+  badge.onclick=!oidc?null:async()=>{
+    if(name){ ChronicleAuth.signOut(); showApprover(); showToast('Signed out'); return; }
+    try{ await ChronicleAuth.login(await ChronicleAuth.config(api)); }catch(e){ showToast(e.message); }
+  };
+}

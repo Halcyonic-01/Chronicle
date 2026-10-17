@@ -113,8 +113,8 @@ func TestEmptyReasoningIsRepresentedAsAnEmptyList(t *testing.T) {
 	}
 }
 
-func TestKubernetesExecutorDeletesOnlyApprovedNonDryRunPod(t *testing.T) {
-	client := fake.NewSimpleClientset(unreadyPod("redis", "redis-6d79c4d8db"))
+func TestKubernetesExecutorEvictsOnlyApprovedNonDryRunPod(t *testing.T) {
+	client, _ := evictingClient(nil, unreadyPod("redis", "redis-6d79c4d8db"))
 	executor := NewKubernetesExecutor(client)
 	action := &Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis", Approval: ApprovalNotRequired, DryRun: false}
 	if _, err := executor.Execute(context.Background(), action); err != nil {
