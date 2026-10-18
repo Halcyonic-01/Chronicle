@@ -7,5 +7,6 @@ set -euo pipefail
 realm=deploy/e2e/keycloak/realm.json
 cred() { python3 -c 'import json,sys; u={x["username"]:x["credentials"][0]["value"] for x in json.load(open(sys.argv[1]))["users"]}; print(u[sys.argv[2]])' "$realm" "$1"; }
 export E2E_APPROVER_USER=ana E2E_APPROVER_PASSWORD="$(cred ana)"
+export E2E_APPROVER2_USER=bea E2E_APPROVER2_PASSWORD="$(cred bea)"
 export E2E_VIEWER_USER=vic E2E_VIEWER_PASSWORD="$(cred vic)"
 exec go run ./cmd/chaos run -heal -context kind-chronicle "$@"

@@ -217,7 +217,7 @@ function healing(){
           <td class="num">${(a.confidence||0).toFixed(2)}</td>
           <td class="${a.status==='blocked'||a.status==='failed'?'sev-warning':''}">${esc(a.status)}</td>
           <td title="${esc(a.symptom_detail||'')}">${a.symptom_check?`<span class="${a.symptom_check==='failed'?'sev-warning':a.symptom_check==='succeeded'?'':'dim'}">${esc(a.symptom_check)}</span>`:'<span class="dim">—</span>'}</td>
-          <td class="dim">${esc(a.state||a.approval)}</td>
+          <td class="dim">${esc(a.state||a.approval)}${(a.approvals_required||1)>1?`<br><span title="${esc((a.approvals||[]).map(p=>p.display).join(', '))}">${(a.approvals||[]).length} of ${a.approvals_required} approvals</span>`:''}</td>
           <td>${awaitingApproval(a)
             ? `<button class="k pri" data-approve="${esc(a.id)}">approve</button> <button class="k no" data-deny="${esc(a.id)}">deny</button>`
             : `<span class="dim">${esc(a.result||a.approval||'')}</span>`}</td>

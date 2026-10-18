@@ -1582,7 +1582,7 @@ func TestAManyThousandEventOutageStaysFast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if took := time.Since(begin); took > 3*time.Second {
+	if took := time.Since(begin); took > 3*time.Second*raceSlowdown {
 		t.Fatalf("analysing %d events took %v", len(source.all), took)
 	}
 	if got.Candidates[0].Event.ID != "cause" {

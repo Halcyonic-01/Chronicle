@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/revision"
 )
 
 // A checkpoint is what the collector last saw, so a new leader can report what
@@ -47,6 +48,9 @@ type deploymentState struct {
 	Memory    int64  `json:"memory"`
 	Resources string `json:"resources"`
 	Config    string `json:"config"`
+	// Template is the whole pod template's hash (internal/revision). Empty in a
+	// checkpoint written before it existed: such a change is reported without it.
+	Template string `json:"template,omitempty"`
 }
 
 type podState struct {
@@ -136,7 +140,8 @@ func snapshotOf(deployments []*appsv1.Deployment, pods []*corev1.Pod, at time.Ti
 }
 
 func deploymentStateOf(d *appsv1.Deployment) deploymentState {
-	st := deploymentState{Replicas: deploymentReplicas(d), Ready: d.Status.ReadyReplicas, Config: configFingerprint(d)}
+	st := deploymentState{Replicas: deploymentReplicas(d), Ready: d.Status.ReadyReplicas, Config: configFingerprint(d),
+		Template: revision.TemplateHash(d.Spec.Template)}
 	if cs := d.Spec.Template.Spec.Containers; len(cs) > 0 {
 		st.Image, st.Memory = cs[0].Image, memoryLimit(cs[0])
 		st.Resources = fingerprint(cs[0].Resources)
@@ -277,6 +282,11 @@ func (k *K8sCollector) catchUpDeployment(was deploymentState, d *appsv1.Deployme
 	changedAt, changedBy := specChangeTime(d)
 	emit := func(typ, title string, payload map[string]any) {
 		payload["changed_by"], payload["missed"] = changedBy, true
+		// The same revision evidence a seen change carries, so a rollback can
+		// name the exact template even when this change was caught up on.
+		if typ != "scale" && was.Template != "" && was.Template != now.Template {
+			payload["from_template_hash"], payload["to_template_hash"] = was.Template, now.Template
+		}
 		payload = k.withGitOps(d, payload)
 		k.Emit(event.Event{Source: "k8s", OccurredAt: changedAt, EntityKind: "Deployment", EntityName: d.Name, Namespace: d.Namespace, Type: typ, Severity: "info", Title: title, Payload: mustJSON(payload)})
 	}

@@ -162,6 +162,7 @@ own checks.
 | `HEAL_APPROVAL_TTL` | `30m` | Deadline for approval *and* execution |
 | `HEAL_MAX_EXECUTIONS_PER_HOUR` | `3` | Global cap across rules (0 = none) |
 | `HEAL_TARGET_COOLDOWN` | `30m` | Least time between two actions on one workload |
+| `METRICS_ADDR` / `API_ADDR` / `API_REQUEST_TIMEOUT` | `:9102` / `:8181` / `60s` | Metrics port (no token), API and console address, and the longest an API request may take |
 | `HEAL_ROLLBACK_MIN_HEALTHY` | `30m` | A revision must have run this long without a recorded failure before a rollback returns to it; otherwise an older verified revision is named, or none |
 | `HEAL_RESTART_EXECUTION_ENABLED` | `false` | `restart_pod` is proposed and approved but never executed until this is `true` |
 | `HEAL_RESTART_UNREADY_FOR` / `HEAL_RESTART_QUIET` | `5m` / `10m` | A pod is restarted only after this long unready, and not within the quiet period of a restart of its container |
@@ -306,13 +307,13 @@ tested).
 | 5 | Restart is a raw delete | **Fixed** | Eviction API with a UID precondition, so PodDisruptionBudgets apply; recovery means the owner's replicas are all ready again: `TestRestartEvictsAndNeverDeletes`, `TestADisruptionBudgetRefusalIsReportedAndRetryable`, `TestVerificationRequiresTheWorkloadToRecover`, `TestRealClusterEvictionHonoursTheDisruptionBudget` (real API server) |
 | 6 | Execution inside HTTP | **Fixed** | Worker plus separate verify budget: `TestTheWorkerExecutesNothingWhileLiveIsOff`. Post-action symptom check added (see above): `TestWorkerChecksTheSymptomAfterASuccessfulAction`, `TestWorkerRecordsAFailedSymptomCheckWithoutTouchingTheOutcome`, `TestASymptomCheckSurvivesALeaderChange`. Auto-revert stays deliberately absent. |
 | 7 | Image-only rollback | **Fixed** | `TestRollbackRestoresThePreviousPodTemplate` plus GitOps refusal |
-| 8 | Memory bump unworkable | **Partial** | No longer planned without evidence, and the container is chosen by name. Still deferred: the collector recording the original limit, and a cumulative cap. |
-| 9 | Restore ignores intent | **Partial** | GitOps-managed workloads are refused. Still deferred: using `changed_by` to recognise deliberate scale-to-zero. |
+| 8 | Memory bump unworkable | **Fixed** (unit and fake-client tested) | An OOM event now records the killed container's memory limit, and growth is capped at twice the limit from before Chronicle first raised it, remembered on the Deployment (`chronicle.io/base-memory-limit-<container>`): `TestAnOOMKillRecordsTheContainersMemoryLimit`, `TestRepeatedMemoryBumpsStayWithinTwiceTheOriginalLimit`. Needs two approvers by default. Never run live. |
+| 9 | Restore ignores intent | **Fixed** (not live) | A workload annotated `chronicle.io/maintenance: <reason>` is not restored, when proposing and again at execution against the live object (`"false"` ends it). GitOps-managed workloads were already refused: `TestARestoreIsNotProposedOrRunForAWorkloadInMaintenance`. A person scaling to zero *without* the annotation is still treated as a fault. |
 | 10 | Allowlist never matches | **Fixed** | `TestAllowlistMatchesTheOwningWorkload` |
 | 11 | "Automatic" rules never run | **Fixed** | Every action requires approval, and this is reported truthfully: `TestEveryProposalNeedsApproval` |
 | 12 | "Queued" was not a queue | **Fixed** | Worker plus truthful API and console states |
 | 13 | Observation start drifts | **Fixed** | `TestPostgresObservationStartSurvivesPruning` |
-| 14 | Evidence gate is global | Deferred | Needs labelled data per action type |
+| 14 | Evidence gate is global | **Fixed** | Each action type must also clear the evidence bar on its own record, on top of the overall one (never looser than before): `TestEachActionTypeMustClearTheEvidenceBarOnItsOwn`, `TestPostgresEvidenceAndReliabilityAreSplitByActionType` |
 | 15 | Floor below the inconclusive line | **Fixed** | An `inconclusive` verdict is never proposed, whatever the floor: `TestAnInconclusiveVerdictIsNeverProposedEvenUnderALowFloor` |
 | 16 | Namespace-wide recovery | **Fixed** | `TestRecoveryElsewhereInTheNamespaceDoesNotConfirm`, `TestPostgresLabellingUsesTheSymptomAndOrder` |
 | 17 | Event order ignored | **Fixed** | `TestRecoveryBeforeTheFixDoesNotConfirm` |
@@ -320,15 +321,15 @@ tested).
 | 19 | Unrelated changes contradict | **Fixed** | `TestAnUnrelatedChangeDoesNotContradict`. Relatedness comes from the entities the RCA weighed. |
 | 20 | Self-confirming evidence | **Fixed** | `TestChroniclesOwnChangeDoesNotConfirm`, `TestPostgresEvidenceExcludesSelfExecutedOutages` |
 | 21 | No rule for config/service/resource/node causes | **Partly fixed** | `revert-bad-config` rolls a Deployment back to an exact earlier pod template (P1 below). ConfigMap and Secret contents are never reverted, by design; service, node and autoscaler causes still have no rule. |
-| 22 | 0.65 floor is uncalibrated | Deferred | Floors were deliberately not lowered. |
+| 22 | 0.65 floor is uncalibrated | **Partly done** | `/api/heal/calibration` now carries a reliability table per action type and confidence band, counted once per outage, with `ready_for_floor_review` once an action type has `HEAL_MIN_DECISIVE_DECISIONS` judged outcomes. **No floor was changed**: none has enough data. |
 | 23 | Restart rule fires on any unready pod | **Fixed** (not live) | Eligibility is checked at execution: unready 5 min, quiet 10 min, not mid-rollout; until then the approved decision waits (P1 below): `TestARestartWaitsUntilThePodHasBeenUnreadyForFiveMinutes` and the tests beside it |
 | 24 | Duplicate-insert race returns a phantom ID | **Fixed** | `RecordAction` returns the existing decision (`ErrAlreadyRecorded`) and a duplicate is not announced twice: `TestPostgresADuplicateIncidentReturnsTheWinnersDecision`, `TestPostgresConcurrentAnalysesOfOneIncidentAgree`, `TestALostInsertReturnsTheWinnersDecisionAndDoesNotNotify` |
 | 25 | Re-analysis hides the existing decision | **Fixed** | Re-analysis returns the decision already made, with its state: `TestReAnalysisReturnsTheExistingDecision` |
 | 26 | Approver identity is self-declared | **Fixed** (with limits) | OIDC: `TestTheApproverIsTheVerifiedIdentityNotTheBody`, `TestTheSharedTokenStopsWorkingOnceOIDCIsConfigured`, `TestTokensThatDoNotVerifyAreRefused`, `TestPostgresRecordsTheVerifiedApprover`. Not run against a real provider; see *Approver authentication* |
-| 27 | Slack failures silent, no action link | **Partial** | Failures are now logged. A link is still missing. |
+| 27 | Slack failures silent, no action link | **Fixed** | Failures are logged, and a pending decision's message links to the console when `CHRONICLE_PUBLIC_URL` is set and says how many approvers it needs: `TestSlackSaysHowManyApproversAreNeededAndLinksToTheConsole` |
 | 28 | Console claims dry-run regardless of mode | **Fixed** | The banner reads the live, kill-switch, TTL, cap and cooldown values from `/api/heal/rules`. |
 | 29 | RBAC wider than needed | **Fixed** | `TestDefaultRBACGrantsNoWritesOutsideChronicle`, `TestExecutorRBACIsNamespaced` |
-| 30 | Chaos records only the main alert's decision | Deferred | |
+| 30 | Chaos records only the main alert's decision | **Fixed** | Heal mode records every decision created during the experiment, including skipped and blocked ones: `TestHealModeRecordsEveryDecisionCreatedDuringTheExperiment` |
 
 **Kyverno, verified two ways (CLI and chart 1.19.1):**
 
@@ -646,6 +647,68 @@ attempts showed what the rule needs:
 above); restart eligibility is tested against fake and real API servers, not a
 live campaign; Argo Rollouts and Flagger detection is untested against a real
 installation.
+
+## P2: production readiness and secrets (2026-10-18)
+
+The full account, with tables, is in `docs/production-readiness.md`; secrets are in
+`deploy/secrets/README.md`. In short:
+
+* **Telemetry.** Chronicle serves `/metrics` on `:9102` (event pipeline lag,
+  analysis time, approval-to-execution time, symptom-check verdicts, graph sync,
+  leader), `/healthz` and `/readyz`. `deploy/monitoring/` has the ServiceMonitor and
+  eight SLO alerts; a test ties every metric name in them to one Chronicle exports.
+* **Leader changes** were drilled three ways (force delete, SIGKILL, and a
+  SIGSTOP/SIGCONT freeze past the lease that wakes a stale leader). Healing needed
+  no change: claims are fenced in PostgreSQL, and a crash-interrupted execution is
+  already closed by `FailInterrupted`. What the drills found was on the collector
+  side: a catch-up after a hand-over lacked the template hashes the rollback
+  logic depends on, and repeated a change the old leader had already reported.
+* **Dependency outages** (PostgreSQL partitioned, Kafka, Redis, Prometheus, Loki,
+  60 s each) lost no event. Two things hung and are fixed: requests during a
+  PostgreSQL outage (no connect timeout, no request deadline), and the console
+  event list during a Redis outage (default timeouts, retries).
+* **Scale**, simulated with KWOK: 6,000 pods, 100 nodes, 24,000 graph edges,
+  566 MiB, analysis p99 2.1 s, every event stored within 2 s.
+* **Secrets**: External Secrets Operator fills `chronicle-config` and
+  `postgres-postgresql`; Reloader rolls Chronicle on a change. Tested with ESO's
+  fake provider on kind (a rotation reaches the running process in about 30 s);
+  AWS Secrets Manager is written but **not run**.
+* **Not done**: a 24-72 h soak (not run, and no script is kept for it), Kubernetes API / OIDC / webhook outages, anything that needs
+  a multi-node managed cluster (see `docs/production-readiness.md`, "Open").
+
+## P3: approvals, evidence and remaining findings (2026-10-19)
+
+Written and unit-tested; **none of it has run on a live cluster**, and the build has
+not been deployed. The live harness was extended and not used.
+
+* **Two approvers, 5-minute sign-in.** `rollback_deployment` and `bump_memory` need
+  two *different* people (`HEAL_TWO_APPROVER_ACTIONS`; a rule can ask for more with
+  `approvers_required`, never less). Each approval is a row (migration `017`)
+  keyed by identity provider and subject, so a second click by the same person is
+  refused (409), one denial ends the action, and the row is locked while approvals
+  are counted so two people approving at once are both counted. The shared token
+  cannot approve these (403): it cannot tell people apart. Before anything runs the
+  worker re-checks that enough distinct people approved, that each is still on
+  today's allowlist, and the larger of the proposed and the current requirement, so
+  tightening the policy reaches decisions already waiting. A sign-in older than
+  `OIDC_MAX_TOKEN_AGE` (now `5m`, was `1h`) is refused with its own message and the
+  console signs the approver in again.
+* **Per-action evidence and the reliability table** (findings 14 and 22, above).
+* **Smaller findings**: 8, 9, 27 and 30 in the table above.
+* **Start-up refusals** (`internal/startup`): a cluster never uses the built-in
+  development database URL; production needs `CHRONICLE_API_TOKEN`; live healing
+  in production needs OIDC.
+* **Go toolchain**: `go.mod` now pins `toolchain go1.26.9` and the Dockerfiles use
+  `golang:1.26.9-alpine`. `govulncheck` found 30 standard-library vulnerabilities
+  fixed between 1.26.1 and 1.26.9 on the old 1.26.0, and none after.
+* **Unchanged by decision**: the migration runner stays a locked shell loop.
+
+**Not done**: the live check of the two-approver flow (the realm has a second
+approver, `bea`, but Keycloak has not re-imported it, and the harness drives both);
+the shortened live suite (3 of its steps remain: `api-bad-release`,
+`worker-restore-blocked-by-quota`, `api-two-bad-releases`); a race-detector run of
+the full suite after these changes. The independent benchmark was re-measured: no
+row changed, only the source hash.
 
 ## Also fixed in this round
 

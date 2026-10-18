@@ -11,6 +11,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/tidwall/gjson"
 )
@@ -363,5 +364,57 @@ func TestAReleaseControllerOwnedDeployIsRecordedAsManaged(t *testing.T) {
 	events := emittedBy(old, new)
 	if len(events) != 1 || gjsonString(events[0], "gitops") != "argo-rollouts:api-rollout" {
 		t.Fatalf("got %+v", events)
+	}
+}
+
+// An OOM kill records the limit the container died under: without it a memory
+// increase cannot be bounded and no bump is ever proposed.
+func TestAnOOMKillRecordsTheContainersMemoryLimit(t *testing.T) {
+	out := make(chan event.Event, 8)
+	collector := NewK8sCollector(nil, out)
+	spec := []corev1.Container{
+		{Name: "sidecar", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")}}},
+		{Name: "app", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")}}},
+	}
+	old, killed := pod(status("app", 0), status("sidecar", 0)), pod(status("app", 1), status("sidecar", 0))
+	old.Spec.Containers, killed.Spec.Containers = spec, spec
+	killed.Name, killed.Namespace = "api-1", "default"
+	killed.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "api-6d79c4d8db", Controller: boolPtr(true)}}
+	killed.Status.ContainerStatuses[0].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137}
+
+	collector.diffPods(old, killed)
+	events := drain(out)
+	if len(events) != 1 || events[0].Type != "oom_kill" {
+		t.Fatalf("events %+v", events)
+	}
+	if got := gjson.GetBytes(events[0].Payload, "original_mem_bytes").Int(); got != 128*1024*1024 {
+		t.Fatalf("the limit recorded is %d, want the killed container's 128Mi, not the sidecar's", got)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestAScaleRecordsThatTheWorkloadWasMarkedForMaintenance(t *testing.T) {
+	out := make(chan event.Event, 8)
+	collector := NewK8sCollector(nil, out)
+	before, after := deployState(3, 3, "api:1"), deployState(0, 0, "api:1")
+	after.Annotations = map[string]string{"chronicle.io/maintenance": "reindexing"}
+	collector.diffDeployments(before, after)
+	var scale *event.Event
+	for _, e := range drain(out) {
+		if e.Type == "scale" {
+			e := e
+			scale = &e
+		}
+	}
+	if scale == nil || gjsonString(*scale, "maintenance") != "reindexing" {
+		t.Fatalf("the scale does not say it was maintenance: %+v", scale)
+	}
+	after.Annotations = nil
+	collector.diffDeployments(before, after)
+	for _, e := range drain(out) {
+		if e.Type == "scale" && gjson.GetBytes(e.Payload, "maintenance").Exists() {
+			t.Fatalf("an ordinary scale carries a maintenance note: %s", e.Payload)
+		}
 	}
 }

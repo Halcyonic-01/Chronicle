@@ -256,13 +256,18 @@ func healerFromEnv(ctx context.Context) (*chaos.Healer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A second approver, for the actions that need two different people.
+	second, err := grant("E2E_APPROVER2_USER", "E2E_APPROVER2_PASSWORD")
+	if err != nil {
+		return nil, err
+	}
 	// Fail before any fault is injected, not halfway through the campaign.
-	for _, g := range []chaos.PasswordGrant{approver, viewer} {
+	for _, g := range []chaos.PasswordGrant{approver, second, viewer} {
 		if _, err := g.Token(ctx); err != nil {
 			return nil, fmt.Errorf("identity provider at %s (port-forward Keycloak first): %w", tokenURL, err)
 		}
 	}
-	return &chaos.Healer{Approver: approver, NonApprover: viewer, Terminal: 6 * time.Minute, SymptomWait: 12 * time.Minute}, nil
+	return &chaos.Healer{Approver: approver, SecondApprover: second, NonApprover: viewer, Terminal: 6 * time.Minute, SymptomWait: 12 * time.Minute}, nil
 }
 
 func contains(list []string, s string) bool {

@@ -6,6 +6,7 @@ package heal
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -360,5 +361,40 @@ func TestExecutorTellsAnArgoApplicationFromAHelmRelease(t *testing.T) {
 	plain := &KubernetesExecutor{Client: fake.NewSimpleClientset(scaledTo0("redis", "shop"))}
 	if _, err := plain.restoreReplicas(context.Background(), action("redis")); err != nil {
 		t.Fatalf("with Argo CD not in use the instance label is not a marker: %v", err)
+	}
+}
+
+// Growth is bounded against the limit before the first bump, however many times
+// the container is killed afterwards. The OOM event carries the *current* limit,
+// so a cap taken from it would rise with every kill.
+func TestRepeatedMemoryBumpsStayWithinTwiceTheOriginalLimit(t *testing.T) {
+	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "api", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("100Mi")}}}}}}}}
+	client := fake.NewSimpleClientset(d)
+	e := NewKubernetesExecutor(client)
+	limit := func() int64 {
+		got, _ := client.AppsV1().Deployments("default").Get(context.Background(), "api", metav1.GetOptions{})
+		l := got.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+		return l.Value()
+	}
+	mi := int64(1024 * 1024)
+	// Each kill reports the limit it was killed under, which grows with the bumps.
+	bump := func() error {
+		payload := fmt.Sprintf(`{"owner":"api","container":"api","original_mem_bytes":%d}`, limit())
+		_, err := e.bumpMemory(context.Background(), &Action{ActionType: ActionBumpMemory, Namespace: "default", Target: "api-1", Payload: []byte(payload)})
+		return err
+	}
+	for i, want := range []int64{150 * mi, 200 * mi} { // 1.5x, then clamped to 2x the original
+		if err := bump(); err != nil || limit() != want {
+			t.Fatalf("bump %d: limit %d, err %v; want %d", i+1, limit()/mi, err, want/mi)
+		}
+	}
+	if err := bump(); err == nil || limit() != 200*mi {
+		t.Fatalf("a third bump went past twice the original: %dMi, %v", limit()/mi, err)
+	}
+	got, _ := client.AppsV1().Deployments("default").Get(context.Background(), "api", metav1.GetOptions{})
+	if got.Annotations[baseMemoryAnnotation+"api"] != fmt.Sprint(100*mi) {
+		t.Fatalf("the base limit is not remembered: %v", got.Annotations)
 	}
 }

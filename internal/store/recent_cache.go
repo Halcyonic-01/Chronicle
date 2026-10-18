@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -16,10 +18,39 @@ type RecentCache struct {
 	client *redis.Client
 	key    string
 	limit  int64
+	// downUntil is when the cache is tried again after a failure (unix nanos).
+	downUntil atomic.Int64
 }
 
+// ErrCacheDown is returned without touching Redis while the cache is held off.
+var ErrCacheDown = errors.New("recent event cache is holding off after a failure")
+
+const (
+	cacheTimeout = time.Second
+	// cacheHoldOff is how long a failure keeps the cache out of the way, so an
+	// outage costs one slow call, not one per request. The cache is optional:
+	// everything it holds is in PostgreSQL.
+	cacheHoldOff = 10 * time.Second
+)
+
 func NewRecentCache(address, password string, db int) *RecentCache {
-	return &RecentCache{client: redis.NewClient(&redis.Options{Addr: address, Password: password, DB: db}), key: "chronicle:events:recent", limit: 1000}
+	return &RecentCache{client: redis.NewClient(&redis.Options{Addr: address, Password: password, DB: db,
+		DialTimeout: cacheTimeout, ReadTimeout: cacheTimeout, WriteTimeout: cacheTimeout, MaxRetries: 1}), key: "chronicle:events:recent", limit: 1000}
+}
+
+// guard runs a cache call under a short deadline and holds the cache off after a
+// failure.
+func (c *RecentCache) guard(ctx context.Context, call func(context.Context) error) error {
+	if time.Now().UnixNano() < c.downUntil.Load() {
+		return ErrCacheDown
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*cacheTimeout)
+	defer cancel()
+	err := call(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		c.downUntil.Store(time.Now().Add(cacheHoldOff).UnixNano())
+	}
+	return err
 }
 
 // Limit reports how many events the cache retains. A request for more than
@@ -40,12 +71,14 @@ func (c *RecentCache) Add(ctx context.Context, events ...event.Event) error {
 		}
 		payloads = append(payloads, payload)
 	}
-	pipe := c.client.Pipeline()
-	pipe.LPush(ctx, c.key, payloads...)
-	pipe.LTrim(ctx, c.key, 0, c.limit-1)
-	pipe.Expire(ctx, c.key, 24*time.Hour)
-	_, err := pipe.Exec(ctx)
-	return err
+	return c.guard(ctx, func(ctx context.Context) error {
+		pipe := c.client.Pipeline()
+		pipe.LPush(ctx, c.key, payloads...)
+		pipe.LTrim(ctx, c.key, 0, c.limit-1)
+		pipe.Expire(ctx, c.key, 24*time.Hour)
+		_, err := pipe.Exec(ctx)
+		return err
+	})
 }
 
 // Recent returns up to limit cached events, newest first, restricted to the
@@ -55,7 +88,11 @@ func (c *RecentCache) Recent(ctx context.Context, from, to time.Time, limit int)
 	if limit <= 0 || int64(limit) > c.limit {
 		limit = int(c.limit)
 	}
-	raw, err := c.client.LRange(ctx, c.key, 0, int64(limit)-1).Result()
+	var raw []string
+	err := c.guard(ctx, func(ctx context.Context) (err error) {
+		raw, err = c.client.LRange(ctx, c.key, 0, int64(limit)-1).Result()
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Halcyonic-01/Chronicle/internal/metrics"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -34,6 +36,11 @@ type Policy struct {
 	MinDecisive      int
 	MinPrecision     float64
 	Evidence         EvidenceSummary
+	// ActionEvidence is the same summary for this action's type alone, when the
+	// store can give it. Evidence that restores are reliable says nothing about
+	// rollbacks, so the action must clear the bar by its own record too.
+	ActionEvidence      EvidenceSummary
+	ActionEvidenceKnown bool
 	// MaxExecutionsPerHour caps executions across every rule; TargetCooldown
 	// is the least time between two actions on one workload.
 	MaxExecutionsPerHour int
@@ -42,6 +49,9 @@ type Policy struct {
 	// approved like any decision but never executed: it stays proposal-only until
 	// the restart path has passed safety testing (HEAL_RESTART_EXECUTION_ENABLED).
 	RestartExecutionEnabled bool
+	// TwoApprover names the action types that need two distinct approvers
+	// (HEAL_TWO_APPROVER_ACTIONS).
+	TwoApprover map[string]bool
 }
 
 // EvidenceSummary is what the observation period actually produced. Unknown
@@ -83,6 +93,7 @@ func PolicyFromEnv() Policy {
 		MaxExecutionsPerHour:    intEnv("HEAL_MAX_EXECUTIONS_PER_HOUR", 3),
 		TargetCooldown:          durationEnv("HEAL_TARGET_COOLDOWN", 30*time.Minute),
 		RestartExecutionEnabled: os.Getenv("HEAL_RESTART_EXECUTION_ENABLED") == "true",
+		TwoApprover:             TwoApproverActionsFromEnv(),
 	}
 }
 
@@ -98,7 +109,10 @@ type Controller struct {
 	// floor, not the one it was planned under.
 	Rules []Rule
 	Now   func() time.Time
-	mu    sync.Mutex
+	// ApproverStillPermitted, when set, re-checks each approver against today's
+	// allowlist before anything runs (an approver removed since is not honoured).
+	ApproverStillPermitted func(Approval) bool
+	mu                     sync.Mutex
 }
 
 func NewController(store ExecutionStore, executor Executor) *Controller {
@@ -129,12 +143,16 @@ func (c *Controller) Revalidate(ctx context.Context, action *Action) string {
 		got, floor := formatBelow(action.Confidence, rule.MinConfidence)
 		return fmt.Sprintf("confidence %s is below the current floor %s", got, floor)
 	}
+	if reason := c.approvalsShort(action, rule); reason != "" {
+		return reason
+	}
 	if reason := precondition(action.ActionType, action.Payload); reason != "" {
 		return reason
 	}
 	policy := c.Policy
 	policy.ObservationSince = c.ObservationStart(ctx)
 	policy.Evidence = c.Evidence(ctx)
+	policy.ActionEvidence, policy.ActionEvidenceKnown = c.EvidenceFor(ctx, action.ActionType)
 	if err := policy.Allows(action); err != nil {
 		return err.Error()
 	}
@@ -174,6 +192,7 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 	block := func(reason string) (*Action, error) {
 		action.Status, action.Result, action.Error = StatusBlocked, reason, reason
 		_ = c.Store.CompleteExecution(ctx, action.ID, StatusBlocked, reason, reason, "")
+		metrics.HealExecutions.WithLabelValues(action.ActionType, StatusBlocked).Inc()
 		return action, errors.New(reason)
 	}
 	if reason := c.Revalidate(ctx, action); reason != "" {
@@ -285,6 +304,10 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 				action.SymptomCheck = SymptomPending
 			}
 		}
+	}
+	metrics.HealExecutions.WithLabelValues(action.ActionType, action.Status).Inc()
+	if action.DecidedAt != nil && action.Status != StatusBlocked {
+		metrics.DecisionToExecution.Observe(c.now().Sub(*action.DecidedAt).Seconds())
 	}
 	if c.Notifier != nil {
 		if err := c.Notifier.Notify(context.Background(), action); err != nil {
@@ -406,6 +429,23 @@ func (c *Controller) ObservationRemaining(ctx context.Context) (remaining time.D
 
 const ObservationPeriod = 30 * 24 * time.Hour
 
+// EvidenceFor is Evidence for one action type. known is false when the store
+// cannot split it, in which case only the overall record applies, as before.
+func (c *Controller) EvidenceFor(ctx context.Context, actionType string) (EvidenceSummary, bool) {
+	source, ok := c.Store.(interface {
+		EvidenceByAction(context.Context) (map[string]EvidenceSummary, error)
+	})
+	if !ok {
+		return EvidenceSummary{}, false
+	}
+	byAction, err := source.EvidenceByAction(ctx)
+	if err != nil {
+		// Unreadable is not "no evidence needed": the gate stays shut.
+		return EvidenceSummary{}, true
+	}
+	return byAction[actionType], true
+}
+
 // Evidence reports what the observation period has produced so far.
 func (c *Controller) Evidence(ctx context.Context) EvidenceSummary {
 	source, ok := c.Store.(interface {
@@ -496,6 +536,15 @@ func (p Policy) Allows(a *Action) error {
 	if got := p.Evidence.Precision(); got < p.MinPrecision {
 		return fmt.Errorf("decisions have been right %.0f%% of the time, below the %.0f%% required",
 			got*100, p.MinPrecision*100)
+	}
+	if p.ActionEvidenceKnown {
+		if decisive := p.ActionEvidence.Decisive(); decisive < p.MinDecisive {
+			return fmt.Errorf("only %d %s decision(s) have a confirmed or contradicted outcome, %d required: evidence about other actions does not count",
+				decisive, a.ActionType, p.MinDecisive)
+		}
+		if got := p.ActionEvidence.Precision(); got < p.MinPrecision {
+			return fmt.Errorf("%s decisions have been right %.0f%% of the time, below the %.0f%% required", a.ActionType, got*100, p.MinPrecision*100)
+		}
 	}
 	if !p.AllowedActions[a.ActionType] {
 		return fmt.Errorf("action type %q is not allowlisted", a.ActionType)

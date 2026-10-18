@@ -17,6 +17,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	"github.com/Halcyonic-01/Chronicle/internal/heal"
+	"github.com/Halcyonic-01/Chronicle/internal/metrics"
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
@@ -134,11 +135,15 @@ func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	started := time.Now()
+	defer metrics.Since(metrics.AnalyzeDuration, started)
 	res, err := h.analyzer.Analyze(r.Context(), *evt)
 	if err != nil {
+		metrics.AnalyzeTotal.WithLabelValues("error").Inc()
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
+	metrics.AnalyzeTotal.WithLabelValues(string(res.Verdict)).Inc()
 
 	var action *heal.Action
 	if h.healer != nil {
@@ -653,6 +658,29 @@ func (h *Handler) HealingCalibration(w http.ResponseWriter, r *http.Request) {
 		}
 		payload["observation_started"] = started
 		payload["observation_days_remaining"] = int(remaining.Hours()/24 + 0.999)
+		// Each action type is judged on its own record. This is the table a floor
+		// should be reviewed from, and none is until an action type is ready.
+		byAction := map[string]any{}
+		for _, t := range []string{heal.ActionRestartPod, heal.ActionRestoreReplicas, heal.ActionBumpMemory, heal.ActionRollbackDeployment} {
+			if per, known := h.execution.EvidenceFor(r.Context(), t); known {
+				byAction[t] = map[string]any{"confirmed": per.Confirmed, "contradicted": per.Contradicted, "unknown": per.Unknown,
+					"decisive": per.Decisive(), "precision": per.Precision(),
+					"ready": per.Decisive() >= h.execution.Policy.MinDecisive && per.Precision() >= h.execution.Policy.MinPrecision}
+			}
+		}
+		payload["evidence_by_action"] = byAction
+	}
+	if source, ok := h.actions.(interface {
+		Reliability(context.Context) ([]heal.ReliabilityRow, error)
+	}); ok {
+		if rows, err := source.Reliability(r.Context()); err == nil {
+			min := 20
+			if h.execution != nil && h.execution.Policy.MinDecisive > 0 {
+				min = h.execution.Policy.MinDecisive
+			}
+			payload["reliability"] = heal.BuildReliability(rows, min)
+			payload["reliability_note"] = "counted once per outage; a confidence floor is reviewed only for an action type marked ready_for_floor_review"
+		}
 	}
 	json.NewEncoder(w).Encode(payload)
 }
@@ -698,7 +726,8 @@ func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 		result = "APPROVED; waiting for the execution worker, which re-checks every safety gate first"
 	}
 	action, err := h.actions.DecideAction(r.Context(), heal.Decision{
-		ID: parts[3], Approved: parts[4] == "approve", By: who.display, Issuer: who.issuer, Subject: who.subject, Reason: input.Reason, Result: result, Now: now,
+		ID: parts[3], Approved: parts[4] == "approve", By: who.display, Issuer: who.issuer, Subject: who.subject,
+		Email: who.email, Groups: who.groups, Reason: input.Reason, Result: result, Now: now,
 	})
 	switch {
 	case errors.Is(err, heal.ErrActionNotFound):
@@ -706,6 +735,12 @@ func (h *Handler) DecideHealingAction(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, heal.ErrExpired):
 		http.Error(w, `{"error":"the decision expired before it was approved"}`, http.StatusConflict)
+		return
+	case errors.Is(err, heal.ErrAlreadyApproved):
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, heal.ErrNeedsIdentity):
+		writeJSONError(w, http.StatusForbidden, err.Error())
 		return
 	case errors.Is(err, heal.ErrNotPending):
 		// Our own message, naming the state the decision is in.

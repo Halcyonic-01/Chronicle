@@ -65,6 +65,10 @@ type Action struct {
 	DryRun       bool            `json:"dry_run"`
 	CreatedAt    time.Time       `json:"created_at"`
 	DecisionBy   string          `json:"decision_by,omitempty"`
+	// ApprovalsRequired is how many distinct people must approve (1 unless the
+	// action is one that needs two); Approvals are those who have, in order.
+	ApprovalsRequired int        `json:"approvals_required"`
+	Approvals         []Approval `json:"approvals,omitempty"`
 	// Who the identity provider says decided; empty for a shared-token decision.
 	DecisionIssuer  string     `json:"decision_issuer,omitempty"`
 	DecisionSubject string     `json:"decision_subject,omitempty"`
@@ -100,6 +104,31 @@ type Action struct {
 	SymptomCheckedAt  *time.Time `json:"symptom_checked_at,omitempty"`
 }
 
+// Approval is one person's yes, as their identity provider vouched for them.
+type Approval struct {
+	Issuer  string    `json:"issuer"`
+	Subject string    `json:"subject"`
+	Display string    `json:"display"`
+	Email   string    `json:"email,omitempty"`
+	Groups  []string  `json:"groups,omitempty"`
+	Reason  string    `json:"reason,omitempty"`
+	At      time.Time `json:"at"`
+}
+
+// Person is who an approval is by: distinct approvals are distinct people.
+func (a Approval) Person() string { return a.Issuer + "\x00" + a.Subject }
+
+// DistinctApprovers counts the people who approved, however many rows say so.
+func DistinctApprovers(approvals []Approval) int {
+	seen := map[string]bool{}
+	for _, a := range approvals {
+		if a.Subject != "" {
+			seen[a.Person()] = true
+		}
+	}
+	return len(seen)
+}
+
 // StateOf names where a decision is in its life, for display and the API.
 func StateOf(a *Action) string {
 	switch {
@@ -132,6 +161,9 @@ type Rule struct {
 	// execution is not implemented: every executable action needs approval.
 	RequireApprove bool   `json:"require_approve"`
 	ActionType     string `json:"action_type"`
+	// Approvers is how many distinct people must approve; 0 means the default for
+	// the action type (HEAL_TWO_APPROVER_ACTIONS). It can only raise that number.
+	Approvers int `json:"approvers_required,omitempty"`
 }
 
 var defaultRules = []Rule{
@@ -179,6 +211,9 @@ func precondition(actionType string, payload json.RawMessage) string {
 		from, to := gjson.GetBytes(payload, "old_replicas").Int(), gjson.GetBytes(payload, "new_replicas").Int()
 		if from <= 0 || to != 0 {
 			return fmt.Sprintf("not a scale to zero (%d to %d); restoring replicas does not apply", from, to)
+		}
+		if reason := gjson.GetBytes(payload, "maintenance").String(); reason != "" {
+			return fmt.Sprintf("the workload is marked for maintenance (%s); scaling it to zero is the work, not a fault", reason)
 		}
 	case ActionBumpMemory:
 		if gjson.GetBytes(payload, "owner").String() == "" || gjson.GetBytes(payload, "original_mem_bytes").Int() <= 0 {
@@ -243,10 +278,13 @@ type Engine struct {
 	// RollbackMinHealthy is how long a revision must have run without a recorded
 	// failure before a rollback may return to it (HEAL_ROLLBACK_MIN_HEALTHY).
 	RollbackMinHealthy time.Duration
+	// TwoApprover names the action types that need two distinct approvers.
+	TwoApprover map[string]bool
 }
 
 func NewEngine(store AuditStore) *Engine {
 	return &Engine{Store: store, Rules: RulesFromEnv(), DryRun: true, Now: time.Now, Notifier: NewSlackNotifierFromEnv(),
+		TwoApprover:        TwoApproverActionsFromEnv(),
 		ApprovalTTL:        durationEnv("HEAL_APPROVAL_TTL", DefaultApprovalTTL),
 		RollbackMinHealthy: durationEnv("HEAL_ROLLBACK_MIN_HEALTHY", DefaultRollbackMinHealthy)}
 }
@@ -292,13 +330,14 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 		now = e.Now
 	}
 	action := &Action{
-		ID:         ulid.Make().String(),
-		IncidentID: result.Symptom.ID,
-		Reasoning:  []string{},
-		Approval:   ApprovalNotRequired,
-		DryRun:     true,
-		CreatedAt:  now().UTC(),
-		Status:     StatusSkipped,
+		ID:                ulid.Make().String(),
+		IncidentID:        result.Symptom.ID,
+		Reasoning:         []string{},
+		Approval:          ApprovalNotRequired,
+		ApprovalsRequired: 1,
+		DryRun:            true,
+		CreatedAt:         now().UTC(),
+		Status:            StatusSkipped,
 	}
 	seen, err := e.Store.HasActionForIncident(ctx, result.Symptom.ID)
 	if err != nil {
@@ -434,6 +473,10 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	expires := action.CreatedAt.Add(ttl)
 	action.Status, action.Approval, action.Proposed, action.ExpiresAt = StatusWouldRun, ApprovalPending, true, &expires
 	action.Result = "WOULD HAVE RUN (approval required)"
+	action.ApprovalsRequired = approversFor(rule, action.ActionType, e.TwoApprover)
+	if action.ApprovalsRequired > 1 {
+		action.Reasoning = append(action.Reasoning, fmt.Sprintf("needs %d distinct approvers", action.ApprovalsRequired))
+	}
 	action.State = StateOf(action)
 	if err := e.Store.RecordAction(ctx, action); err != nil {
 		if errors.Is(err, ErrAlreadyRecorded) {

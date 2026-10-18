@@ -5,6 +5,11 @@ metadata:
   namespace: chronicle
   labels:
     app: chronicle
+  annotations:
+    # With stakater/reloader installed, a rotated Secret rolls the pods: values
+    # arrive as environment variables, which a running process never re-reads.
+    # Without Reloader this does nothing.
+    secret.reloader.stakater.com/reload: chronicle-config,postgres-postgresql
 spec:
   replicas: 2
   selector:
@@ -73,6 +78,8 @@ spec:
           ports:
             - name: http
               containerPort: 8181
+            - name: metrics
+              containerPort: 9102
           volumeMounts:
             - name: ui
               mountPath: /ui
@@ -193,7 +200,7 @@ spec:
             - name: OIDC_GROUPS_CLAIM
               value: groups
             - name: OIDC_MAX_TOKEN_AGE
-              value: 1h
+              value: 5m
             - name: HEAL_ALLOWED_NAMESPACES
               value: default
             - name: HEAL_ALLOWED_ACTIONS
@@ -206,6 +213,8 @@ spec:
               value: 3m
             - name: HEAL_APPROVAL_TTL
               value: 30m
+            - name: HEAL_TWO_APPROVER_ACTIONS
+              value: rollback_deployment,bump_memory
             - name: HEAL_MAX_EXECUTIONS_PER_HOUR
               value: "3"
             - name: HEAL_TARGET_COOLDOWN

@@ -9,7 +9,7 @@ What it adds to `deploy/chronicle`:
 
 | Piece | Purpose |
 |---|---|
-| `keycloak/` | Keycloak 26.6 in dev mode with the `chronicle` test realm: a public PKCE client, an approver (`ana`, group `chronicle-approvers`) and a non-approver (`vic`). Issuer `http://keycloak.localhost:8180/realms/chronicle`. |
+| `keycloak/` | Keycloak 26.6 in dev mode with the `chronicle` test realm: a public PKCE client, two approvers (`ana` and `bea`, group `chronicle-approvers`; rollbacks and memory bumps need both) and a non-approver (`vic`). A sign-in must be under 5 minutes old to approve. Issuer `http://keycloak.localhost:8180/realms/chronicle`. |
 | CoreDNS rewrite | `keycloak.localhost` resolves to the Keycloak Service inside the cluster, so the browser, the harness and Chronicle all see one issuer URL. |
 | `chronicle/` | Chronicle with OIDC on, live healing on, kill switch off, the executor's namespaced RBAC, and the test-only gate values below. |
 

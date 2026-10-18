@@ -154,3 +154,32 @@ func TestAPodWithNoControllerIsJudgedOnItsOwnConditions(t *testing.T) {
 		t.Fatalf("got %v, %v", got, err)
 	}
 }
+
+// A scale to zero somebody marked as maintenance is the work, not a fault.
+func TestARestoreIsNotProposedOrRunForAWorkloadInMaintenance(t *testing.T) {
+	payload := `{"old_replicas":3,"new_replicas":0,"maintenance":"database migration, back at 18:00"}`
+	if reason := precondition(ActionRestoreReplicas, []byte(payload)); !strings.Contains(reason, "maintenance") {
+		t.Fatalf("a restore was planned for a workload in maintenance: %q", reason)
+	}
+	if reason := precondition(ActionRestoreReplicas, []byte(`{"old_replicas":3,"new_replicas":0}`)); reason != "" {
+		t.Fatalf("an ordinary scale to zero was refused: %q", reason)
+	}
+
+	// Marked after the proposal: the live object decides at execution.
+	zero := int32(0)
+	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "default",
+		Annotations: map[string]string{"chronicle.io/maintenance": "resharding"}}, Spec: appsv1.DeploymentSpec{Replicas: &zero}}
+	e := NewKubernetesExecutor(fake.NewSimpleClientset(d))
+	a := &Action{ActionType: ActionRestoreReplicas, Namespace: "default", Target: "cache", Payload: []byte(`{"old_replicas":3,"new_replicas":0}`)}
+	_, err := e.restoreReplicas(context.Background(), a)
+	var refused *Refusal
+	if !errors.As(err, &refused) || !strings.Contains(refused.Reason, "resharding") {
+		t.Fatalf("got %v", err)
+	}
+	// "false" is the way to say it is over without deleting the annotation.
+	d.Annotations["chronicle.io/maintenance"] = "false"
+	e = NewKubernetesExecutor(fake.NewSimpleClientset(d))
+	if _, err := e.restoreReplicas(context.Background(), a); err != nil {
+		t.Fatalf("maintenance=false still blocked the restore: %v", err)
+	}
+}

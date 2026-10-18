@@ -41,6 +41,9 @@ func (i Identity) Display() string {
 var (
 	// ErrUnauthenticated: no token, or one that does not verify.
 	ErrUnauthenticated = errors.New("approver authentication required")
+	// ErrTokenTooOld: a token that verifies but was issued longer ago than
+	// OIDC_MAX_TOKEN_AGE. The approver only has to sign in again.
+	ErrTokenTooOld = errors.New("sign-in is too old; sign in again")
 	// ErrForbidden: a valid token for someone who may not approve.
 	ErrForbidden = errors.New("not permitted to approve healing actions")
 	// ErrProviderUnavailable: the identity provider cannot be reached, so
@@ -66,7 +69,7 @@ type Config struct {
 
 	// MaxTokenAge bounds how old a token may be (by iat), so a token that
 	// leaked long ago stops working even if the provider set a late expiry.
-	MaxTokenAge time.Duration // OIDC_MAX_TOKEN_AGE, default 1h
+	MaxTokenAge time.Duration // OIDC_MAX_TOKEN_AGE, default 5m
 
 	// Scopes and the endpoints are for the console's sign-in; the server only
 	// verifies tokens.
@@ -158,7 +161,7 @@ func NewOIDC(cfg Config) (*OIDC, error) {
 		cfg.GroupsClaim = "groups"
 	}
 	if cfg.MaxTokenAge <= 0 {
-		cfg.MaxTokenAge = time.Hour
+		cfg.MaxTokenAge = DefaultMaxTokenAge
 	}
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"openid", "email", "profile", "groups"}
@@ -238,8 +241,11 @@ func (o *OIDC) Authenticate(r *http.Request) (Identity, error) {
 		slog.Info("approver token rejected", "err", err)
 		return Identity{}, ErrUnauthenticated
 	}
-	if age := o.now().Sub(token.IssuedAt); age > o.cfg.MaxTokenAge || token.IssuedAt.After(o.now().Add(time.Minute)) {
-		slog.Info("approver token rejected", "reason", "outside the allowed age", "age", age)
+	if age := o.now().Sub(token.IssuedAt); age > o.cfg.MaxTokenAge {
+		slog.Info("approver token rejected", "reason", "too old", "age", age)
+		return Identity{}, ErrTokenTooOld
+	} else if token.IssuedAt.After(o.now().Add(time.Minute)) {
+		slog.Info("approver token rejected", "reason", "issued in the future", "age", age)
 		return Identity{}, ErrUnauthenticated
 	}
 	var claims map[string]any
@@ -262,6 +268,17 @@ func (o *OIDC) Authenticate(r *http.Request) (Identity, error) {
 		return id, ErrForbidden
 	}
 	return id, nil
+}
+
+// DefaultMaxTokenAge: an approval is made with a token issued in the last five
+// minutes, so a stolen or forgotten session cannot approve for long.
+const DefaultMaxTokenAge = 5 * time.Minute
+
+// Permits says whether someone with these groups and (verified) email would be
+// allowed to approve today. The execution worker uses it to re-check an approver
+// who approved some minutes ago against the current allowlist.
+func (o *OIDC) Permits(groups []string, email string) bool {
+	return o.allowed(Identity{Groups: groups, Email: email})
 }
 
 func (o *OIDC) allowed(id Identity) bool {

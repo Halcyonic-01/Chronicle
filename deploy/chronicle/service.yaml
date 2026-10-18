@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: chronicle
   namespace: chronicle
+  labels:
+    app: chronicle
 spec:
   selector:
     app: chronicle
@@ -10,4 +12,7 @@ spec:
     - name: http
       port: 8181
       targetPort: http
+    - name: metrics
+      port: 9102
+      targetPort: metrics
   type: ClusterIP

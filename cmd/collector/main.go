@@ -35,8 +35,10 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	"github.com/Halcyonic-01/Chronicle/internal/heal"
+	"github.com/Halcyonic-01/Chronicle/internal/metrics"
 	"github.com/Halcyonic-01/Chronicle/internal/rca"
 	"github.com/Halcyonic-01/Chronicle/internal/replay"
+	"github.com/Halcyonic-01/Chronicle/internal/startup"
 	"github.com/Halcyonic-01/Chronicle/internal/store"
 	chronicleweb "github.com/Halcyonic-01/Chronicle/internal/web"
 )
@@ -83,15 +85,27 @@ func main() {
 	}
 
 	// Init Postgres Pool
+	if problems := startup.Problems(os.Getenv); len(problems) > 0 {
+		for _, p := range problems {
+			slog.Error("refusing to start", "problem", p)
+		}
+		os.Exit(1)
+	}
 	pgURL := os.Getenv("POSTGRES_URL")
 	if pgURL == "" {
-		if inCluster {
-			pgURL = "postgres://postgres:postgres@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable"
-		} else {
-			pgURL = "postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable"
-		}
+		// Only a laptop reaches here (startup.Problems refused the rest).
+		pgURL = "postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable"
 	}
-	pool, err := pgxpool.New(ctx, pgURL)
+	poolConfig, err := pgxpool.ParseConfig(pgURL)
+	if err != nil {
+		slog.Error("invalid POSTGRES_URL", "err", err)
+		os.Exit(1)
+	}
+	// An unreachable database must fail a connection in seconds, not after the
+	// operating system gives up on the dial.
+	poolConfig.ConnConfig.ConnectTimeout = 5 * time.Second
+	poolConfig.HealthCheckPeriod = 30 * time.Second
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		slog.Error("failed to connect to postgres", "err", err)
 		os.Exit(1)
@@ -141,6 +155,10 @@ func main() {
 
 	// Collectors, graph sync, snapshots, and the event writer are singleton
 	// workloads. Only the pod holding the Kubernetes Lease runs them.
+	// Set once OIDC is configured, below; read by the execution worker when it
+	// becomes leader, which is after start-up has finished.
+	var approverStillPermitted func(heal.Approval) bool
+
 	runLeaderWorkloads := func(leaderCtx context.Context) {
 		if err := func() error {
 			// Created and closed with the leadership term: a demoted replica
@@ -162,6 +180,7 @@ func main() {
 			ingressLister := graphFactory.Networking().V1().Ingresses().Lister()
 
 			syncGraph := func(syncCtx context.Context) {
+				defer metrics.Since(metrics.GraphSyncDuration, time.Now())
 				var allEdges []graph.Edge
 				graphReady := false
 				podRefs, podErr := podLister.List(labels.Everything())
@@ -226,6 +245,7 @@ func main() {
 						}
 					}
 
+					metrics.GraphEdges.Set(float64(len(deduped)))
 					inMemGraph.SetEdges(deduped)
 					if err := graphStore.Sync(syncCtx, deduped); err != nil {
 						slog.Error("failed to sync graph to postgres", "err", err)
@@ -347,6 +367,7 @@ func main() {
 			leaderGroup.Go(func() error {
 				workerStore := heal.NewPostgresAuditStore(pool)
 				worker := heal.NewController(workerStore, newExecutor())
+				worker.ApproverStillPermitted = approverStillPermitted
 				// After a successful action, check the symptom really cleared. It
 				// re-reads the metric the alert fired on, and runs on the leader only.
 				worker.Symptoms = heal.NewSymptomCheckerFromEnv(workerStore, heal.NewPromProbe(promClient))
@@ -426,6 +447,8 @@ func main() {
 			os.Exit(1)
 		}
 		apiHandler.WithOIDC(verifier)
+		// Before anything runs, each approver is checked against today's allowlist.
+		approverStillPermitted = func(a heal.Approval) bool { return verifier.Permits(a.Groups, a.Email) }
 		slog.Info("approvals require an OIDC identity", "issuer", oidcConfig.Issuer)
 	}
 
@@ -444,13 +467,21 @@ func main() {
 	apiMux.HandleFunc("/api/auth/config", apiHandler.AuthConfig)
 	apiMux.HandleFunc("/api/auth/me", apiHandler.AuthMe)
 
+	g.Go(func() error { return metrics.Serve(gctx, valueOrEnv("METRICS_ADDR", ":9102")) })
+
 	mux := http.NewServeMux()
 	mux.Handle("/", chronicleweb.Handler())
-	mux.Handle("/api/", chronicleapi.RequireAPIToken(apiMux))
+	// No request outlives its budget: a stuck dependency otherwise holds the
+	// connection and its goroutine until the client gives up.
+	mux.Handle("/api/", http.TimeoutHandler(chronicleapi.RequireAPIToken(apiMux),
+		durationFromEnv("API_REQUEST_TIMEOUT", 60*time.Second), `{"error":"request timed out"}`))
+	mux.HandleFunc("/healthz", chronicleapi.Healthz)
+	mux.HandleFunc("/readyz", chronicleapi.Readyz(pool))
 	g.Go(func() error {
-		slog.Info("Chronicle API listening", "addr", ":8181")
+		apiAddr := valueOrEnv("API_ADDR", ":8181")
+		slog.Info("Chronicle API listening", "addr", apiAddr)
 		// Header and idle timeouts, so slow clients cannot hold connections open.
-		srv := &http.Server{Addr: ":8181", Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+		srv := &http.Server{Addr: apiAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 		go func() {
 			<-gctx.Done()
 			srv.Close()
@@ -493,6 +524,8 @@ func main() {
 			Callbacks: leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(leaderCtx context.Context) {
 					slog.Info("Chronicle became leader", "identity", identity)
+					metrics.Leader.Set(1)
+					defer metrics.Leader.Set(0)
 					runLeaderWorkloads(leaderCtx)
 				},
 				OnStoppedLeading: func() {
@@ -546,6 +579,17 @@ func newK8sClient() (kubernetes.Interface, error) {
 func valueOrEnv(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
+	}
+	return fallback
+}
+
+// durationFromEnv reads a duration tuning knob, falling back when unset or invalid.
+func durationFromEnv(name string, fallback time.Duration) time.Duration {
+	if raw := os.Getenv(name); raw != "" {
+		if value, err := time.ParseDuration(raw); err == nil && value > 0 {
+			return value
+		}
+		slog.Warn("ignoring invalid tuning value", "name", name, "value", raw)
 	}
 	return fallback
 }

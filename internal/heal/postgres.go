@@ -29,9 +29,13 @@ type Decision struct {
 	// vouched for them; empty when the decision came from the shared token.
 	Issuer  string
 	Subject string
-	Reason  string
-	Result  string
-	Now     time.Time
+	// Email (verified) and Groups are kept with an approval so that, before
+	// anything runs, the approver can be checked against today's allowlist.
+	Email  string
+	Groups []string
+	Reason string
+	Result string
+	Now    time.Time
 }
 
 // ErrAlreadyRecorded: a decision for this incident exists. RecordAction then
@@ -44,6 +48,12 @@ var (
 	ErrActionNotFound = errors.New("healing action not found")
 	ErrNotPending     = errors.New("healing action is not awaiting approval")
 	ErrExpired        = errors.New("healing action expired before it was approved")
+	// ErrAlreadyApproved: this person's approval is already counted. A second
+	// click is not a second person.
+	ErrAlreadyApproved = errors.New("you have already approved this action; it needs a different person")
+	// ErrNeedsIdentity: the action needs several approvers, which a shared
+	// token cannot tell apart.
+	ErrNeedsIdentity = errors.New("this action needs more than one approver and the shared approval token cannot tell them apart; sign in with the identity provider")
 )
 
 // ClaimRequest carries the limits re-checked, atomically with the claim, before
@@ -102,13 +112,13 @@ func (s *PostgresAuditStore) RecordAction(ctx context.Context, a *Action) error 
 		INSERT INTO heal_actions
 		(id, incident_id, rule, cause_type, action_type, namespace, target, confidence,
 		 reasoning, status, result, error, approval, payload, dry_run, created_at, cause_event_id,
-		 workload, proposed, expires_at, related)
+		 workload, proposed, expires_at, related, approvals_required)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $14, $15, $16, NULLIF($17, ''),
-		        $18, $19, $20, $21)
+		        $18, $19, $20, $21, $22)
 		ON CONFLICT (incident_id) DO NOTHING`,
 		a.ID, a.IncidentID, a.Rule, a.CauseType, a.ActionType, a.Namespace, a.Target,
 		a.Confidence, reasoningJSON, a.Status, a.Result, a.Error, a.Approval, payload, a.DryRun, a.CreatedAt, a.CauseEventID,
-		a.Workload, a.Proposed, a.ExpiresAt, relatedJSON)
+		a.Workload, a.Proposed, a.ExpiresAt, relatedJSON, max(a.ApprovalsRequired, 1))
 	if err != nil {
 		return err
 	}
@@ -132,18 +142,26 @@ const actionColumns = `id, incident_id, rule, cause_type, action_type, namespace
 	COALESCE(decided_by,''), COALESCE(decided_by_issuer,''), COALESCE(decided_by_subject,''), COALESCE(decision_reason,''), decided_at, started_at, finished_at, COALESCE(verification,''), attempts,
 	COALESCE(cause_event_id,''), workload, proposed, expires_at, related,
 	COALESCE(outcome,''), COALESCE(outcome_detail,''), COALESCE(outcome_labeller,''), outcome_at,
-	COALESCE(symptom_check,''), COALESCE(symptom_detail,''), symptom_improved_at, symptom_due_at, symptom_checked_at`
+	COALESCE(symptom_check,''), COALESCE(symptom_detail,''), symptom_improved_at, symptom_due_at, symptom_checked_at,
+	approvals_required,
+	COALESCE((SELECT json_agg(json_build_object('issuer', p.issuer, 'subject', p.subject, 'display', p.display, 'email', p.email,
+	                                           'groups', to_json(p.groups), 'reason', p.reason, 'at', p.approved_at) ORDER BY p.approved_at)
+	          FROM heal_action_approvals p WHERE p.action_id = heal_actions.id), '[]'::json)`
 
 func scanAction(row pgx.Row) (Action, error) {
 	var a Action
-	var reasoningJSON, relatedJSON []byte
+	var reasoningJSON, relatedJSON, approvalsJSON []byte
 	if err := row.Scan(&a.ID, &a.IncidentID, &a.Rule, &a.CauseType, &a.ActionType, &a.Namespace, &a.Target, &a.Confidence,
 		&reasoningJSON, &a.Status, &a.Result, &a.Error, &a.Approval, &a.Payload, &a.DryRun, &a.CreatedAt,
 		&a.DecisionBy, &a.DecisionIssuer, &a.DecisionSubject, &a.DecisionReason, &a.DecidedAt, &a.StartedAt, &a.FinishedAt, &a.Verification, &a.Attempts,
 		&a.CauseEventID, &a.Workload, &a.Proposed, &a.ExpiresAt, &relatedJSON,
 		&a.Outcome, &a.OutcomeDetail, &a.OutcomeLabeller, &a.OutcomeAt,
-		&a.SymptomCheck, &a.SymptomDetail, &a.SymptomImprovedAt, &a.SymptomDueAt, &a.SymptomCheckedAt); err != nil {
+		&a.SymptomCheck, &a.SymptomDetail, &a.SymptomImprovedAt, &a.SymptomDueAt, &a.SymptomCheckedAt,
+		&a.ApprovalsRequired, &approvalsJSON); err != nil {
 		return a, err
+	}
+	if err := json.Unmarshal(approvalsJSON, &a.Approvals); err != nil {
+		return a, fmt.Errorf("decode approvals: %w", err)
 	}
 	if err := json.Unmarshal(reasoningJSON, &a.Reasoning); err != nil {
 		return a, fmt.Errorf("decode healing reasoning: %w", err)
@@ -192,35 +210,101 @@ func (s *PostgresAuditStore) GetAction(ctx context.Context, id string) (*Action,
 }
 
 // DecideAction records a reviewer's answer. Only a decision the engine would
-// have run, still pending and unexpired, can be approved; approval only queues
+// have run, still pending and unexpired, can be decided; approval only queues
 // it for the worker, which re-checks everything before executing.
+//
+// One denial ends it. An approval is counted once per person; the decision
+// becomes approved only when approvals_required distinct people have approved,
+// and the row is locked while that is counted so two people approving at the
+// same moment cannot both see "one so far".
 func (s *PostgresAuditStore) DecideAction(ctx context.Context, d Decision) (*Action, error) {
-	approval, status, result := ApprovalDenied, StatusDenied, "DENIED BY REVIEWER"
-	if d.Approved {
-		approval, status, result = ApprovalApproved, StatusApproved, d.Result
-	}
-	a, err := scanAction(s.pool.QueryRow(ctx, `
-		UPDATE heal_actions
-		SET approval=$2, status=$3, result=$4, decided_by=NULLIF($5,''), decided_by_issuer=NULLIF($8,''), decided_by_subject=NULLIF($9,''), decision_reason=NULLIF($6,''), decided_at=$7
-		WHERE id=$1 AND approval='pending' AND status='would_run' AND expires_at > $7
-		RETURNING `+actionColumns, d.ID, approval, status, result, d.By, d.Reason, d.Now, d.Issuer, d.Subject))
-	if err == nil {
-		return &a, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
 		return nil, err
 	}
-	current, getErr := s.GetAction(ctx, d.ID)
-	if getErr != nil {
-		return nil, getErr
+	defer tx.Rollback(ctx)
+
+	var required int
+	var approval, status string
+	var expires *time.Time
+	err = tx.QueryRow(ctx, `SELECT approvals_required, COALESCE(approval,'not_required'), status, expires_at
+		FROM heal_actions WHERE id=$1 FOR UPDATE`, d.ID).Scan(&required, &approval, &status, &expires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrActionNotFound
 	}
-	if current.Status == StatusWouldRun && current.Approval == ApprovalPending {
-		if _, err := s.ExpireStale(ctx, d.Now); err != nil {
+	if err != nil {
+		return nil, err
+	}
+	if status != StatusWouldRun || approval != ApprovalPending {
+		current, getErr := s.GetAction(ctx, d.ID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return nil, fmt.Errorf("%w (it is %s)", ErrNotPending, current.State)
+	}
+	if expires == nil || !expires.After(d.Now) {
+		if _, err := tx.Exec(ctx, `UPDATE heal_actions SET status='expired', approval='expired', result='EXPIRED: not approved before the deadline'
+			WHERE id=$1 AND status='would_run' AND approval='pending'`, d.ID); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
 			return nil, err
 		}
 		return nil, ErrExpired
 	}
-	return nil, fmt.Errorf("%w (it is %s)", ErrNotPending, current.State)
+
+	finalApproval, finalStatus, result := ApprovalDenied, StatusDenied, "DENIED BY REVIEWER"
+	if d.Approved {
+		if required > 1 && d.Subject == "" {
+			return nil, ErrNeedsIdentity
+		}
+		have := 0
+		if d.Subject != "" {
+			tag, err := tx.Exec(ctx, `INSERT INTO heal_action_approvals (action_id, issuer, subject, display, email, groups, reason, approved_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
+				d.ID, d.Issuer, d.Subject, d.By, d.Email, nonNil(d.Groups), d.Reason, d.Now)
+			if err != nil {
+				return nil, err
+			}
+			if tag.RowsAffected() == 0 {
+				return nil, ErrAlreadyApproved
+			}
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM heal_action_approvals WHERE action_id=$1`, d.ID).Scan(&have); err != nil {
+				return nil, err
+			}
+		} else {
+			have = required // the shared token: one approver, and required is 1
+		}
+		if have < required {
+			// Counted, but not yet enough: still waiting, with a note of how far.
+			if _, err := tx.Exec(ctx, `UPDATE heal_actions SET result=$2 WHERE id=$1`, d.ID,
+				fmt.Sprintf("APPROVED BY %d OF %d REQUIRED; waiting for another approver", have, required)); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, err
+			}
+			return s.GetAction(ctx, d.ID)
+		}
+		finalApproval, finalStatus, result = ApprovalApproved, StatusApproved, d.Result
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE heal_actions
+		SET approval=$2, status=$3, result=$4, decided_by=NULLIF($5,''), decided_by_issuer=NULLIF($8,''), decided_by_subject=NULLIF($9,''), decision_reason=NULLIF($6,''), decided_at=$7
+		WHERE id=$1`, d.ID, finalApproval, finalStatus, result, d.By, d.Reason, d.Now, d.Issuer, d.Subject); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.GetAction(ctx, d.ID)
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // Prune drops decision records that are past retention. Skipped records are the

@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tidwall/gjson"
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/metrics"
 )
 
 type Writer struct {
@@ -40,12 +42,15 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event, acknowledgement
 		}
 
 		batch := uniqueEvents(buf)
+		batch = dropSeenCatchUps(batch, func(e event.Event) (bool, error) { return transitionRecorded(flushCtx, w.pool, e) })
 		stored, err := insertEvents(flushCtx, w.pool, batch)
 
 		if err != nil {
+			metrics.EventWriteErrors.Inc()
 			slog.Error("batch insert failed", "n", len(buf), "unique", len(batch), "err", err)
 			return
 		}
+		recordStored(batch, stored, time.Now())
 		if acknowledge != nil {
 			for _, e := range buf {
 				select {
@@ -90,6 +95,73 @@ func (w *Writer) Run(ctx context.Context, in <-chan event.Event, acknowledgement
 			cancel()
 			return ctx.Err()
 		}
+	}
+}
+
+// dropSeenCatchUps removes catch-up events for a change the store already holds.
+// A new leader compares what it sees with the checkpoint the last one saved, and
+// that checkpoint lags: a change reported just before a crash is reported again.
+// The same template transition (from and to) is the same change. If the store
+// cannot be asked, the event is kept: a repeat is better than a gap.
+func dropSeenCatchUps(batch []event.Event, seen func(event.Event) (bool, error)) []event.Event {
+	live := map[string]bool{}
+	for _, e := range batch {
+		if !isCatchUp(e) {
+			live[transitionKey(e)] = true
+		}
+	}
+	kept := batch[:0:0]
+	for _, e := range batch {
+		if isCatchUp(e) {
+			if live[transitionKey(e)] {
+				continue
+			}
+			if ok, err := seen(e); err == nil && ok {
+				continue
+			}
+		}
+		kept = append(kept, e)
+	}
+	return kept
+}
+
+func transitionKey(e event.Event) string {
+	return strings.Join([]string{e.Namespace, e.EntityKind, e.EntityName, e.Type,
+		gjson.GetBytes(e.Payload, "from_template_hash").String(), gjson.GetBytes(e.Payload, "to_template_hash").String()}, "|")
+}
+
+func isCatchUp(e event.Event) bool {
+	return gjson.GetBytes(e.Payload, "missed").Bool() &&
+		gjson.GetBytes(e.Payload, "from_template_hash").String() != "" &&
+		gjson.GetBytes(e.Payload, "to_template_hash").String() != ""
+}
+
+// transitionRecorded asks whether an event the collector saw happen already
+// describes the same move between the same two templates.
+func transitionRecorded(ctx context.Context, pool *pgxpool.Pool, e event.Event) (bool, error) {
+	var found bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM events
+		  WHERE namespace=$1 AND entity_kind=$2 AND entity_name=$3 AND type=$4
+		    AND occurred_at >= $5
+		    AND payload->>'from_template_hash'=$6 AND payload->>'to_template_hash'=$7
+		    AND COALESCE(payload->>'missed','false') <> 'true')`,
+		e.Namespace, e.EntityKind, e.EntityName, e.Type, e.OccurredAt.Add(-10*time.Minute),
+		gjson.GetBytes(e.Payload, "from_template_hash").String(), gjson.GetBytes(e.Payload, "to_template_hash").String()).Scan(&found)
+	return found, err
+}
+
+// recordStored counts what a write kept and how late it was: a duplicate is a
+// fact the store already had, and has no lag of its own.
+func recordStored(batch []event.Event, stored map[string]struct{}, now time.Time) {
+	for _, e := range batch {
+		if _, ok := stored[e.ID]; !ok {
+			metrics.EventsDuplicate.Inc()
+			continue
+		}
+		metrics.EventsStored.WithLabelValues(e.Source).Inc()
+		metrics.EventLag.WithLabelValues(e.Source).Observe(now.Sub(e.IngestedAt).Seconds())
 	}
 }
 

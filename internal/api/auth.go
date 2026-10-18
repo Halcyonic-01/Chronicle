@@ -20,7 +20,8 @@ func (h *Handler) WithOIDC(o *auth.OIDC) *Handler {
 
 // approver is who is deciding, and the HTTP status to refuse with when nobody is.
 type approver struct {
-	display, issuer, subject string
+	display, issuer, subject, email string
+	groups                          []string
 }
 
 func (h *Handler) authenticateApprover(r *http.Request, claimedBy string) (approver, int, string) {
@@ -31,10 +32,12 @@ func (h *Handler) authenticateApprover(r *http.Request, claimedBy string) (appro
 			return approver{}, http.StatusForbidden, "not permitted to approve healing actions"
 		case errors.Is(err, auth.ErrProviderUnavailable):
 			return approver{}, http.StatusServiceUnavailable, "identity provider unavailable; approvals are refused until it is back"
+		case errors.Is(err, auth.ErrTokenTooOld):
+			return approver{}, http.StatusUnauthorized, "your sign-in is older than " + h.oidc.Config().MaxTokenAge.String() + "; sign in again to approve"
 		case err != nil:
 			return approver{}, http.StatusUnauthorized, "approval authentication required"
 		}
-		return approver{display: id.Display(), issuer: id.Issuer, subject: id.Subject}, 0, ""
+		return approver{display: id.Display(), issuer: id.Issuer, subject: id.Subject, email: id.Email, groups: id.Groups}, 0, ""
 	}
 	if !heal.ApprovalAuthorized(r) {
 		return approver{}, http.StatusUnauthorized, "approval authentication required"
@@ -87,6 +90,8 @@ func (h *Handler) AuthMe(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"error": "not permitted to approve healing actions", "name": id.Display(), "can_approve": false})
 	case errors.Is(err, auth.ErrProviderUnavailable):
 		writeJSONError(w, http.StatusServiceUnavailable, "identity provider unavailable")
+	case errors.Is(err, auth.ErrTokenTooOld):
+		writeJSONError(w, http.StatusUnauthorized, "your sign-in is too old; sign in again")
 	case err != nil:
 		writeJSONError(w, http.StatusUnauthorized, "approval authentication required")
 	default:

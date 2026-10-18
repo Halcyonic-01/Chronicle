@@ -226,6 +226,21 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 				evType, severity = "oom_kill", "critical"
 			}
 
+			payload := map[string]any{
+				"container": cs.Name,
+				"reason":    reason,
+				"exit_code": exitCode,
+				"owner":     ownerRef(new), // stable deployment name!
+			}
+			// The limit the container was killed under. Without it a memory
+			// increase has nothing to be bounded by.
+			for _, c := range new.Spec.Containers {
+				if c.Name == cs.Name {
+					if limit := memoryLimit(c); limit > 0 {
+						payload["original_mem_bytes"] = limit
+					}
+				}
+			}
 			k.Emit(event.Event{
 				Source:     "k8s",
 				Namespace:  new.Namespace,
@@ -234,12 +249,7 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 				Type:       evType,
 				Severity:   severity,
 				Title:      fmt.Sprintf("%s restarted (%s, exit %d)", cs.Name, reason, exitCode),
-				Payload: mustJSON(map[string]any{
-					"container": cs.Name,
-					"reason":    reason,
-					"exit_code": exitCode,
-					"owner":     ownerRef(new), // stable deployment name!
-				}),
+				Payload:    mustJSON(payload),
 			})
 		}
 	}
@@ -412,9 +422,18 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "scale",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s scaled from %d to %d", new.Name, *old.Spec.Replicas, *new.Spec.Replicas),
-			Payload:    mustJSON(k.withGitOps(new, map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas, "changed_by": changedBy})),
+			Payload:    mustJSON(k.withMaintenance(new, k.withGitOps(new, map[string]any{"old_replicas": *old.Spec.Replicas, "new_replicas": *new.Spec.Replicas, "changed_by": changedBy}))),
 		})
 	}
+}
+
+// withMaintenance records that the workload was marked for maintenance when it
+// changed, so a scale to zero made on purpose is not read as an outage to undo.
+func (k *K8sCollector) withMaintenance(d *appsv1.Deployment, payload map[string]any) map[string]any {
+	if reason := graph.Maintenance(d.Annotations); reason != "" {
+		payload["maintenance"] = reason
+	}
+	return payload
 }
 
 // withGitOps notes the GitOps controller that owns a Deployment, so healing

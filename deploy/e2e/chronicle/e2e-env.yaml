@@ -22,6 +22,7 @@ spec:
         - {name: HEAL_RESTART_EXECUTION_ENABLED, value: "true"}
         - {name: HEAL_RESTART_UNREADY_FOR, value: 60s}
         - {name: HEAL_RESTART_QUIET, value: 2m}
+        - {name: API_REQUEST_TIMEOUT, value: 15s}
         - {name: HEAL_MAX_EXECUTIONS_PER_HOUR, value: "10"}
         - name: HEAL_RULES
           value: >-

@@ -79,7 +79,6 @@ func TestTokensThatDoNotVerifyAreRefused(t *testing.T) {
 		{"another audience", p.token(t, p.key, claims{"aud": "some-other-app"})},
 		{"another issuer", p.token(t, p.key, claims{"iss": "https://evil.example"})},
 		{"expired", p.token(t, p.key, claims{"iat": time.Now().Add(-2 * time.Hour).Unix(), "exp": time.Now().Add(-time.Hour).Unix()})},
-		{"issued too long ago, though not expired", p.token(t, p.key, claims{"iat": time.Now().Add(-3 * time.Hour).Unix(), "exp": time.Now().Add(time.Hour).Unix()})},
 		{"issued in the future", p.token(t, p.key, claims{"iat": time.Now().Add(time.Hour).Unix()})},
 		{"alg none", p.UnsignedToken()},
 		{"HMAC with the public key as the secret", p.HMACToken(t, []byte("0123456789abcdef0123456789abcdef"), nil)},
@@ -89,6 +88,38 @@ func TestTokensThatDoNotVerifyAreRefused(t *testing.T) {
 		if _, err := o.Authenticate(request(c.token)); !errors.Is(err, ErrUnauthenticated) {
 			t.Errorf("%s: got %v, want ErrUnauthenticated", c.name, err)
 		}
+	}
+}
+
+// An approval is made with a recent sign-in: five minutes by default. A token
+// older than that is refused with its own error, so the console can ask the
+// approver to sign in again rather than say "not authenticated".
+func TestATokenOlderThanFiveMinutesIsRefusedAsTooOld(t *testing.T) {
+	p := newIDP(t)
+	o := p.verifier(t, nil)
+	at := func(age time.Duration) string {
+		return p.token(t, p.key, claims{"iat": time.Now().Add(-age).Unix(), "exp": time.Now().Add(time.Hour).Unix()})
+	}
+	if _, err := o.Authenticate(request(at(4 * time.Minute))); err != nil {
+		t.Fatalf("a four-minute-old sign-in was refused: %v", err)
+	}
+	if _, err := o.Authenticate(request(at(6 * time.Minute))); !errors.Is(err, ErrTokenTooOld) {
+		t.Fatalf("a six-minute-old sign-in: got %v, want ErrTokenTooOld", err)
+	}
+	if DefaultMaxTokenAge != 5*time.Minute {
+		t.Fatalf("the default token age is %s", DefaultMaxTokenAge)
+	}
+}
+
+// Permits is what the worker uses to re-check an approver against today's list.
+func TestPermitsFollowsTheCurrentAllowlist(t *testing.T) {
+	p := newIDP(t)
+	o := p.verifier(t, nil)
+	if !o.Permits([]string{"sre"}, "") {
+		t.Fatal("a member of the approver group is not permitted")
+	}
+	if o.Permits([]string{"viewers"}, "") || o.Permits(nil, "") {
+		t.Fatal("someone outside the allowlist is permitted")
 	}
 }
 

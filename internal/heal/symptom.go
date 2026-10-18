@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/Halcyonic-01/Chronicle/internal/metrics"
 )
 
 // The symptom check answers a different question from the executor's Verify and
@@ -203,6 +205,9 @@ func (c *SymptomChecker) Pass(ctx context.Context, now time.Time) error {
 		action, err := c.Store.FinishSymptomCheck(ctx, t.ID, j.verdict, j.detail, now)
 		if err != nil {
 			return err
+		}
+		if action != nil {
+			metrics.SymptomChecks.WithLabelValues(j.verdict).Inc()
 		}
 		if action == nil || j.verdict != SymptomFailed {
 			continue

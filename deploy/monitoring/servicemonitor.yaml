@@ -1,0 +1,12 @@
+# Chronicle's own metrics, scraped by the Prometheus Operator (the label is the one
+# kube-prometheus-stack selects by, for a release named "monitoring").
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: chronicle
+  namespace: chronicle
+  labels: {release: monitoring}
+spec:
+  selector: {matchLabels: {app: chronicle}}
+  endpoints:
+    - {port: metrics, interval: 30s}

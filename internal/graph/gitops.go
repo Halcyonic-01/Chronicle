@@ -106,3 +106,18 @@ func ReleaseController(name string, owners []metav1.OwnerReference, labels, anno
 	}
 	return ""
 }
+
+// MaintenanceAnnotation marks a workload that someone is deliberately working on.
+// While it is set, Chronicle does not undo a scale to zero: that is the work, not
+// the fault. The value is the reason, shown to whoever wonders why nothing ran.
+// "false" or empty means not in maintenance.
+const MaintenanceAnnotation = "chronicle.io/maintenance"
+
+// Maintenance returns the reason a workload is marked for maintenance, or "".
+func Maintenance(annotations map[string]string) string {
+	v := strings.TrimSpace(annotations[MaintenanceAnnotation])
+	if strings.EqualFold(v, "false") {
+		return ""
+	}
+	return v
+}

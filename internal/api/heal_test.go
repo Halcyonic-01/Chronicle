@@ -58,6 +58,8 @@ func TestDecidingAHealingActionReportsEachFailureHonestly(t *testing.T) {
 		{"unknown action", heal.ErrActionNotFound, "test-token", http.StatusNotFound, "not found", ""},
 		{"expired", heal.ErrExpired, "test-token", http.StatusConflict, "expired", ""},
 		{"already decided", fmt.Errorf("%w (it is approved)", heal.ErrNotPending), "test-token", http.StatusConflict, "it is approved", ""},
+		{"the same person twice", heal.ErrAlreadyApproved, "test-token", http.StatusConflict, "different person", ""},
+		{"the shared token on a two-approver action", heal.ErrNeedsIdentity, "test-token", http.StatusForbidden, "identity provider", ""},
 		{"storage failure", errors.New(`pq: connection to 10.1.2.3:5432 refused (user=postgres)`), "test-token", http.StatusInternalServerError, "could not record", "10.1.2.3"},
 	}
 	for _, c := range cases {

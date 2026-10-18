@@ -378,6 +378,10 @@ func replicaFailure(d *appsv1.Deployment) string {
 	return ""
 }
 
+// baseMemoryAnnotation remembers, per container, the memory limit from before
+// Chronicle first raised it.
+const baseMemoryAnnotation = "chronicle.io/base-memory-limit-"
+
 func (e *KubernetesExecutor) bumpMemory(ctx context.Context, action *Action) (string, error) {
 	owner := gjson.GetBytes(action.Payload, "owner").String()
 	original := gjson.GetBytes(action.Payload, "original_mem_bytes").Int()
@@ -399,7 +403,17 @@ func (e *KubernetesExecutor) bumpMemory(ctx context.Context, action *Action) (st
 	if current.IsZero() {
 		return "", refuse("deployment %s has no memory limit", owner)
 	}
-	capBytes := int64(float64(original) * e.MaxMemoryMultiplier)
+	// Growth is bounded against the limit before Chronicle first raised it, which
+	// is remembered on the Deployment. The limit in the OOM event is the current
+	// one, so after a bump it already includes the bump, and a cap taken from it
+	// would move up with every OOM.
+	base, annotated := current.Value(), false
+	if raw, ok := d.Annotations[baseMemoryAnnotation+container.Name]; ok {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
+			base, annotated = v, true
+		}
+	}
+	capBytes := int64(float64(base) * e.MaxMemoryMultiplier)
 	newBytes := int64(float64(current.Value()) * 1.5)
 	if newBytes > capBytes {
 		newBytes = capBytes
@@ -411,6 +425,12 @@ func (e *KubernetesExecutor) bumpMemory(ctx context.Context, action *Action) (st
 		container.Resources.Limits = corev1.ResourceList{}
 	}
 	container.Resources.Limits[corev1.ResourceMemory] = *resource.NewQuantity(newBytes, resource.BinarySI)
+	if !annotated {
+		if d.Annotations == nil {
+			d.Annotations = map[string]string{}
+		}
+		d.Annotations[baseMemoryAnnotation+container.Name] = strconv.FormatInt(base, 10)
+	}
 	if _, err := e.Client.AppsV1().Deployments(action.Namespace).Update(ctx, d, updateOptions); err != nil {
 		return "", err
 	}
@@ -464,6 +484,10 @@ func (e *KubernetesExecutor) restoreReplicas(ctx context.Context, action *Action
 	// would overwrite a newer, deliberate decision with a stale one.
 	if err := e.refuseGitOps(d); err != nil {
 		return "", err
+	}
+	// Somebody may have marked it for maintenance since the scale happened.
+	if reason := graph.Maintenance(d.Annotations); reason != "" {
+		return "", refuse("refusing to restore: %s is marked for maintenance (%s)", action.Target, reason)
 	}
 	if d.Spec.Replicas == nil || *d.Spec.Replicas != 0 {
 		have := int32(-1)

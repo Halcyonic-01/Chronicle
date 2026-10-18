@@ -230,3 +230,57 @@ func TestTheDoubleFaultInjectsThePolicyBeforeTheScale(t *testing.T) {
 		t.Fatalf("the scale must come second so it is the only recorded change: %v", e.Inject[1].Describe())
 	}
 }
+
+// An action that needs two people: the first approval must leave it pending, the
+// same person again must be refused, and a different person completes it.
+func TestHealModeDrivesAnActionThatNeedsTwoApprovers(t *testing.T) {
+	h := healHarness(t, heal.StatusSucceeded)
+	h.api.proposal.ApprovalsRequired = 2
+	h.api.tokens["second"] = http.StatusOK
+	h.runner.Healer.SecondApprover = staticToken("second")
+	got := h.healRun(t, HealExpectation{Decide: "approve", Expect: heal.StatusSucceeded})
+	want := []string{"approve:", "approve:viewer", "approve:approver", "approve:approver", "approve:second"}
+	if len(h.api.attempts) != len(want) {
+		t.Fatalf("attempts %v, want %v", h.api.attempts, want)
+	}
+	for i := range want {
+		if h.api.attempts[i] != want[i] {
+			t.Fatalf("attempts %v, want %v", h.api.attempts, want)
+		}
+	}
+	if !got.Matches || got.ApprovalsRequired != 2 || got.FirstApprovalState != "pending_approval" || got.RepeatApprovalStatus != http.StatusConflict {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// An action that stays approvable by one person is a failure of the rule.
+func TestHealModeFlagsAnActionThatTwoApproversDidNotHold(t *testing.T) {
+	h := healHarness(t, heal.StatusSucceeded)
+	h.api.proposal.ApprovalsRequired = 2
+	h.api.tokens["second"] = http.StatusOK
+	h.runner.Healer.SecondApprover = staticToken("second")
+	h.api.approvers = map[string]bool{}                        // fine: the first approval is accepted ...
+	h.api.proposal.Approvals = []heal.Approval{{Subject: "x"}} // ... but it already held one, so one more completes it at once
+	got := h.healRun(t, HealExpectation{Decide: "approve", Expect: heal.StatusSucceeded})
+	if got.Matches || got.Problem == "" {
+		t.Fatalf("an approval that did not leave the action pending went unnoticed: %+v", got)
+	}
+}
+
+func TestHealModeWithoutASecondApproverSaysSo(t *testing.T) {
+	h := healHarness(t, heal.StatusSucceeded)
+	h.api.proposal.ApprovalsRequired = 2
+	got := h.healRun(t, HealExpectation{Decide: "approve", Expect: heal.StatusSucceeded})
+	if got.Matches || got.Problem == "" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// Every decision made in the window is on record, not just the one acted on.
+func TestHealModeRecordsEveryDecisionCreatedDuringTheExperiment(t *testing.T) {
+	h := healHarness(t, heal.StatusSucceeded)
+	got := h.healRun(t, HealExpectation{Decide: "approve", Expect: heal.StatusSucceeded})
+	if len(got.Decisions) != 1 || got.Decisions[0].ID != "act-1" || got.Decisions[0].ActionType != heal.ActionRestoreReplicas || !got.Decisions[0].Proposed {
+		t.Fatalf("decisions: %+v", got.Decisions)
+	}
+}

@@ -161,7 +161,7 @@ general changes in RCA: the lateness allowance 30s to 60s (node failures are
 declared ~50s after their last heartbeat), a rule that a pod which served
 healthily longer than the flap window is established (not "new"), and the
 episode-onset fix below. None names a fixture, nothing was tuned on this set, and
-the set was run once after each state. RCA source hash `fdfee3f5cab5cc4c`, rows in
+the set was run once after each state. RCA source hash `db56450f47522fd1`, rows in
 `internal/rca/testdata/independent_postonsetfix_run.json`.
 
 **The onset fix.** A restart on another entity used to extend an episode backwards
@@ -174,7 +174,7 @@ the real incident in `internal/rca/testdata/postgres_after_linkerd_blip.json`).
 
 Inside the documented contract (111 incidents):
 
-| Metric | First run (`e43c3425e9c4f0b9`) | Post-fix (`38cf5a83b12ecbfa`) | Post-onset-fix (`fdfee3f5cab5cc4c`) |
+| Metric | First run (`e43c3425e9c4f0b9`) | Post-fix (`38cf5a83b12ecbfa`) | Post-onset-fix (`db56450f47522fd1`) |
 |---|---|---|---|
 | Top-1, single-cause | 76/78 | 76/78 | 76/78 |
 | Top-3, single-cause | 78/78 | 78/78 | 78/78 |

@@ -507,3 +507,116 @@ func TestEveryClusterScriptPinsItsContext(t *testing.T) {
 		}
 	}
 }
+
+// Secrets reach Chronicle through External Secrets Operator. The repository
+// holds the wiring, never a value: no Secret object, and the only literal values
+// are the fake provider's, which must be unmistakably fake.
+func TestSecretsManifestsHoldNoSecretValues(t *testing.T) {
+	err := filepath.WalkDir("secrets", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".yaml") {
+			return err
+		}
+		for _, doc := range documents(t, path) {
+			var k kinded
+			if err := yaml.Unmarshal(doc, &k); err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			if k.Kind == "Secret" {
+				t.Errorf("%s: a Secret object belongs in the secret manager, not here", path)
+			}
+			if strings.Contains(path, "fake") {
+				continue
+			}
+			if regexp.MustCompile(`(?i)(password|token|api[_-]?key|secret[_-]?access)["']?\s*[:=]\s*["']?[A-Za-z0-9+/_-]{8,}`).Match(doc) {
+				t.Errorf("%s: looks like a literal credential", path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("secrets/fake/cluster-secret-store.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, url := range regexp.MustCompile(`https?://[^"'\s]+`).FindAllString(string(raw), -1) {
+		if !strings.Contains(url, ".invalid/") {
+			t.Errorf("a fake value is a real-looking URL: %s", url)
+		}
+	}
+}
+
+// Every Secret the Deployment reads is delivered by an ExternalSecret and listed
+// for Reloader, or a rotated value would arrive in a Secret nothing rolls pods for.
+func TestEverySecretChronicleReadsIsDeliveredAndWatched(t *testing.T) {
+	var deployment struct {
+		Metadata struct {
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	docs := documents(t, "chronicle/deployment.yaml")
+	if err := yaml.Unmarshal(docs[0], &deployment); err != nil {
+		t.Fatal(err)
+	}
+	watched := map[string]bool{}
+	for _, name := range strings.Split(deployment.Metadata.Annotations["secret.reloader.stakater.com/reload"], ",") {
+		watched[strings.TrimSpace(name)] = true
+	}
+	read := map[string]bool{}
+	for _, m := range regexp.MustCompile(`secretKeyRef:\s*\n\s*name:\s*(\S+)`).FindAllStringSubmatch(string(docs[0]), -1) {
+		read[m[1]] = true
+	}
+	delivered := map[string]bool{}
+	for _, doc := range documents(t, "secrets/base/external-secrets.yaml") {
+		var es struct {
+			Spec struct {
+				Target struct {
+					Name string `json:"name"`
+				} `json:"target"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal(doc, &es); err != nil {
+			t.Fatal(err)
+		}
+		delivered[es.Spec.Target.Name] = true
+	}
+	if len(read) == 0 {
+		t.Fatal("found no secretKeyRef in the Deployment")
+	}
+	for name := range read {
+		if !delivered[name] {
+			t.Errorf("the Deployment reads Secret %q but no ExternalSecret delivers it", name)
+		}
+		if !watched[name] {
+			t.Errorf("Secret %q is not in the Reloader annotation, so a rotation would not reach the pods", name)
+		}
+	}
+}
+
+// The alerts name only metrics Chronicle really exports, so a renamed metric
+// cannot leave an alert that watches nothing.
+func TestAlertsReferenceMetricsChronicleExports(t *testing.T) {
+	src, err := os.ReadFile("../internal/metrics/metrics.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported := map[string]bool{}
+	for _, m := range regexp.MustCompile(`Name:\s*"(chronicle_[a-z_]+)"`).FindAllStringSubmatch(string(src), -1) {
+		exported[m[1]] = true
+	}
+	rules, err := os.ReadFile("monitoring/prometheusrule.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	used := regexp.MustCompile(`chronicle_[a-z_]+`).FindAllString(string(rules), -1)
+	if len(used) == 0 {
+		t.Fatal("no Chronicle metric in the rules")
+	}
+	for _, name := range used {
+		base := regexp.MustCompile(`_(bucket|sum|count)$`).ReplaceAllString(name, "")
+		if !exported[name] && !exported[base] {
+			t.Errorf("an alert uses %s, which Chronicle does not export", name)
+		}
+	}
+}

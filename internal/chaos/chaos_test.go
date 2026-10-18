@@ -291,7 +291,8 @@ type fakeChronicle struct {
 	proposal  *heal.Action
 	workerEnd string
 	attempts  []string
-	tokens    map[string]int // token -> status for a decision; default 401
+	tokens    map[string]int  // token -> status for a decision; default 401
+	approvers map[string]bool // who has approved, for an action needing several
 	// The symptom check after a success: "" means none is run; otherwise it is
 	// pending for two listings and then ends as symptomEnd.
 	symptomEnd string
@@ -353,6 +354,22 @@ func (f *fakeChronicle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			f.proposal.DecisionBy, f.proposal.DecisionSubject = "ana@chronicle.test", "sub-ana"
+			if verb == "approve" && f.proposal.ApprovalsRequired > 1 {
+				if f.approvers == nil {
+					f.approvers = map[string]bool{}
+				}
+				if f.approvers[token] {
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
+				f.approvers[token] = true
+				f.proposal.Approvals = append(f.proposal.Approvals, heal.Approval{Subject: token})
+				if len(f.proposal.Approvals) < f.proposal.ApprovalsRequired {
+					f.proposal.State = "pending_approval"
+					_ = json.NewEncoder(w).Encode(f.proposal)
+					return
+				}
+			}
 			if verb == "deny" {
 				f.proposal.Status, f.proposal.State = heal.StatusDenied, heal.StatusDenied
 			} else {

@@ -1,0 +1,55 @@
+# Service-level objectives for Chronicle, as alerts. The thresholds come from what
+# was measured on kind with 3,000 to 6,000 simulated pods (internal/heal/README.md,
+# "P2"), with room above it; they are starting points to re-fit on a real cluster.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: chronicle-slo
+  namespace: chronicle
+  labels: {release: monitoring}
+spec:
+  groups:
+    - name: chronicle.slo
+      rules:
+        - alert: ChronicleEventPipelineSlow
+          # SLO: 99% of events are stored within 5 s of being emitted.
+          expr: histogram_quantile(0.99, sum by (le) (rate(chronicle_event_lag_seconds_bucket[5m]))) > 5
+          for: 10m
+          labels: {severity: warning}
+          annotations: {summary: "Chronicle takes more than 5 s to store events (p99)"}
+        - alert: ChronicleEventWritesFailing
+          expr: increase(chronicle_event_write_errors_total[10m]) > 0
+          for: 5m
+          labels: {severity: critical}
+          annotations: {summary: "Chronicle cannot write events to PostgreSQL; they queue in Kafka or memory"}
+        - alert: ChronicleAnalysisSlow
+          # SLO: 99% of analyses finish within 5 s.
+          expr: histogram_quantile(0.99, sum by (le) (rate(chronicle_analyze_duration_seconds_bucket[15m]))) > 5
+          for: 15m
+          labels: {severity: warning}
+          annotations: {summary: "Chronicle analyses take more than 5 s (p99)"}
+        - alert: ChronicleApprovedActionsWaiting
+          # SLO: an approved action has finished within 5 minutes, executed or refused.
+          expr: histogram_quantile(0.95, sum by (le) (rate(chronicle_heal_decision_to_execution_seconds_bucket[1h]))) > 300
+          for: 30m
+          labels: {severity: warning}
+          annotations: {summary: "Approved healing actions take more than 5 minutes to finish (p95)"}
+        - alert: ChronicleSymptomNotCleared
+          expr: increase(chronicle_symptom_checks_total{verdict="failed"}[1h]) > 0
+          labels: {severity: warning}
+          annotations: {summary: "A healing action succeeded but its symptom did not clear"}
+        - alert: ChronicleNoLeader
+          expr: sum(chronicle_leader) == 0
+          for: 1m
+          labels: {severity: critical}
+          annotations: {summary: "No Chronicle replica holds the leader lease; collection and healing are stopped"}
+        - alert: ChronicleTwoLeaders
+          expr: sum(chronicle_leader) > 1
+          for: 1m
+          labels: {severity: warning}
+          annotations: {summary: "More than one Chronicle replica reports leadership (lease handover, or a stuck replica)"}
+        - alert: ChronicleDown
+          expr: up{job=~".*chronicle.*"} == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations: {summary: "A Chronicle replica cannot be scraped"}

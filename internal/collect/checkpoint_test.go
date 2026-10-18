@@ -11,7 +11,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/revision"
 )
 
 func collectorWithOut() (*K8sCollector, chan event.Event) {
@@ -186,5 +189,44 @@ func TestCatchUpIsSilentForUnchangedRelatedObjects(t *testing.T) {
 	k.catchUpRelated(cp, []*corev1.Service{svc}, []*corev1.ConfigMap{cm}, []*autoscalingv2.HorizontalPodAutoscaler{h}, []*corev1.Node{n})
 	if events := drain(out); len(events) != 0 {
 		t.Fatalf("nothing changed: %+v", events)
+	}
+}
+
+// A change caught up on carries the same revision evidence as one seen live, or a
+// rollback after a leader change could not name the template it returns to.
+func TestACaughtUpChangeCarriesTheTemplatesBeforeAndAfter(t *testing.T) {
+	k, out := collectorWithOut()
+	was := deployState(1, 1, "api:1", corev1.EnvVar{Name: "REDIS_URL", Value: "redis:6379"})
+	now := deployState(1, 1, "api:2", corev1.EnvVar{Name: "REDIS_URL", Value: "typo:6379"})
+	k.catchUp(snapshotOf([]*appsv1.Deployment{was}, nil, time.Now().Add(-time.Minute)), []*appsv1.Deployment{now}, nil)
+
+	from, to := revision.TemplateHash(was.Spec.Template), revision.TemplateHash(now.Spec.Template)
+	seen := 0
+	for _, e := range drain(out) {
+		if e.Type == "deploy" || e.Type == "config_change" {
+			seen++
+			if gjson.GetBytes(e.Payload, "from_template_hash").String() != from || gjson.GetBytes(e.Payload, "to_template_hash").String() != to {
+				t.Errorf("%s lacks the templates: %s", e.Type, e.Payload)
+			}
+		}
+		if e.Type == "scale" && gjson.GetBytes(e.Payload, "from_template_hash").Exists() {
+			t.Error("a scale is not a template change")
+		}
+	}
+	if seen == 0 {
+		t.Fatal("nothing caught up")
+	}
+
+	// A checkpoint written before templates were recorded says nothing it can't know.
+	old := snapshotOf([]*appsv1.Deployment{was}, nil, time.Now().Add(-time.Minute))
+	st := old.Deployments["default/api"]
+	st.Template = ""
+	old.Deployments["default/api"] = st
+	k, out = collectorWithOut()
+	k.catchUp(old, []*appsv1.Deployment{now}, nil)
+	for _, e := range drain(out) {
+		if gjson.GetBytes(e.Payload, "to_template_hash").Exists() {
+			t.Errorf("a hash without a starting point: %s", e.Payload)
+		}
 	}
 }

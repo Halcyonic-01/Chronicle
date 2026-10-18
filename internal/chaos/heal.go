@@ -44,6 +44,13 @@ type HealOutcome struct {
 	FoundState string          `json:"found_state,omitempty"`
 
 	// Authentication and authorization, probed before the real decision.
+	// For an action that needs several approvers: the first approval must leave it
+	// pending, the same person again must be refused (409), and only a different
+	// person completes it.
+	ApprovalsRequired    int    `json:"approvals_required,omitempty"`
+	FirstApprovalState   string `json:"first_approval_state,omitempty"`
+	RepeatApprovalStatus int    `json:"repeat_approval_status,omitempty"`
+
 	NoTokenStatus     int  `json:"no_token_status,omitempty"`     // want 401
 	NonApproverStatus int  `json:"non_approver_status,omitempty"` // want 403
 	PendingAfterProbe bool `json:"pending_after_probes,omitempty"`
@@ -68,8 +75,26 @@ type HealOutcome struct {
 	SymptomCheck  string `json:"symptom_check,omitempty"`
 	SymptomDetail string `json:"symptom_detail,omitempty"`
 
+	// Decisions is every decision Chronicle recorded in the namespace since the
+	// fault, not only the one the harness acted on: the others are the evidence
+	// of what else it would have done (or declined to), and of duplicates.
+	Decisions []HealDecision `json:"decisions,omitempty"`
+
 	Matches bool   `json:"matches_expectation"`
 	Problem string `json:"problem,omitempty"`
+}
+
+// HealDecision is one recorded decision, in brief.
+type HealDecision struct {
+	ID         string  `json:"id"`
+	Rule       string  `json:"rule,omitempty"`
+	ActionType string  `json:"action_type,omitempty"`
+	Target     string  `json:"target,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Proposed   bool    `json:"proposed"`
+	State      string  `json:"state"`
+	Status     string  `json:"status"`
+	Result     string  `json:"result,omitempty"`
 }
 
 // TokenSource yields an ID token for one identity.
@@ -161,6 +186,9 @@ func (a *Chronicle) Decide(ctx context.Context, id string, approve bool, idToken
 // approve tries first, then the approver decides.
 type Healer struct {
 	Approver, NonApprover TokenSource
+	// SecondApprover is a different person from Approver, who completes an
+	// action that needs two.
+	SecondApprover TokenSource
 	// Terminal bounds the wait for the worker to finish (execution plus verify).
 	Terminal time.Duration
 	// SymptomWait bounds the wait for the symptom check after a success (zero:
@@ -171,6 +199,26 @@ type Healer struct {
 var terminalStates = map[string]bool{
 	heal.StatusSucceeded: true, heal.StatusFailed: true, heal.StatusBlocked: true,
 	heal.StatusDenied: true, heal.StatusExpired: true, heal.StatusSkipped: true,
+}
+
+// decisionsSince lists everything recorded for the namespace since t, oldest
+// first. A failure to list is not hidden by an empty list, but it cannot fail
+// the experiment either: the main decision was already tracked on its own.
+func (r *Runner) decisionsSince(ctx context.Context, t time.Time) []HealDecision {
+	actions, err := r.Chronicle.Actions(ctx)
+	if err != nil {
+		return []HealDecision{{ID: "unavailable", Result: "could not list decisions: " + err.Error()}}
+	}
+	var out []HealDecision
+	for i := len(actions) - 1; i >= 0; i-- {
+		a := actions[i]
+		if a.Namespace != r.Cluster.Namespace || a.CreatedAt.Before(t) {
+			continue
+		}
+		out = append(out, HealDecision{ID: a.ID, Rule: a.Rule, ActionType: a.ActionType, Target: a.Target, Confidence: a.Confidence,
+			Proposed: a.Proposed, State: a.State, Status: a.Status, Result: a.Result})
+	}
+	return out
 }
 
 func (r *Runner) findProposal(ctx context.Context, out *Outcome) (*heal.Action, error) {
@@ -196,6 +244,7 @@ func (r *Runner) findProposal(ctx context.Context, out *Outcome) (*heal.Action, 
 func (r *Runner) heal(ctx context.Context, out *Outcome, want HealExpectation) *HealOutcome {
 	h := &HealOutcome{Expected: want}
 	defer func() {
+		h.Decisions = r.decisionsSince(ctx, out.InjectedAt)
 		h.Matches = h.Problem == "" && h.Final == want.Expect &&
 			(want.Reason == "" || strings.Contains(h.Result+" "+h.Error, want.Reason)) &&
 			(want.Symptom == "" || h.SymptomCheck == want.Symptom)
@@ -240,6 +289,32 @@ func (r *Runner) heal(ctx context.Context, out *Outcome, want HealExpectation) *
 	if err != nil {
 		h.Final, h.Problem = "error", "approver token: "+err.Error()
 		return h
+	}
+	if action.ApprovalsRequired > 1 && want.Decide == "approve" {
+		h.ApprovalsRequired = action.ApprovalsRequired
+		if r.Healer.SecondApprover == nil {
+			h.Final, h.Problem = "error", "the action needs several approvers and the harness has only one"
+			return h
+		}
+		first, firstAction, _ := r.Chronicle.Decide(ctx, action.ID, true, tok)
+		if firstAction != nil {
+			h.FirstApprovalState = firstAction.State
+		}
+		if first != http.StatusOK || firstAction == nil || firstAction.State != "pending_approval" || len(firstAction.Approvals) != 1 {
+			h.Final, h.Problem = "error", fmt.Sprintf("the first of %d approvals: HTTP %d, state %q (want 200, pending_approval)", action.ApprovalsRequired, first, h.FirstApprovalState)
+			return h
+		}
+		h.RepeatApprovalStatus, _, _ = r.Chronicle.Decide(ctx, action.ID, true, tok)
+		if h.RepeatApprovalStatus != http.StatusConflict {
+			h.Final, h.Problem = "error", fmt.Sprintf("the same person approving twice got HTTP %d, want 409", h.RepeatApprovalStatus)
+			return h
+		}
+		second, err := r.Healer.SecondApprover.Token(ctx)
+		if err != nil {
+			h.Final, h.Problem = "error", "second approver token: "+err.Error()
+			return h
+		}
+		tok = second
 	}
 	decided := r.now()
 	status, recorded, err := r.Chronicle.Decide(ctx, action.ID, want.Decide == "approve", tok)
