@@ -191,6 +191,9 @@ func healReport(results []Record) string {
 		}
 		fmt.Fprintf(&sb, "  %-32s %-19s %-9s %-10s %-10s %-6s %-7s %s  %s\n", fmt.Sprintf("%s#%d", rec.Experiment, rec.Trial),
 			orDash(h.ActionType), h.Expected.Decide, h.Final, h.Expected.Expect, auth, healed, orDash(h.DecidedBy), mark)
+		if h.SymptomCheck != "" {
+			fmt.Fprintf(&sb, "      symptom check: %s (expected %s) %s\n", h.SymptomCheck, orDash(h.Expected.Symptom), trim(h.SymptomDetail, 120))
+		}
 		for _, detail := range []string{h.Result, h.Error, h.Verification, h.Problem} {
 			if detail != "" {
 				fmt.Fprintf(&sb, "      %s\n", trim(detail, 160))

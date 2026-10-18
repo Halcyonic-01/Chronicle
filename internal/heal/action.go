@@ -6,6 +6,7 @@ package heal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -90,6 +91,13 @@ type Action struct {
 	OutcomeDetail   string     `json:"outcome_detail,omitempty"`
 	OutcomeLabeller string     `json:"outcome_labeller,omitempty"`
 	OutcomeAt       *time.Time `json:"outcome_at,omitempty"`
+	// Whether the symptom went away after Chronicle acted (see SymptomChecker):
+	// pending, succeeded, failed or unknown. Never fed to the evidence gate.
+	SymptomCheck      string     `json:"symptom_check,omitempty"`
+	SymptomDetail     string     `json:"symptom_detail,omitempty"`
+	SymptomImprovedAt *time.Time `json:"symptom_improved_at,omitempty"`
+	SymptomDueAt      *time.Time `json:"symptom_due_at,omitempty"`
+	SymptomCheckedAt  *time.Time `json:"symptom_checked_at,omitempty"`
 }
 
 // StateOf names where a decision is in its life, for display and the API.
@@ -130,6 +138,12 @@ var defaultRules = []Rule{
 	{Name: "restart-deadlocked-pod", CauseType: "became_unready", ActionType: ActionRestartPod, MinConfidence: 0.80, MaxPerHour: 3, RequireApprove: true},
 	{Name: "bump-memory-on-oom", CauseType: "oom_kill", ActionType: ActionBumpMemory, MinConfidence: 0.85, MaxPerHour: 2, RequireApprove: true},
 	{Name: "rollback-bad-deploy", CauseType: "deploy", ActionType: ActionRollbackDeployment, MinConfidence: 0.90, MaxPerHour: 1, RequireApprove: true},
+	// A bad environment variable or command takes an app down as surely as a bad
+	// image. The same exact-revision rollback applies: it returns to the template
+	// from before the change, and only while that change is still the running one.
+	// A ConfigMap or Secret's contents are never touched: Chronicle does not read
+	// or store them, and a revert there would be a guess.
+	{Name: "revert-bad-config", CauseType: "config_change", ActionType: ActionRollbackDeployment, MinConfidence: 0.90, MaxPerHour: 1, RequireApprove: true},
 	// A scale to zero is the outage RCA identifies most often here, and nothing
 	// could act on it. The executor restores only from zero: a smaller non-zero
 	// count is capacity management, not a fault.
@@ -171,8 +185,18 @@ func precondition(actionType string, payload json.RawMessage) string {
 			return "the OOM evidence lacks the owner and original memory limit; a bump could not be bounded"
 		}
 	case ActionRollbackDeployment:
+		// Identity by the whole pod template, when the change recorded it; the
+		// image alone only for changes recorded before that existed.
+		to := gjson.GetBytes(payload, "to_template_hash").String()
+		target := gjson.GetBytes(payload, "target_template_hash").String()
+		if target == "" {
+			target = gjson.GetBytes(payload, "from_template_hash").String()
+		}
+		if to != "" && target != "" {
+			break
+		}
 		if gjson.GetBytes(payload, "old_image").String() == "" || gjson.GetBytes(payload, "new_image").String() == "" {
-			return "the deploy evidence lacks the previous and new image; there is no verified revision to return to"
+			return "the change evidence lacks the revisions before and after it; there is no verified revision to return to"
 		}
 	}
 	return ""
@@ -183,8 +207,11 @@ func precondition(actionType string, payload json.RawMessage) string {
 // the next reconcile, or would hide drift from it.
 func gitopsProposal(manager string) string {
 	kind, name, _ := strings.Cut(manager, ":")
-	if kind == "argocd" {
+	switch kind {
+	case "argocd":
 		return fmt.Sprintf("managed by Argo CD application %q: Chronicle will not change it; revert the change in Git, or run `argocd app rollback %s` with auto-sync paused", name, name)
+	case "argo-rollouts", "flagger":
+		return fmt.Sprintf("managed by %s %q: the rollout controller owns release progression and rollback, and Chronicle will not compete with it; abort or roll back through it", kind, name)
 	}
 	return fmt.Sprintf("managed by %s: Chronicle will not change it; revert the change in Git", manager)
 }
@@ -213,11 +240,15 @@ type Engine struct {
 	Now         func() time.Time
 	Notifier    Notifier
 	ApprovalTTL time.Duration
+	// RollbackMinHealthy is how long a revision must have run without a recorded
+	// failure before a rollback may return to it (HEAL_ROLLBACK_MIN_HEALTHY).
+	RollbackMinHealthy time.Duration
 }
 
 func NewEngine(store AuditStore) *Engine {
 	return &Engine{Store: store, Rules: RulesFromEnv(), DryRun: true, Now: time.Now, Notifier: NewSlackNotifierFromEnv(),
-		ApprovalTTL: durationEnv("HEAL_APPROVAL_TTL", DefaultApprovalTTL)}
+		ApprovalTTL:        durationEnv("HEAL_APPROVAL_TTL", DefaultApprovalTTL),
+		RollbackMinHealthy: durationEnv("HEAL_ROLLBACK_MIN_HEALTHY", DefaultRollbackMinHealthy)}
 }
 
 // RulesFromEnv returns the rules to enforce. HEAL_RULES, when set, is a JSON
@@ -274,20 +305,29 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 		return nil, fmt.Errorf("check incident idempotency: %w", err)
 	}
 	if seen {
+		// Re-analysis shows the decision already made, with its current state,
+		// not an empty answer that looks like nothing was decided.
+		if index, ok := e.Store.(incidentIndex); ok {
+			existing, err := index.ActionForIncident(ctx, result.Symptom.ID)
+			if err != nil {
+				return nil, fmt.Errorf("read the existing decision: %w", err)
+			}
+			return existing, nil
+		}
 		return nil, nil
 	}
 	if len(result.Candidates) == 0 {
 		action.Result = "no actionable RCA candidate"
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
 	}
 	// Acting on one of several causes the record cannot tell apart is a guess.
 	switch result.Verdict {
 	case rca.VerdictAmbiguous:
 		action.Result = fmt.Sprintf("ambiguous: %d causes are about equally plausible", 1+len(result.Alternatives))
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
 	case rca.VerdictNoRootCause:
 		action.Result = "no root cause observed"
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
 	}
 	// The root cause leads. A rule fires on a root, never on one of its effects:
 	// a node failure restarts no pod, and an autoscaler limit is not undone by
@@ -295,7 +335,7 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	top := result.Candidates[0]
 	if top.NotRoot != "" {
 		action.Result = "the leading candidate is not a cause: " + top.NotRoot
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
 	}
 	var rule *Rule
 	for i := range e.Rules {
@@ -306,7 +346,14 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	}
 	if rule == nil {
 		action.Result = fmt.Sprintf("no rule for cause type %q", top.Event.Type)
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
+	}
+	// A rollback returns a Deployment to a pod template. A ConfigMap's or
+	// Secret's contents are never reverted: Chronicle neither reads nor stores
+	// them, so there is nothing exact to restore and any revert would be a guess.
+	if rule.ActionType == ActionRollbackDeployment && top.Event.EntityKind != "Deployment" && top.Event.EntityKind != "Application" {
+		action.Result = fmt.Sprintf("a %s's contents are never reverted: Chronicle does not store them, so there is nothing exact to restore", top.Event.EntityKind)
+		return e.record(ctx, action)
 	}
 	action.Rule, action.CauseType = rule.Name, rule.CauseType
 	action.CauseEventID = top.Event.ID
@@ -316,22 +363,48 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	action.Workload = workloadOf(rule.ActionType, top.Event.EntityName, top.Event.Payload)
 	action.Related = relatedEntities(result)
 	action.Confidence, action.Reasoning = result.Confidence, append([]string(nil), top.Reasons...)
+	// A pod that stays unready without being restarted has no liveness probe to
+	// do it. Say so: the durable fix is the probe, not Chronicle.
+	if rule.ActionType == ActionRestartPod && gjson.GetBytes(top.Event.Payload, "has_liveness_probe").Type == gjson.False {
+		action.Reasoning = append(action.Reasoning, "recommendation: add a livenessProbe to this container so Kubernetes restarts it itself; a restart from Chronicle is a stopgap")
+	}
 	// Approval is requested only below, once every check has passed: a blocked
 	// or refused decision is never approvable.
 	if top.Event.EntityKind == "Application" && rule.ActionType == ActionRollbackDeployment {
 		action.Result = gitopsProposal("argocd:" + top.Event.EntityName)
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
 	}
 	// Never plan what the executor would refuse.
 	if reason := precondition(rule.ActionType, top.Event.Payload); reason != "" {
 		action.Result = reason
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
+	}
+	// A rollback that names revisions needs a target that is known to have run
+	// healthily, or it is not proposed.
+	if rule.ActionType == ActionRollbackDeployment && gjson.GetBytes(top.Event.Payload, "to_template_hash").String() != "" &&
+		result.Confidence >= rule.MinConfidence {
+		why, err := e.chooseRevision(ctx, action, action.Workload, gjson.GetBytes(top.Event.Payload, "to_template_hash").String())
+		if err != nil {
+			return nil, fmt.Errorf("choose a rollback target: %w", err)
+		}
+		if why != "" {
+			action.Status = StatusBlocked
+			action.Result = why
+			return e.record(ctx, action)
+		}
 	}
 	if result.Confidence < rule.MinConfidence {
 		action.Status = StatusBlocked
 		got, floor := formatBelow(result.Confidence, rule.MinConfidence)
 		action.Result = fmt.Sprintf("confidence %s is below %s", got, floor)
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
+	}
+	// The analysis itself calls a result below its own line "inconclusive". A
+	// rule floor set under that line must not turn such a guess into a proposal.
+	if result.Verdict == rca.VerdictInconclusive {
+		action.Status = StatusBlocked
+		action.Result = fmt.Sprintf("the analysis is inconclusive (confidence %.2f); a rule floor does not override that", result.Confidence)
+		return e.record(ctx, action)
 	}
 	// One proposal per outage: every symptom of one failure names the same
 	// cause, and each used to queue its own approval and spend the rule limit.
@@ -342,7 +415,7 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 		}
 		if found {
 			action.Result = fmt.Sprintf("same outage as decision %s (%s); one proposal per cause", id, state)
-			return action, e.Store.RecordAction(ctx, action)
+			return e.record(ctx, action)
 		}
 	}
 	count, err := e.Store.CountRuleSince(ctx, rule.Name, now().Add(-time.Hour))
@@ -352,7 +425,7 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	if count >= rule.MaxPerHour {
 		action.Status = StatusBlocked
 		action.Result = fmt.Sprintf("rule limit reached (%d per hour)", rule.MaxPerHour)
-		return action, e.Store.RecordAction(ctx, action)
+		return e.record(ctx, action)
 	}
 	ttl := e.ApprovalTTL
 	if ttl <= 0 {
@@ -363,6 +436,11 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	action.Result = "WOULD HAVE RUN (approval required)"
 	action.State = StateOf(action)
 	if err := e.Store.RecordAction(ctx, action); err != nil {
+		if errors.Is(err, ErrAlreadyRecorded) {
+			// Another analysis of this incident won the insert; its decision was
+			// already notified, and *action now holds it.
+			return action, nil
+		}
 		return action, err
 	}
 	// An approval queue nobody is told about is not a queue. Notification is
@@ -373,6 +451,24 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 		}
 	}
 	return action, nil
+}
+
+// record stores a decision. When one already exists for the incident (a second
+// analysis racing the first), the existing decision is returned, never an
+// unwritten one.
+func (e *Engine) record(ctx context.Context, a *Action) (*Action, error) {
+	if err := e.Store.RecordAction(ctx, a); err != nil {
+		if errors.Is(err, ErrAlreadyRecorded) {
+			return a, nil
+		}
+		return a, err
+	}
+	return a, nil
+}
+
+// incidentIndex is implemented by stores that can return the decision for an incident.
+type incidentIndex interface {
+	ActionForIncident(ctx context.Context, incidentID string) (*Action, error)
 }
 
 // maxRelated bounds the entities kept per decision.

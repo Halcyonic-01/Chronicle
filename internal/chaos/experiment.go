@@ -77,12 +77,18 @@ func HealSuite() []Experiment {
 		e.Heal.Reason = reason
 		return e
 	}
+	symptom := func(e Experiment, verdict string) Experiment {
+		e.Heal.Symptom = verdict
+		return e
+	}
 	// Steps on one workload are spaced past the 10-minute cooldown. (A repeat
 	// outage of the same kind minutes later comes out inconclusive, so the
 	// cooldown is not tested by a deliberate repeat; see internal/heal/README.md.)
 	return []Experiment{
-		with(byName["redis-scaled-to-zero"], "approve", heal.StatusSucceeded, "restore_replicas brings redis back"),
-		with(byName["api-bad-release"], "approve", heal.StatusSucceeded, "rollback_deployment restores the previous pod template"),
+		symptom(with(byName["redis-scaled-to-zero"], "approve", heal.StatusSucceeded, "restore_replicas brings redis back"), heal.SymptomSucceeded),
+		symptom(with(byName["api-bad-release"], "approve", heal.StatusSucceeded, "rollback_deployment restores the previous pod template"), heal.SymptomSucceeded),
+		// Well apart from the redis restore above: both would otherwise share a cooldown.
+		symptom(with(RestoreDoesNotClearSymptom(), "approve", heal.StatusSucceeded, "the restore works; the unrecorded policy keeps the alert firing"), heal.SymptomFailed),
 		because(with(RedisDeadlockedStrictBudget(), "approve", heal.StatusFailed, "the disruption budget refuses to evict the unready pod"), "PodDisruptionBudget"),
 		because(with(WorkerRestoreBlockedByQuota(), "approve", heal.StatusFailed, "the restore is applied but no pod can be created; verification fails"), "rollout"),
 		with(byName["postgres-scaled-to-zero"], "deny", heal.StatusDenied, "a denied proposal never runs; the harness restores"),
@@ -90,9 +96,23 @@ func HealSuite() []Experiment {
 		// started the outage, and the executor refuses to act on evidence about
 		// an image that is no longer running. Spaced past the api cooldown.
 		because(with(byName["api-two-bad-releases"], "approve", heal.StatusFailed, "the decision is about release a; release b now runs, so the executor refuses"), "refusing to roll back"),
-		with(byName["api-bad-config"], "approve", "none", "no rule acts on a config change, so nothing is proposed"),
+		symptom(with(apiBadConfigAfterAGoodRelease(byName["api-bad-config"]), "approve", heal.StatusSucceeded, "revert-bad-config returns the api to the exact pod template before the typo"), heal.SymptomSucceeded),
 		with(byName["redis-deadlocked"], "approve", heal.StatusSucceeded, "restart_pod evicts the unready pod; its replacement is ready"),
 	}
+}
+
+// apiBadConfigAfterAGoodRelease gives the rollback a known-good target: an
+// ordinary release that runs through the steady-state wait first. Without it the
+// api's current revision carries failures from earlier steps (an upstream outage
+// is a recorded failure of whatever was running), and the rollback is, rightly,
+// refused for lack of a revision that is known to have run healthily.
+func apiBadConfigAfterAGoodRelease(e Experiment) Experiment {
+	// The wait outlasts the longest alert lookback (15 minutes), so the two
+	// changes are not weighed against each other: that would be an ambiguity of
+	// the RCA, not what is under test.
+	e.Setup = append([]Action{SetEnv("api", "RELEASE_MARK", "good"), Wait(16 * time.Minute)}, e.Setup...)
+	e.Hypothesis += " after an ordinary release that has run healthily"
+	return e
 }
 
 // WorkerRestoreBlockedByQuota is a scale to zero Chronicle diagnoses correctly
@@ -127,6 +147,20 @@ func redisDeadlocked() Experiment {
 		// ALL also holds back CLIENT UNPAUSE, so the restore replaces the pod.
 		Inject:  []Action{Exec("redis", "redis", "redis-cli", "CLIENT", "PAUSE", "900000", "ALL")},
 		Restore: []Action{DeletePodsOf("redis")},
+	}
+}
+
+// RestoreDoesNotClearSymptom is a scale to zero that Chronicle diagnoses and
+// restores correctly, while a second fault it cannot see (a NetworkPolicy, which
+// it does not watch) keeps the symptom alive. The restore succeeds; the symptom
+// check must report that the alert did not clear.
+func RestoreDoesNotClearSymptom() Experiment {
+	return Experiment{
+		Name: "restore-does-not-clear-symptom", Category: ObservableChange,
+		Hypothesis: "redis scaled to zero is named; the restore works but an unrecorded policy keeps the symptom",
+		Truth:      fixed(Root{"scale", "redis"}),
+		// The policy first, so the scale is the only recorded change.
+		Inject: []Action{DenyIngress("redis"), Scale("redis", 0)},
 	}
 }
 

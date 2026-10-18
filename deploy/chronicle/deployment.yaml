@@ -210,6 +210,14 @@ spec:
               value: "3"
             - name: HEAL_TARGET_COOLDOWN
               value: 30m
+            - name: HEAL_ROLLBACK_MIN_HEALTHY
+              value: 30m
+            - name: HEAL_RESTART_EXECUTION_ENABLED
+              value: "false"
+            - name: HEAL_RESTART_UNREADY_FOR
+              value: 5m
+            - name: HEAL_RESTART_QUIET
+              value: 10m
             - name: HEAL_OBSERVATION_STARTED_AT
               value: ""
             - name: SLACK_WEBHOOK_URL
@@ -217,6 +225,21 @@ spec:
                 secretKeyRef:
                   name: chronicle-config
                   key: SLACK_WEBHOOK_URL
+                  optional: true
+            # After a successful action: the alert must start clearing within
+            # SYMPTOM_IMPROVE_WITHIN and stay clear for SYMPTOM_HOLD. A failure
+            # notifies Slack; only a critical symptom in "production" pages.
+            - name: SYMPTOM_IMPROVE_WITHIN
+              value: 2m
+            - name: SYMPTOM_HOLD
+              value: 5m
+            - name: CHRONICLE_ENVIRONMENT
+              value: ""
+            - name: PAGER_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: PAGER_WEBHOOK_URL
                   optional: true
             # Unset means the API is open to anything that can reach this
             # ClusterIP Service. Set it whenever Chronicle is exposed further.

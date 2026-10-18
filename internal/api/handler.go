@@ -588,6 +588,8 @@ func (h *Handler) HealingRules(w http.ResponseWriter, r *http.Request) {
 			"min_confidence":  rule.MinConfidence,
 			"max_per_hour":    rule.MaxPerHour,
 			"require_approve": true,
+			// A restart is proposed and approved but not run until enabled.
+			"proposal_only": rule.ActionType == heal.ActionRestartPod && (h.execution == nil || !h.execution.Policy.RestartExecutionEnabled),
 		})
 	}
 	payload := map[string]any{"rules": rules, "dry_run": h.healer.DryRun,

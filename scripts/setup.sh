@@ -9,9 +9,14 @@ if ! kind get clusters | grep -q "^chronicle$"; then
     kind create cluster --config deploy/kind/kind-config.yaml
 else
     echo "Cluster 'chronicle' already exists."
+    # Its kubeconfig entry can be missing (another kubeconfig replaced it).
+    kind export kubeconfig --name chronicle
 fi
 
-# Ensure context is set
+# Everything below (helm, linkerd, plain kubectl) uses the current context, and
+# an existing cluster skips the `kind create` that would have switched to it.
+kubectl config use-context kind-chronicle
+[ "$(kubectl config current-context)" = "kind-chronicle" ] || { echo "refusing: current context is not kind-chronicle" >&2; exit 1; }
 kubectl cluster-info --context kind-chronicle
 
 # Dedicate the second worker to chaos targets before anything is scheduled: a

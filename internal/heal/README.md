@@ -19,6 +19,8 @@ RCA result ──► engine ──► skipped / blocked              (terminal, 
                                      │
                                      ▼ atomic claim (limits + cooldown + one per outage)
                                  executing ──► succeeded | failed
+                                     │         └──► symptom check: pending ► succeeded | failed | unknown
+                                     ├──► blocked  (the executor refused: the cluster moved on; nothing changed)
                                      └──► failed "interrupted" if the worker died (never retried)
 ```
 
@@ -59,10 +61,33 @@ RCA result ──► engine ──► skipped / blocked              (terminal, 
 
    Any GitOps-managed workload is refused, and Chronicle proposes a Git
    revert instead.
-5. **Kubernetes RBAC.** The default deployment can write only its own Lease
+
+   A refusal (`Refusal` in `executor.go`) is recorded as `blocked`, not
+   `failed`: nothing was changed, so the claim is undone and the attempt does
+   not count toward the hourly caps or start a cooldown. A change that was
+   applied and did not take is `failed`.
+5. **Symptom check (after success).** Verifying the workload is not verifying
+   the alert. After an action succeeds, the symptom that started the incident is
+   measured again with the collector's own alert expression and threshold
+   (`collect.AlertRules`): it must start clearing within
+   `SYMPTOM_IMPROVE_WITHIN` (2 min) and then stay clear for `SYMPTOM_HOLD`
+   (5 min). The verdict is three-valued:
+   - **succeeded**: recovered and held;
+   - **failed**: no improvement in time, or the alert came back during the hold;
+   - **unknown**: no data (no series, 0/0 from no traffic, Prometheus
+     unreachable) or a symptom that is not a metric alert. "No data" is never
+     recovery.
+
+   It is stored on the decision (`symptom_check`, `symptom_detail`) and survives
+   a leader change. It never touches `outcome` or the evidence counts
+   (finding 20 stands: Chronicle's own actions are not evidence). A failure
+   notifies Slack once; only a **critical** symptom with
+   `CHRONICLE_ENVIRONMENT=production` and a `PAGER_WEBHOOK_URL` pages. Nothing
+   is reverted automatically.
+6. **Kubernetes RBAC.** The default deployment can write only its own Lease
    and checkpoint ConfigMap. Live write access comes from
    `deploy/heal-executor`, one namespaced Role per allowlisted namespace.
-6. **Kyverno (optional, Audit).** `deploy/kyverno/chronicle-heal-guardrails.yaml`
+7. **Kyverno (optional, Audit).** `deploy/kyverno/chronicle-heal-guardrails.yaml`
    repeats the refusals above at admission time, as a backstop.
 
 ## Tool decisions
@@ -137,6 +162,11 @@ own checks.
 | `HEAL_APPROVAL_TTL` | `30m` | Deadline for approval *and* execution |
 | `HEAL_MAX_EXECUTIONS_PER_HOUR` | `3` | Global cap across rules (0 = none) |
 | `HEAL_TARGET_COOLDOWN` | `30m` | Least time between two actions on one workload |
+| `HEAL_ROLLBACK_MIN_HEALTHY` | `30m` | A revision must have run this long without a recorded failure before a rollback returns to it; otherwise an older verified revision is named, or none |
+| `HEAL_RESTART_EXECUTION_ENABLED` | `false` | `restart_pod` is proposed and approved but never executed until this is `true` |
+| `HEAL_RESTART_UNREADY_FOR` / `HEAL_RESTART_QUIET` | `5m` / `10m` | A pod is restarted only after this long unready, and not within the quiet period of a restart of its container |
+| `SYMPTOM_IMPROVE_WITHIN` / `SYMPTOM_HOLD` | `2m` / `5m` | After a successful action: the alert must start clearing within the first, then stay clear for the second |
+| `CHRONICLE_ENVIRONMENT`, `PAGER_WEBHOOK_URL` | unset | A failed check pages only when the symptom is critical, the environment is `production` and the webhook is set |
 | `HEAL_ACTION_TIMEOUT` / `HEAL_VERIFY_TIMEOUT` | `30s` / `3m` | Separate budgets for the write and its verification |
 | `HEAL_OBSERVATION_STARTED_AT` | first decision, stored once | Overrides the stored start |
 | `HEAL_MIN_DECISIVE_DECISIONS` / `HEAL_MIN_PRECISION` | `20` / `0.80` | Evidence gate |
@@ -274,7 +304,7 @@ tested).
 | 3 | One outage, many decisions | **Fixed** | `TestOneProposalPerOutage`, `TestPostgresProposalsAreCountedPerOutage` |
 | 4 | No execution-time limits | **Fixed** | `TestPostgresClaimEnforcesLimitsAtomically`, `TestAClaimRefusalBlocksWithoutExecuting` |
 | 5 | Restart is a raw delete | **Fixed** | Eviction API with a UID precondition, so PodDisruptionBudgets apply; recovery means the owner's replicas are all ready again: `TestRestartEvictsAndNeverDeletes`, `TestADisruptionBudgetRefusalIsReportedAndRetryable`, `TestVerificationRequiresTheWorkloadToRecover`, `TestRealClusterEvictionHonoursTheDisruptionBudget` (real API server) |
-| 6 | Execution inside HTTP | **Fixed** | Worker plus separate verify budget: `TestTheWorkerExecutesNothingWhileLiveIsOff`. Still deferred: post-action symptom check and auto-revert. |
+| 6 | Execution inside HTTP | **Fixed** | Worker plus separate verify budget: `TestTheWorkerExecutesNothingWhileLiveIsOff`. Post-action symptom check added (see above): `TestWorkerChecksTheSymptomAfterASuccessfulAction`, `TestWorkerRecordsAFailedSymptomCheckWithoutTouchingTheOutcome`, `TestASymptomCheckSurvivesALeaderChange`. Auto-revert stays deliberately absent. |
 | 7 | Image-only rollback | **Fixed** | `TestRollbackRestoresThePreviousPodTemplate` plus GitOps refusal |
 | 8 | Memory bump unworkable | **Partial** | No longer planned without evidence, and the container is chosen by name. Still deferred: the collector recording the original limit, and a cumulative cap. |
 | 9 | Restore ignores intent | **Partial** | GitOps-managed workloads are refused. Still deferred: using `changed_by` to recognise deliberate scale-to-zero. |
@@ -283,17 +313,17 @@ tested).
 | 12 | "Queued" was not a queue | **Fixed** | Worker plus truthful API and console states |
 | 13 | Observation start drifts | **Fixed** | `TestPostgresObservationStartSurvivesPruning` |
 | 14 | Evidence gate is global | Deferred | Needs labelled data per action type |
-| 15 | Floor below the inconclusive line | Deferred | Latent with the defaults |
+| 15 | Floor below the inconclusive line | **Fixed** | An `inconclusive` verdict is never proposed, whatever the floor: `TestAnInconclusiveVerdictIsNeverProposedEvenUnderALowFloor` |
 | 16 | Namespace-wide recovery | **Fixed** | `TestRecoveryElsewhereInTheNamespaceDoesNotConfirm`, `TestPostgresLabellingUsesTheSymptomAndOrder` |
 | 17 | Event order ignored | **Fixed** | `TestRecoveryBeforeTheFixDoesNotConfirm` |
 | 18 | Loose attribution | **Fixed** | `TestAttributionIsExact` |
 | 19 | Unrelated changes contradict | **Fixed** | `TestAnUnrelatedChangeDoesNotContradict`. Relatedness comes from the entities the RCA weighed. |
 | 20 | Self-confirming evidence | **Fixed** | `TestChroniclesOwnChangeDoesNotConfirm`, `TestPostgresEvidenceExcludesSelfExecutedOutages` |
-| 21 | No rule for config/service/resource/node causes | Deferred | The template rollback could cover config and resource changes; that needs a rule design and evidence first. |
+| 21 | No rule for config/service/resource/node causes | **Partly fixed** | `revert-bad-config` rolls a Deployment back to an exact earlier pod template (P1 below). ConfigMap and Secret contents are never reverted, by design; service, node and autoscaler causes still have no rule. |
 | 22 | 0.65 floor is uncalibrated | Deferred | Floors were deliberately not lowered. |
-| 23 | Restart rule fires on any unready pod | Deferred | Needs a "running, unready, no restarts for N minutes" precondition. |
-| 24 | Duplicate-insert race returns a phantom ID | Deferred | |
-| 25 | Re-analysis hides the existing decision | Deferred | |
+| 23 | Restart rule fires on any unready pod | **Fixed** (not live) | Eligibility is checked at execution: unready 5 min, quiet 10 min, not mid-rollout; until then the approved decision waits (P1 below): `TestARestartWaitsUntilThePodHasBeenUnreadyForFiveMinutes` and the tests beside it |
+| 24 | Duplicate-insert race returns a phantom ID | **Fixed** | `RecordAction` returns the existing decision (`ErrAlreadyRecorded`) and a duplicate is not announced twice: `TestPostgresADuplicateIncidentReturnsTheWinnersDecision`, `TestPostgresConcurrentAnalysesOfOneIncidentAgree`, `TestALostInsertReturnsTheWinnersDecisionAndDoesNotNotify` |
+| 25 | Re-analysis hides the existing decision | **Fixed** | Re-analysis returns the decision already made, with its state: `TestReAnalysisReturnsTheExistingDecision` |
 | 26 | Approver identity is self-declared | **Fixed** (with limits) | OIDC: `TestTheApproverIsTheVerifiedIdentityNotTheBody`, `TestTheSharedTokenStopsWorkingOnceOIDCIsConfigured`, `TestTokensThatDoNotVerifyAreRefused`, `TestPostgresRecordsTheVerifiedApprover`. Not run against a real provider; see *Approver authentication* |
 | 27 | Slack failures silent, no action link | **Partial** | Failures are now logged. A link is still missing. |
 | 28 | Console claims dry-run regardless of mode | **Fixed** | The banner reads the live, kill-switch, TTL, cap and cooldown values from `/api/heal/rules`. |
@@ -447,7 +477,7 @@ and checked recovery before the harness restored anything. Logs:
 | Fault | RCA (top cause, confidence) | Proposal | Decision | Final | What it shows |
 |---|---|---|---|---|---|
 | redis scaled to zero | scale:redis, 0.68 | restore_replicas | approved | **succeeded**; outage gone 66 s later, no harness help | the whole path works |
-| redis scaled to zero again, 5 min later | scale:redis, **0.38 inconclusive** | blocked by the 0.65 floor | — | blocked | the floor refuses an uncertain diagnosis (a repeat outage's earlier events compete) |
+| redis scaled to zero again, 5 min later | scale:redis, **0.38 inconclusive** | blocked by the 0.65 floor | — | blocked | the floor refused an uncertain diagnosis. The uncertainty was a defect, since fixed (see *P0 hardening* below) |
 | api bad release | deploy:api, 0.93 | rollback_deployment | approved | **succeeded**; outage gone 55 s later | template rollback works |
 | redis deadlocked, strict PDB | became_unready:redis pod, **0.39** | blocked by the 0.80 floor | — | blocked | a bare failure 5 hops upstream scores low; the PDB path was not reached (tested on a real API server instead) |
 | api two bad releases, 9.5 min after the rollback | deploy:api, 0.96 | rollback_deployment | approved | **blocked: cooldown** ("acted on 9m30s ago") | the per-workload cooldown, live |
@@ -479,6 +509,144 @@ complete Deployment), so the quota failure was caught by the verify timeout.
 Outcome labels: Chronicle's own executions are labelled `unknown` by design
 (finding 20), so no symptom check follows Chronicle's own actions yet.
 
+## P0 hardening (2026-10-18)
+
+**Quick safety fixes.** Findings 15, 24 and 25 (table above); an executor
+refusal is recorded as `blocked`, releases its claim, and starts no cooldown;
+every cluster-changing script and `make` target is pinned to a `kind-*` context
+(`scripts/kube-context.sh`; `TestEveryClusterScriptPinsItsContext`).
+
+**Symptom check** (migration `016`, `internal/heal/symptom.go`): described under
+the safety layers. Live, on a disposable cluster:
+
+| Fault | Execution | Symptom check |
+|---|---|---|
+| redis scaled to zero | restore succeeded | **succeeded**: "error_spike on frontend recovered at 21:53:08Z and stayed below 0.050 for 5m0s" |
+| redis scaled to zero + a hidden deny-all NetworkPolicy (`restore-does-not-clear-symptom`) | restore succeeded, workload whole | **failed**: "no improvement within 2m0s of the action: error_spike on frontend is 1.000, limit 0.050" |
+
+Without the check the second would have been recorded as a plain success.
+
+**Repeat outages.** The same fault five minutes after the first scored 0.81,
+then 0.38 (inconclusive), so the repeat was never proposed. The chaos log now
+records each candidate's factors; the second analysis carried
+`Remediation ×0.35: undoes an earlier change`, meaning it was taken for a repair
+of the first outage. Three separate causes, each reproduced from real events
+captured through the API (`internal/rca/testdata/repeat_redis_outage*.json`):
+
+1. `failingAt` kept a pod "failing" for ever after a log line, because log lines
+   have no recovery of their own. They now end at the next recovery in scope, as
+   `recoveredAt` already treated them.
+2. `collapseRepeats` merged identical log lines across episodes and kept the
+   *earliest copy*, which was the earlier outage's: the new outage lost its own
+   first effect. Copies further apart than the episode gap are now separate.
+3. `revertingChanges` judged "was it already failing?" at the change's
+   *ingestion* time. A scale to zero is stamped to the whole second and ingested
+   0.66 s later, and the `Killing` warning for the pod it kills carries the same
+   second, so the new fault looked like a repair of a failure it had just caused.
+   It is now judged at the change's own time, less one second (Kubernetes
+   timestamps are whole seconds).
+
+A fourth rule, `markResolvedHistory`, sets aside alerts, log lines, failure
+facts and statuses left over from an incident that had ended before this episode
+began, so they no longer read as faint rivals. An incident ends at the last
+recovery in the symptom's scope after which nothing there was failing and
+nothing failed for the flap window; one alert resolving while another of the
+same incident still fires is not the end. Changes are untouched: whether an old
+change is still the cause stays `markRecovered`'s decision.
+
+The test that matters is not "the repeat scores like the first" (each outage is
+judged on its own timing, and they raised different alerts first) but "removing
+the earlier outage does not change the diagnosis of the fresh one", within
+0.005, on all three real captures (`internal/rca/testdata/repeat_redis_outage*.json`). Dev and held-out benchmark output is byte-identical
+before and after, and 0 of 117 independent incidents changed.
+
+## P1 hardening (2026-10-18)
+
+**Rollback names an exact revision.** A rollback used to be judged by container
+images, so a change to an env var, a sidecar or a resource limit could not be
+rolled back, and a revert to the "previous" image could land on a different
+template. Events now carry `from_template_hash` and `to_template_hash`
+(`internal/revision`: sha256 of the whole pod template, without the
+`pod-template-hash` label), and the executor restores the ReplicaSet whose
+template has the hash the decision names. It refuses when that revision is no
+longer retained, the Deployment is paused or not yet observed, a newer change
+exists, or the template already is that revision. Events recorded before this
+change carry no hashes and fall back to the image check.
+
+**Which revision to return to.** The previous revision is used only if it ran
+`HEAL_ROLLBACK_MIN_HEALTHY` (30 min) without a recorded failure
+(`error_spike`, `latency_spike`, `became_unready`, `container_restart`,
+`oom_kill`, `crash_loop`, `node_not_ready`, from Chronicle's own events; log
+lines excluded; the first 2 minutes of a rollout are grace). If it did not, the
+next older revision is checked, and so on through the retained history; if none
+qualifies the decision is `blocked` with the reason. If the history cannot be
+read, nothing is proposed. A revision that never failed is not proof that it
+works with today's data (schemas, dependencies): that part stays with the
+approver, which is why the proposal shows the chain it checked.
+
+**Progressive delivery is left alone.** A Deployment owned by an Argo
+Rollouts `Rollout`, or annotated or labelled for Flagger (including the
+`-primary` copy), is recorded as managed by that controller and gets a GitOps-style proposal,
+never a competing rollback. This detection is written from the controllers'
+documented ownership and labels and is **not verified against a live Argo
+Rollouts or Flagger installation**.
+
+**`revert-bad-config`.** A `config_change` on a Deployment (its env or
+mounted-object references changed) proposes `rollback_deployment`, confidence floor
+0.90, one per hour, with the same revision rules. For a ConfigMap or Secret the
+rule produces no proposal at all: Chronicle neither reads nor stores their
+contents (a ConfigMap event holds key names and hashes; Secrets are not watched),
+so there is nothing exact to restore. Benchmarks: the fixtures hold no revision evidence, so this
+rule is not scored in the remedy sweep (it says so); on the independent set 4 of 117 incidents
+now propose it, each a Deployment config change, and no RCA column changed.
+
+**Restarts are proposal-only.** `HEAL_RESTART_EXECUTION_ENABLED` is `false` by
+default: a restart is proposed, can be approved, and is refused at execution
+("proposal-only") until the flag is set. The rules endpoint and console mark
+such a rule. A proposal for a pod with no liveness probe recommends adding one.
+When enabled, a restart is also *eligible* only when the pod has been unready
+for `HEAL_RESTART_UNREADY_FOR` (5 min) and nothing in its container terminated
+within `HEAL_RESTART_QUIET` (10 min); a pod in a Deployment that is mid-rollout
+is rechecked in 30 seconds; a pod that is ready again or gone is a refusal. An
+approved decision that is not yet eligible stays approved, claims nothing and
+changes nothing, and runs when it becomes eligible if its approval has not
+expired first.
+
+**Failed rollouts fail fast.** When a Deployment cannot create replicas (a
+`ReplicaFailure` condition, for example a quota or an admission rejection), the
+rollout wait now stops with that message instead of running to the timeout.
+
+**What the live run showed about restarts through RCA.** A deadlocked redis
+(`CLIENT PAUSE`) is named correctly as its pod becoming unready, 14 seconds
+before the symptom, but five hops upstream of it in the dependency graph, with
+an event-type weight of 0.5 and a graph-distance weight of 0.33: confidence
+**0.36**, "inconclusive". No corroboration weight can lift that to the 0.80
+floor, so the RCA-to-restart proposal path stays closed for this class of
+fault. It was not forced open: the floor is not lowered, and no extra scoring
+was added to reach it. Raising it honestly needs outcome data (finding 22).
+
+**Live, on the disposable cluster.** `api-bad-config`, decided by a real OIDC
+approver (401 without a token, 403 for a non-approver): RCA 0.97 `config_change`,
+`revert-bad-config` proposed, rolled back by the worker from revision
+`e1816596` to `57d0b466`, rollout complete, and the symptom check **succeeded**
+("error_spike on frontend recovered ... stayed below 0.050 for 5m0s"). Two earlier
+attempts showed what the rule needs:
+
+1. *Blocked*: the api's current revision had a recorded `latency_spike`, caused by
+   redis being down in an earlier step, so no revision was "known to have run
+   healthily". This is the safe answer, and also a coarse one: **any** recorded
+   failure of the workload counts, including one an upstream outage caused, so a
+   revision that lived through such an outage is never returned to. Attributing
+   failures to their upstream cause would loosen it; that is not done.
+2. *Ambiguous (0.49), nothing proposed*: a good release minutes before the bad one
+   makes the RCA weigh two config changes. The suite now waits 16 minutes (past
+   the longest alert lookback) after the good release. The RCA was not changed.
+
+**Not done for P1:** restart execution through RCA live (blocked by the floor,
+above); restart eligibility is tested against fake and real API servers, not a
+live campaign; Argo Rollouts and Flagger detection is untested against a real
+installation.
+
 ## Also fixed in this round
 
 - **`TestPostgresRCAAndHistoricalGraph` failed against a real database.** Two
@@ -509,12 +677,12 @@ Not fixed, and not claimed as fixed.
 | Item | Why it is open |
 |---|---|
 | Findings 5, 8, 9, 27 | partial; what remains is in the table above |
-| Findings 14, 15, 21-25, 30 | deferred; each needs data or a design decision |
+| Findings 14, 21-23, 30 | deferred; each needs data or a design decision |
 | An Argo CD Application and a Helm release that share a *name* | the instance label cannot tell them apart; the workload is then treated as Argo-managed, which errs on the side of refusing to write it |
-| A failed precondition is recorded as `failed`, not `blocked` | a stale workload is a refusal, not an execution error; the state machine treats both as final |
 | The migration runner is a shell loop in an init container | a real migration tool with a version table would replace per-file idempotence |
 | Kyverno policies are tested only on a one-node cluster | webhook latency, Kyverno outages and upgrades are untested |
-| `restart_pod` has never run through RCA live | a bare failure (`became_unready`) several hops upstream scores about 0.4, under the 0.80 floor, so the floor refuses; the executor's eviction path is tested against a real API server instead. Lowering the floor is a calibration decision, not made here |
+| `restart_pod` has never run through RCA live | confirmed again in P1: a deadlocked redis scored 0.36 (five hops upstream, 0.5 type weight), under the 0.80 floor, so the floor refuses; the executor's eviction path is tested against a real API server instead. Lowering the floor is a calibration decision, not made here |
+| Release-controller detection (Argo Rollouts, Flagger) | written from documented ownership and labels; no live installation was available to verify it |
 | Live healing runs only in the disposable e2e cluster | `deploy/e2e` waives the observation and evidence gates there; the base manifests keep live off |
 
 ## Running the tests

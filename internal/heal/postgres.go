@@ -34,6 +34,11 @@ type Decision struct {
 	Now     time.Time
 }
 
+// ErrAlreadyRecorded: a decision for this incident exists. RecordAction then
+// leaves the existing decision in the Action it was given, so a caller never
+// holds the ID of a row that was not written.
+var ErrAlreadyRecorded = errors.New("a decision for this incident is already recorded")
+
 // Why a decision could not be recorded.
 var (
 	ErrActionNotFound = errors.New("healing action not found")
@@ -93,7 +98,7 @@ func (s *PostgresAuditStore) RecordAction(ctx context.Context, a *Action) error 
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
-	_, err = s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO heal_actions
 		(id, incident_id, rule, cause_type, action_type, namespace, target, confidence,
 		 reasoning, status, result, error, approval, payload, dry_run, created_at, cause_event_id,
@@ -107,6 +112,15 @@ func (s *PostgresAuditStore) RecordAction(ctx context.Context, a *Action) error 
 	if err != nil {
 		return err
 	}
+	if tag.RowsAffected() == 0 {
+		// Lost a race with another analysis of the same incident: its row stands.
+		existing, getErr := s.ActionForIncident(ctx, a.IncidentID)
+		if getErr != nil {
+			return fmt.Errorf("read the decision already recorded for incident %s: %w", a.IncidentID, getErr)
+		}
+		*a = *existing
+		return ErrAlreadyRecorded
+	}
 	// The observation period starts with the first decision and is never
 	// moved by pruning.
 	_, err = s.pool.Exec(ctx, `INSERT INTO heal_settings (key, at) VALUES ('observation_started_at', $1) ON CONFLICT (key) DO NOTHING`, a.CreatedAt)
@@ -117,7 +131,8 @@ const actionColumns = `id, incident_id, rule, cause_type, action_type, namespace
 	COALESCE(error,''), COALESCE(approval,'not_required'), COALESCE(payload,'null'::jsonb), dry_run, created_at,
 	COALESCE(decided_by,''), COALESCE(decided_by_issuer,''), COALESCE(decided_by_subject,''), COALESCE(decision_reason,''), decided_at, started_at, finished_at, COALESCE(verification,''), attempts,
 	COALESCE(cause_event_id,''), workload, proposed, expires_at, related,
-	COALESCE(outcome,''), COALESCE(outcome_detail,''), COALESCE(outcome_labeller,''), outcome_at`
+	COALESCE(outcome,''), COALESCE(outcome_detail,''), COALESCE(outcome_labeller,''), outcome_at,
+	COALESCE(symptom_check,''), COALESCE(symptom_detail,''), symptom_improved_at, symptom_due_at, symptom_checked_at`
 
 func scanAction(row pgx.Row) (Action, error) {
 	var a Action
@@ -126,7 +141,8 @@ func scanAction(row pgx.Row) (Action, error) {
 		&reasoningJSON, &a.Status, &a.Result, &a.Error, &a.Approval, &a.Payload, &a.DryRun, &a.CreatedAt,
 		&a.DecisionBy, &a.DecisionIssuer, &a.DecisionSubject, &a.DecisionReason, &a.DecidedAt, &a.StartedAt, &a.FinishedAt, &a.Verification, &a.Attempts,
 		&a.CauseEventID, &a.Workload, &a.Proposed, &a.ExpiresAt, &relatedJSON,
-		&a.Outcome, &a.OutcomeDetail, &a.OutcomeLabeller, &a.OutcomeAt); err != nil {
+		&a.Outcome, &a.OutcomeDetail, &a.OutcomeLabeller, &a.OutcomeAt,
+		&a.SymptomCheck, &a.SymptomDetail, &a.SymptomImprovedAt, &a.SymptomDueAt, &a.SymptomCheckedAt); err != nil {
 		return a, err
 	}
 	if err := json.Unmarshal(reasoningJSON, &a.Reasoning); err != nil {
@@ -349,6 +365,79 @@ func (s *PostgresAuditStore) CompleteExecution(ctx context.Context, id, status, 
 	return err
 }
 
+// RefuseExecution ends a claimed decision the executor declined to carry out.
+// Nothing was changed, so the claim is undone: the refusal must not spend the
+// hourly caps or start a cooldown, and the outage stays open to being judged as
+// one Chronicle did not act on.
+func (s *PostgresAuditStore) RefuseExecution(ctx context.Context, id, reason string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE heal_actions
+		SET status='blocked', result=$2, error=$2, started_at=NULL, finished_at=now()
+		WHERE id=$1 AND status='executing'`, id, reason)
+	return err
+}
+
+// BeginSymptomCheck marks a succeeded action as waiting for its symptom check.
+// Only a succeeded action starts one, and only once.
+func (s *PostgresAuditStore) BeginSymptomCheck(ctx context.Context, id string, startedAt, dueAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE heal_actions
+		SET symptom_check='pending', symptom_started_at=$2, symptom_due_at=$3, symptom_detail=NULL,
+		    symptom_improved_at=NULL, symptom_checked_at=NULL
+		WHERE id=$1 AND status='succeeded' AND symptom_check IS NULL`, id, startedAt, dueAt)
+	return err
+}
+
+// PendingSymptomChecks are the checks in progress, with the symptom each is about.
+func (s *PostgresAuditStore) PendingSymptomChecks(ctx context.Context, limit int) ([]SymptomTask, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.id, a.action_type, a.target, COALESCE(e.type,''), COALESCE(e.namespace,''), COALESCE(e.entity_name,''),
+		       COALESCE(e.severity,''), a.symptom_started_at, a.symptom_improved_at, a.symptom_due_at
+		FROM heal_actions a LEFT JOIN events e ON e.id = a.incident_id
+		WHERE a.symptom_check = 'pending'
+		ORDER BY a.symptom_due_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SymptomTask
+	for rows.Next() {
+		var t SymptomTask
+		if err := rows.Scan(&t.ID, &t.ActionType, &t.Target, &t.SymptomType, &t.SymptomNamespace, &t.SymptomEntity,
+			&t.Severity, &t.StartedAt, &t.ImprovedAt, &t.DueAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RecordSymptomImprovement keeps the first time the symptom was seen below its
+// threshold, so a leader change resumes the hold instead of restarting it.
+func (s *PostgresAuditStore) RecordSymptomImprovement(ctx context.Context, id string, at time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE heal_actions SET symptom_improved_at = COALESCE(symptom_improved_at, $2)
+		WHERE id=$1 AND symptom_check='pending'`, id, at)
+	return err
+}
+
+// FinishSymptomCheck ends a pending check. It returns nil when there was nothing
+// pending (another pass finished it first).
+func (s *PostgresAuditStore) FinishSymptomCheck(ctx context.Context, id, verdict, detail string, at time.Time) (*Action, error) {
+	a, err := scanAction(s.pool.QueryRow(ctx, `
+		UPDATE heal_actions SET symptom_check=$2, symptom_detail=$3, symptom_checked_at=$4
+		WHERE id=$1 AND symptom_check='pending'
+		RETURNING `+actionColumns, id, verdict, detail, at))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.State = StateOf(&a)
+	return &a, nil
+}
+
 // ApprovedActions are the decisions waiting for the worker, oldest approval first.
 func (s *PostgresAuditStore) ApprovedActions(ctx context.Context, now time.Time, limit int) ([]Action, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+actionColumns+` FROM heal_actions
@@ -398,6 +487,19 @@ func (s *PostgresAuditStore) FailInterrupted(ctx context.Context, startedBefore 
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// ActionForIncident returns the decision recorded for an incident.
+func (s *PostgresAuditStore) ActionForIncident(ctx context.Context, incidentID string) (*Action, error) {
+	a, err := scanAction(s.pool.QueryRow(ctx, `SELECT `+actionColumns+` FROM heal_actions WHERE incident_id=$1`, incidentID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrActionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.State = StateOf(&a)
+	return &a, nil
 }
 
 func (s *PostgresAuditStore) HasActionForIncident(ctx context.Context, incidentID string) (bool, error) {
@@ -606,4 +708,91 @@ func (s *PostgresAuditStore) EvidenceSummary(ctx context.Context) (EvidenceSumma
 		FROM per_outage`).
 		Scan(&out.Confirmed, &out.Contradicted, &out.Unknown, &out.MissedByFloor)
 	return out, err
+}
+
+// failureTypes are the recorded signals that a workload was unwell. Logs are left
+// out: applications log errors in perfectly healthy periods.
+var failureTypes = []string{"error_spike", "latency_spike", "became_unready", "container_restart", "oom_kill", "crash_loop", "node_not_ready"}
+
+// PriorRevisions rebuilds the workload's revision history from the change events
+// it recorded (each carries the whole template before and after).
+func (s *PostgresAuditStore) PriorRevisions(ctx context.Context, namespace, workload, bad string, limit int) ([]RevisionPeriod, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT occurred_at, payload->>'from_template_hash', payload->>'to_template_hash'
+		FROM events
+		WHERE namespace=$1 AND entity_kind='Deployment' AND entity_name=$2
+		  AND type IN ('deploy','config_change','resource_change')
+		  AND COALESCE(payload->>'to_template_hash','') <> ''
+		ORDER BY occurred_at`, namespace, workload)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var steps []RevisionStep
+	for rows.Next() {
+		var st RevisionStep
+		var from, to *string
+		if err := rows.Scan(&st.At, &from, &to); err != nil {
+			return nil, err
+		}
+		if from != nil {
+			st.From = *from
+		}
+		if to != nil {
+			st.To = *to
+		}
+		steps = append(steps, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return priorRevisions(steps, bad, limit), nil
+}
+
+// RanHealthily judges one revision from the events recorded for the workload and
+// its pods while it was the running one.
+func (s *PostgresAuditStore) RanHealthily(ctx context.Context, namespace, workload string, p RevisionPeriod, min time.Duration) (bool, string, error) {
+	var observedFrom *time.Time
+	if p.Since.IsZero() {
+		// Chronicle did not see this revision begin: its record starts with the
+		// first event it has for the workload or any of its pods.
+		if err := s.pool.QueryRow(ctx, `
+			SELECT min(occurred_at) FROM events
+			WHERE namespace=$1 AND (entity_name=$2 OR entity_name LIKE $2 || '-%')`, namespace, workload).Scan(&observedFrom); err != nil {
+			return false, "", err
+		}
+	}
+	from := p.Since
+	if from.IsZero() && observedFrom != nil {
+		from = *observedFrom
+	}
+	var failures []time.Time
+	if !from.IsZero() {
+		rows, err := s.pool.Query(ctx, `
+			SELECT occurred_at FROM events
+			WHERE namespace=$1 AND (entity_name=$2 OR entity_name LIKE $2 || '-%')
+			  AND severity IN ('warning','critical') AND type = ANY($3)
+			  AND occurred_at >= $4 AND occurred_at < $5
+			ORDER BY occurred_at`, namespace, workload, failureTypes, from, p.Until)
+		if err != nil {
+			return false, "", err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var at time.Time
+			if err := rows.Scan(&at); err != nil {
+				return false, "", err
+			}
+			failures = append(failures, at)
+		}
+		if err := rows.Err(); err != nil {
+			return false, "", err
+		}
+	}
+	var observed time.Time
+	if observedFrom != nil {
+		observed = *observedFrom
+	}
+	ok, why := judgeRevision(p, observed, failures, min)
+	return ok, why, nil
 }

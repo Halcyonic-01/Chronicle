@@ -292,6 +292,10 @@ type fakeChronicle struct {
 	workerEnd string
 	attempts  []string
 	tokens    map[string]int // token -> status for a decision; default 401
+	// The symptom check after a success: "" means none is run; otherwise it is
+	// pending for two listings and then ends as symptomEnd.
+	symptomEnd string
+	listed     int
 }
 
 func (f *fakeChronicle) arm(at time.Time) { f.mu.Lock(); f.base = at; f.mu.Unlock() }
@@ -326,6 +330,11 @@ func (f *fakeChronicle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(body)
 	case "/api/heal/actions":
 		list := []heal.Action{}
+		if f.proposal != nil && f.proposal.SymptomCheck == heal.SymptomPending {
+			if f.listed++; f.listed >= 2 {
+				f.proposal.SymptomCheck, f.proposal.SymptomDetail = f.symptomEnd, "scripted verdict"
+			}
+		}
 		if f.proposal != nil && !f.proposal.CreatedAt.IsZero() {
 			list = append(list, *f.proposal)
 		}
@@ -349,6 +358,9 @@ func (f *fakeChronicle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				// The worker finishes by the next poll.
 				f.proposal.Status, f.proposal.State = f.workerEnd, f.workerEnd
+				if f.workerEnd == heal.StatusSucceeded && f.symptomEnd != "" {
+					f.proposal.SymptomCheck = heal.SymptomPending
+				}
 			}
 			_ = json.NewEncoder(w).Encode(f.proposal)
 			return

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
 if [[ "${CHRONICLE_RUN_KIND_E2E:-false}" != "true" ]]; then
   cat <<'MSG'
 Phase 5 kind E2E is destructive: it creates and deletes one labeled test pod and
@@ -15,6 +17,7 @@ MSG
   exit 0
 fi
 
+. scripts/kube-context.sh
 : "${HEAL_APPROVAL_TOKEN:?export HEAL_APPROVAL_TOKEN before running the E2E test}"
 API_URL="${CHRONICLE_API_URL:-http://localhost:8181}"
 NAMESPACE="${PHASE5_E2E_NAMESPACE:-default}"

@@ -262,7 +262,7 @@ func healerFromEnv(ctx context.Context) (*chaos.Healer, error) {
 			return nil, fmt.Errorf("identity provider at %s (port-forward Keycloak first): %w", tokenURL, err)
 		}
 	}
-	return &chaos.Healer{Approver: approver, NonApprover: viewer, Terminal: 6 * time.Minute}, nil
+	return &chaos.Healer{Approver: approver, NonApprover: viewer, Terminal: 6 * time.Minute, SymptomWait: 12 * time.Minute}, nil
 }
 
 func contains(list []string, s string) bool {

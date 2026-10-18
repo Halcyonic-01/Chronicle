@@ -219,8 +219,14 @@ func TestWorkerRefusesWhenTheWorkloadChangedAfterApproval(t *testing.T) {
 	a := e.approved("moved", "c-moved", "cache")
 	e.tick()
 	got := e.status(a.ID)
-	if got.Status != StatusFailed || !strings.Contains(got.Error, "already at 5") {
+	if got.Status != StatusBlocked || !strings.Contains(got.Error, "already at 5") {
 		t.Fatalf("expected a refusal naming the current count, got status=%s error=%q", got.Status, got.Error)
+	}
+	// A refusal changed nothing, so it must not count as an execution: no
+	// started_at, no cooldown on the workload, no hourly cap spent.
+	var started *time.Time
+	if err := e.pool.QueryRow(context.Background(), `SELECT started_at FROM heal_actions WHERE id=$1`, a.ID).Scan(&started); err != nil || started != nil {
+		t.Fatalf("a refused decision still counts as executed: started_at=%v err=%v", started, err)
 	}
 	if e.replicas("cache") != 5 || e.writes() != 0 {
 		t.Fatalf("the newer replica count was overwritten: %d replicas, %d writes", e.replicas("cache"), e.writes())
@@ -380,5 +386,211 @@ func TestWorkerRecordsARemediationThatDoesNotRecover(t *testing.T) {
 	}
 	if e.writes() != 1 || e.status(a.ID).Status != StatusFailed {
 		t.Fatalf("a failed remediation was retried: writes=%d status=%s", e.writes(), e.status(a.ID).Status)
+	}
+}
+
+// A refusal is not an execution: the same workload can be acted on right after,
+// because nothing was done to it and no cooldown was started.
+func TestARefusalDoesNotStartACooldown(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 5, "other": 0})
+	refused := e.approved("refused", "c-refused", "cache")
+	e.tick()
+	if got := e.status(refused.ID); got.Status != StatusBlocked {
+		t.Fatalf("setup: expected a refusal, got %s", got.Status)
+	}
+	// The workload is scaled to zero again, a new outage: it is not on cooldown.
+	zero := int32(0)
+	d, _ := e.client.AppsV1().Deployments("default").Get(context.Background(), "cache", metav1.GetOptions{})
+	d.Spec.Replicas = &zero
+	_, _ = e.client.AppsV1().Deployments("default").Update(context.Background(), d, metav1.UpdateOptions{})
+	e.advance(time.Second)
+	again := e.approved("again", "c-again", "cache")
+	e.tick()
+	if got := e.status(again.ID); got.Status != StatusSucceeded {
+		t.Fatalf("a refusal started a cooldown: status=%s result=%q", got.Status, got.Result)
+	}
+}
+
+// ---- the symptom check, through the worker and the real store -------------
+
+// scriptedProbe is a metrics source whose reading the test controls.
+type scriptedProbe struct {
+	mu  sync.Mutex
+	r   Reading
+	err error
+}
+
+func (p *scriptedProbe) set(r Reading, err error) { p.mu.Lock(); p.r, p.err = r, err; p.mu.Unlock() }
+func (p *scriptedProbe) Read(context.Context, string, string, string) (Reading, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.r, p.err
+}
+
+// symptomEnv plants the symptom event the action's incident points at and
+// attaches a checker to the worker.
+func (e *workerEnv) withSymptom(id, symptomType, severity string, probe SymptomProbe) {
+	e.t.Helper()
+	if _, err := e.pool.Exec(context.Background(), `INSERT INTO events (id,occurred_at,ingested_at,source,namespace,entity_kind,entity_name,type,severity,title,payload)
+		VALUES ($1,$2,$2,'test','default','Service','frontend',$3,$4,'sym','{}')`, "inc-"+id+"-"+e.sx, e.clock(), symptomType, severity); err != nil {
+		e.t.Fatal(err)
+	}
+	e.ctrl.Symptoms = &SymptomChecker{Store: e.store, Probe: probe, Policy: SymptomPolicy{ImproveWithin: 2 * time.Minute, Hold: 5 * time.Minute}}
+}
+
+var (
+	probeHealthy = Reading{Value: 0.01, Threshold: 0.05}
+	probeFiring  = Reading{Value: 0.40, Threshold: 0.05}
+)
+
+// After a successful action the symptom is checked: it must improve within two
+// minutes and hold for five.
+func TestWorkerChecksTheSymptomAfterASuccessfulAction(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 0})
+	probe := &scriptedProbe{r: probeFiring}
+	e.withSymptom("ok", "error_spike", "critical", probe)
+	a := e.approved("ok", "c-ok", "cache")
+	e.tick()
+	got := e.status(a.ID)
+	if got.Status != StatusSucceeded || got.SymptomCheck != SymptomPending || got.SymptomDueAt == nil {
+		t.Fatalf("a successful action should start a check: status=%s check=%q due=%v", got.Status, got.SymptomCheck, got.SymptomDueAt)
+	}
+	probe.set(probeHealthy, nil)
+	e.advance(10 * time.Second)
+	e.tick()
+	if got := e.status(a.ID); got.SymptomCheck != SymptomPending || got.SymptomImprovedAt == nil {
+		t.Fatalf("improvement should be recorded and the check still pending: %+v", got)
+	}
+	e.advance(4*time.Minute + 50*time.Second)
+	e.tick()
+	if got := e.status(a.ID); got.SymptomCheck != SymptomPending {
+		t.Fatalf("the hold is not over yet: %s", got.SymptomCheck)
+	}
+	e.advance(15 * time.Second)
+	e.tick()
+	if got := e.status(a.ID); got.SymptomCheck != SymptomSucceeded || got.SymptomCheckedAt == nil || !strings.Contains(got.SymptomDetail, "recovered") {
+		t.Fatalf("expected a succeeded check: %+v", got)
+	}
+}
+
+func TestWorkerRecordsAFailedSymptomCheckWithoutTouchingTheOutcome(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 0})
+	probe := &scriptedProbe{r: probeFiring}
+	e.withSymptom("bad", "error_spike", "critical", probe)
+	a := e.approved("bad", "c-bad", "cache")
+	e.tick()
+	e.advance(2*time.Minute + time.Second)
+	e.tick()
+	got := e.status(a.ID)
+	if got.SymptomCheck != SymptomFailed || !strings.Contains(got.SymptomDetail, "no improvement") {
+		t.Fatalf("expected a failed check: %+v", got)
+	}
+	// The execution itself still succeeded, and the labeller's columns are untouched
+	// (finding 20: Chronicle's own actions are not evidence).
+	if got.Status != StatusSucceeded || got.Outcome != "" {
+		t.Fatalf("a failed symptom check must not rewrite the execution or the outcome: status=%s outcome=%q", got.Status, got.Outcome)
+	}
+	before, _ := e.store.EvidenceSummary(context.Background())
+	e.advance(time.Hour)
+	e.tick()
+	after, _ := e.store.EvidenceSummary(context.Background())
+	if before != after {
+		t.Fatalf("the symptom check moved the evidence counts: %+v -> %+v", before, after)
+	}
+}
+
+// A new leader picks the hold up where the old one left it.
+func TestASymptomCheckSurvivesALeaderChange(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 0})
+	probe := &scriptedProbe{r: probeFiring}
+	e.withSymptom("lead", "error_spike", "critical", probe)
+	a := e.approved("lead", "c-lead", "cache")
+	e.tick()
+	probe.set(probeHealthy, nil)
+	e.advance(20 * time.Second)
+	e.tick() // the first leader sees the improvement, then dies
+	successor := &Controller{Store: e.store, Executor: e.ctrl.Executor, Rules: e.ctrl.Rules, Policy: e.ctrl.Policy, Now: e.clock,
+		Symptoms: &SymptomChecker{Store: e.store, Probe: probe, Policy: e.ctrl.Symptoms.Policy}}
+	e.advance(5 * time.Minute)
+	if err := successor.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.status(a.ID); got.SymptomCheck != SymptomSucceeded {
+		t.Fatalf("the new leader restarted the hold instead of resuming it: %+v", got)
+	}
+}
+
+// Two passes racing over one check conclude it once.
+func TestConcurrentPassesFinishACheckOnce(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 0})
+	e.withSymptom("race", "error_spike", "critical", &scriptedProbe{r: probeFiring})
+	e.approved("race2", "c-race2", "cache")
+	e.tick()
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = e.ctrl.Symptoms.Pass(context.Background(), e.clock().Add(3*time.Minute))
+		}()
+	}
+	wg.Wait()
+	var finished int
+	if err := e.pool.QueryRow(context.Background(), `SELECT count(*) FROM heal_actions WHERE id LIKE $1 AND symptom_check='failed'`, "%"+e.sx).Scan(&finished); err != nil || finished != 1 {
+		t.Fatalf("expected exactly one finished check, got %d (%v)", finished, err)
+	}
+}
+
+// Only a succeeded action starts a check, and only once.
+func TestOnlyASucceededActionStartsASymptomCheck(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 5})
+	e.withSymptom("refused", "error_spike", "critical", &scriptedProbe{r: probeFiring})
+	a := e.approved("refused", "c-refused2", "cache") // already at 5: the executor refuses
+	e.tick()
+	got := e.status(a.ID)
+	if got.Status != StatusBlocked || got.SymptomCheck != "" {
+		t.Fatalf("a refused action started a symptom check: status=%s check=%q", got.Status, got.SymptomCheck)
+	}
+	if err := e.store.BeginSymptomCheck(context.Background(), a.ID, e.clock(), e.clock().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.status(a.ID); got.SymptomCheck != "" {
+		t.Fatalf("the store started a check for a decision that did not succeed: %q", got.SymptomCheck)
+	}
+}
+
+// The store, not the checker, guarantees a check ends once and that the first
+// improvement stands; the checker's notification logic relies on both.
+func TestPostgresASymptomCheckEndsOnceAndKeepsItsFirstImprovement(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 0})
+	e.withSymptom("once", "error_spike", "critical", &scriptedProbe{r: probeFiring})
+	a := e.approved("once", "c-once", "cache")
+	e.tick()
+	ctx := context.Background()
+	first, second := e.clock().Add(10*time.Second), e.clock().Add(90*time.Second)
+	if err := e.store.RecordSymptomImprovement(ctx, a.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.RecordSymptomImprovement(ctx, a.ID, second); err != nil {
+		t.Fatal(err)
+	}
+	got := e.status(a.ID)
+	if got.SymptomImprovedAt == nil || !got.SymptomImprovedAt.Equal(first) {
+		t.Fatalf("a later reading moved the start of the hold: %v, want %v", got.SymptomImprovedAt, first)
+	}
+	done, err := e.store.FinishSymptomCheck(ctx, a.ID, SymptomFailed, "first", e.clock())
+	if err != nil || done == nil || done.SymptomCheck != SymptomFailed {
+		t.Fatalf("first finish: %+v, %v", done, err)
+	}
+	again, err := e.store.FinishSymptomCheck(ctx, a.ID, SymptomSucceeded, "second", e.clock())
+	if err != nil || again != nil {
+		t.Fatalf("a finished check was finished again: %+v, %v", again, err)
+	}
+	if got := e.status(a.ID); got.SymptomCheck != SymptomFailed || got.SymptomDetail != "first" {
+		t.Fatalf("the first verdict was overwritten: %+v", got)
+	}
+	// Once finished, a late improvement report changes nothing.
+	if err := e.store.RecordSymptomImprovement(ctx, a.ID, second.Add(time.Hour)); err != nil {
+		t.Fatal(err)
 	}
 }

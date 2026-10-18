@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+. scripts/kube-context.sh
+
 API_URL="${API_URL:-http://localhost:8181}"
 POSTGRES_URL="${POSTGRES_URL:-postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable}"
 NAMESPACE="${VICTIM_NAMESPACE:-default}"

@@ -82,11 +82,36 @@ that must appear. After the analysis the harness:
    non-approver (must get 403), and checks it is still pending;
 3. approves or denies it as the approver, with a real OIDC ID token;
 4. waits for the worker to reach a final state, and on success waits for the
-   steady state to return *before* restoring anything.
+   steady state to return *before* restoring anything;
+5. on success, waits for the **symptom check** (the alert must start clearing
+   within 2 minutes and stay clear for 5) and compares its verdict with the
+   pre-registered one. The harness must not restore while the check is still
+   measuring, or it would be judging its own repair.
+
+`restore-does-not-clear-symptom` is the double fault for step 5: redis scaled to
+zero (which Chronicle diagnoses and restores) plus a deny-all NetworkPolicy
+(which it does not watch). The restore succeeds and the symptom check must say
+the alert did not clear.
+
+`api-bad-config` asks for a revert (`revert-bad-config`) and sets up its own
+known-good target: an ordinary release of the api, then a 16-minute wait, longer
+than any alert lookback, so the two changes are not weighed against each other
+(a first attempt without the wait scored 0.49, ambiguous, and no proposal was
+made). The wait is also needed because the api's current revision carries
+failures from the earlier steps, which the rollback rightly refuses to return to.
 
 The snapshot restore still runs afterwards as a safety net. It needs the
 `deploy/e2e` environment (live healing, Keycloak); results are in
 `internal/heal/README.md`.
+
+## What a run records about a diagnosis
+
+Each analysis in the log carries the strength and separation behind its
+confidence and, for the five leading candidates, the factors that made up each
+score (`trace`). That is how the repeat-outage defect was found: two identical
+faults five minutes apart, 0.81 and 0.38, and the trace showed a
+`Remediation ×0.35` on the second. Read it with
+`jq 'select(.kind=="result") | .result.headline.trace[0]' chaos-results/run-*.jsonl`.
 
 ## Reading a run
 

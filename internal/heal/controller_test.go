@@ -54,6 +54,9 @@ func livePolicy() Policy {
 		Timeout:              time.Second,
 		MaxExecutionsPerHour: 3,
 		TargetCooldown:       30 * time.Minute,
+		// The tests below are about the other gates; restart_pod is proposal-only
+		// by default and has its own tests.
+		RestartExecutionEnabled: true,
 	}
 }
 
@@ -290,6 +293,7 @@ func TestAutonomyNeedsEvidenceNotJustElapsedTime(t *testing.T) {
 			AllowedNamespaces: map[string]bool{"default": true},
 			AllowedTargets:    map[string]bool{"default/redis": true},
 			MinDecisive:       20, MinPrecision: 0.8, Evidence: e,
+			RestartExecutionEnabled: true, // this test is about the evidence gate
 		}
 	}
 	a := &Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis"}
@@ -490,5 +494,39 @@ func TestExecutionLimitsHaveSafeDefaults(t *testing.T) {
 	p := PolicyFromEnv()
 	if p.MaxExecutionsPerHour != 3 || p.TargetCooldown != 30*time.Minute || p.VerifyTimeout != 3*time.Minute {
 		t.Fatalf("unexpected defaults: %+v", p)
+	}
+}
+
+// Decision 1: restarts are proposal-only until the restart path has passed
+// safety testing. Everything else about the policy is open and still refuses.
+func TestRestartIsProposalOnlyUnlessExplicitlyEnabled(t *testing.T) {
+	p := livePolicy()
+	p.RestartExecutionEnabled = false
+	err := p.Allows(&Action{ActionType: ActionRestartPod, Namespace: "default", Target: "redis"})
+	if err == nil || !strings.Contains(err.Error(), "proposal-only") {
+		t.Fatalf("a restart was allowed while proposal-only: %v", err)
+	}
+	// Other actions are untouched by the flag.
+	if err := p.Allows(&Action{ActionType: ActionRestoreReplicas, Namespace: "default", Target: "redis"}); err != nil &&
+		strings.Contains(err.Error(), "proposal-only") {
+		t.Fatalf("the flag blocked another action: %v", err)
+	}
+	t.Setenv("HEAL_RESTART_EXECUTION_ENABLED", "")
+	if PolicyFromEnv().RestartExecutionEnabled {
+		t.Fatal("restart execution must default to off")
+	}
+	t.Setenv("HEAL_RESTART_EXECUTION_ENABLED", "true")
+	if !PolicyFromEnv().RestartExecutionEnabled {
+		t.Fatal("the flag was not read")
+	}
+}
+
+func TestAnApprovedRestartIsBlockedWithoutCallingTheExecutorWhileProposalOnly(t *testing.T) {
+	store, executor := &executionMemory{}, &recordingExecutor{}
+	controller := liveController(store, executor)
+	controller.Policy.RestartExecutionEnabled = false
+	_, err := controller.ExecuteApproved(context.Background(), approvedRestart("proposal-only"))
+	if err == nil || executor.calls != 0 || store.status != StatusBlocked || !strings.Contains(err.Error(), "proposal-only") {
+		t.Fatalf("err %v calls %d status %s", err, executor.calls, store.status)
 	}
 }

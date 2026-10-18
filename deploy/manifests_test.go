@@ -475,3 +475,35 @@ func TestEnvExampleMatchesTheCode(t *testing.T) {
 		}
 	}
 }
+
+// Every script that runs kubectl pins its context: either it sources the
+// kind-only guard or it passes --context itself. A bare kubectl would act on
+// whichever cluster the kubeconfig currently points at, EKS included.
+func TestEveryClusterScriptPinsItsContext(t *testing.T) {
+	scripts, err := filepath.Glob("../scripts/*.sh")
+	if err != nil || len(scripts) == 0 {
+		t.Fatalf("no scripts found: %v", err)
+	}
+	for _, path := range scripts {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		if !strings.Contains(text, "kubectl") || strings.HasSuffix(path, "kube-context.sh") {
+			continue
+		}
+		if !strings.Contains(text, "kube-context.sh") && !strings.Contains(text, "--context") {
+			t.Errorf("%s runs kubectl without pinning a context", filepath.Base(path))
+		}
+	}
+	makefile, err := os.ReadFile("../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range strings.Split(string(makefile), "\n") {
+		if strings.Contains(line, "kubectl ") && !strings.Contains(line, "--context") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			t.Errorf("Makefile:%d runs kubectl without --context: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}

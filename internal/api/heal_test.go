@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -104,5 +105,37 @@ func TestApprovingNeverExecutes(t *testing.T) {
 	}
 	if exec.claims+exec.completions+exec.runs != 0 {
 		t.Fatalf("approving reached the executor: %d claims, %d completions, %d runs", exec.claims, exec.completions, exec.runs)
+	}
+}
+
+func TestTheRulesSayWhichActionsAreOnlyProposed(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		engine := heal.NewEngine(nil)
+		ctl := &heal.Controller{Policy: heal.Policy{RestartExecutionEnabled: enabled, ObservationSince: time.Now()}}
+		h := NewHandler(nil, nil, nil, engine, nil, nil, nil, ctl)
+		rec := httptest.NewRecorder()
+		h.HealingRules(rec, httptest.NewRequest(http.MethodGet, "/api/heal/rules", nil))
+		var body struct {
+			Rules []struct {
+				ActionType   string `json:"action_type"`
+				ProposalOnly bool   `json:"proposal_only"`
+			} `json:"rules"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		restarts := 0
+		for _, r := range body.Rules {
+			want := r.ActionType == heal.ActionRestartPod && !enabled
+			if r.ProposalOnly != want {
+				t.Errorf("enabled=%v: a %s rule has proposal_only=%v", enabled, r.ActionType, r.ProposalOnly)
+			}
+			if r.ActionType == heal.ActionRestartPod {
+				restarts++
+			}
+		}
+		if restarts == 0 {
+			t.Fatal("no restart rule to check")
+		}
 	}
 }

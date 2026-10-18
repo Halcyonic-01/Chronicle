@@ -178,3 +178,23 @@ func TestRestoreRefusesACountAboveTheCeiling(t *testing.T) {
 		t.Fatalf("wrote %d replicas", *got.Spec.Replicas)
 	}
 }
+
+// A quota that stops pods being created is reported by the Deployment controller
+// as ReplicaFailure at once; waiting for the verify timeout (found live: 185 s)
+// is waiting for nothing.
+func TestAFailureToCreatePodsEndsVerificationAtOnce(t *testing.T) {
+	failed := deploymentStatus("worker", 1, 0, appsv1.DeploymentCondition{Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue,
+		Reason: "FailedCreate", Message: `pods "worker-1" is forbidden: exceeded quota: chaos-pod-cap`})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := (&KubernetesExecutor{Client: fake.NewSimpleClientset(failed)}).awaitRollout(ctx, "default", "worker", time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "exceeded quota") || time.Since(start) > 2*time.Second {
+		t.Fatalf("got %v after %s", err, time.Since(start))
+	}
+	// A deployment that is fully available is not failed by a lingering condition.
+	healthy := deploymentStatus("worker", 1, 1, appsv1.DeploymentCondition{Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue, Reason: "FailedCreate"})
+	if _, err := (&KubernetesExecutor{Client: fake.NewSimpleClientset(healthy)}).awaitRollout(context.Background(), "default", "worker", time.Time{}); err != nil {
+		t.Fatalf("a recovered deployment was failed on a stale condition: %v", err)
+	}
+}

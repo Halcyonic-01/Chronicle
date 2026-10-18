@@ -18,12 +18,17 @@ spec:
         - {name: HEAL_ALLOWED_ACTIONS, value: "restart_pod,restore_replicas,rollback_deployment"}
         - {name: HEAL_ALLOWED_TARGETS, value: "default/redis,default/api,default/worker,default/postgres"}
         - {name: HEAL_TARGET_COOLDOWN, value: 10m}
+        - {name: HEAL_ROLLBACK_MIN_HEALTHY, value: 90s}
+        - {name: HEAL_RESTART_EXECUTION_ENABLED, value: "true"}
+        - {name: HEAL_RESTART_UNREADY_FOR, value: 60s}
+        - {name: HEAL_RESTART_QUIET, value: 2m}
         - {name: HEAL_MAX_EXECUTIONS_PER_HOUR, value: "10"}
         - name: HEAL_RULES
           value: >-
             [{"name":"restart-deadlocked-pod","cause_type":"became_unready","action_type":"restart_pod","min_confidence":0.80,"max_per_hour":3,"require_approve":true},
             {"name":"bump-memory-on-oom","cause_type":"oom_kill","action_type":"bump_memory","min_confidence":0.85,"max_per_hour":2,"require_approve":true},
             {"name":"rollback-bad-deploy","cause_type":"deploy","action_type":"rollback_deployment","min_confidence":0.90,"max_per_hour":3,"require_approve":true},
+            {"name":"revert-bad-config","cause_type":"config_change","action_type":"rollback_deployment","min_confidence":0.90,"max_per_hour":3,"require_approve":true},
             {"name":"restore-scaled-down-workload","cause_type":"scale","action_type":"restore_replicas","min_confidence":0.65,"max_per_hour":6,"require_approve":true}]
         - {name: OIDC_ISSUER_URL, value: "http://keycloak.localhost:8180/realms/chronicle"}
         - {name: OIDC_CLIENT_ID, value: chronicle}

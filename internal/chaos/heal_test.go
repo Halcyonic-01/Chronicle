@@ -3,6 +3,7 @@ package chaos
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,7 +115,7 @@ func TestHealSuiteIsWellFormed(t *testing.T) {
 		}
 		seen++
 	}
-	if seen != 8 {
+	if seen != 9 {
 		t.Fatalf("suite has %d steps", seen)
 	}
 }
@@ -162,5 +163,70 @@ func TestCapPodsCountsEverythingButTheTargetAndIsRemoved(t *testing.T) {
 	}
 	if err := RemoveQuota("chaos-pod-cap").Do(ctx, c); err != nil {
 		t.Fatal("removing an absent quota must be harmless:", err)
+	}
+}
+
+// The harness waits for the symptom check before it lets the run restore, and
+// records the verdict against the pre-registered one.
+func TestHealModeWaitsForTheSymptomCheckAndComparesItToTheExpectation(t *testing.T) {
+	for _, c := range []struct {
+		end, want string
+		matches   bool
+	}{
+		{heal.SymptomFailed, heal.SymptomFailed, true},
+		{heal.SymptomSucceeded, heal.SymptomSucceeded, true},
+		{heal.SymptomFailed, heal.SymptomSucceeded, false}, // restored fine, but the alert did not clear
+		{heal.SymptomUnknown, heal.SymptomSucceeded, false},
+	} {
+		h := healHarness(t, heal.StatusSucceeded)
+		h.api.symptomEnd = c.end
+		h.runner.Healer.SymptomWait = 10 * time.Minute
+		got := h.healRun(t, HealExpectation{Decide: "approve", Expect: heal.StatusSucceeded, Symptom: c.want})
+		if got.SymptomCheck != c.end || got.Matches != c.matches {
+			t.Errorf("end %s want %s: recorded %q, matches %v (want %v) %+v", c.end, c.want, got.SymptomCheck, got.Matches, c.matches, got)
+		}
+	}
+}
+
+// A check that never concludes is reported as such, not as a pass.
+func TestHealModeReportsACheckThatNeverConcludes(t *testing.T) {
+	h := healHarness(t, heal.StatusSucceeded)
+	h.api.symptomEnd = heal.SymptomSucceeded
+	h.api.listed = -1000 // never reaches the final listing
+	h.runner.Healer.SymptomWait = 30 * time.Second
+	got := h.healRun(t, HealExpectation{Decide: "approve", Expect: heal.StatusSucceeded, Symptom: heal.SymptomSucceeded})
+	if got.Matches || got.SymptomCheck != heal.SymptomPending {
+		t.Fatalf("an unfinished check was accepted: %+v", got)
+	}
+}
+
+// A failed symptom check does not also report a steady-state problem: the
+// double-fault is expected to leave the system unhealthy until the harness restores.
+func TestAFailedSymptomCheckIsNotAlsoASteadyStateProblem(t *testing.T) {
+	broken := false
+	h := healHarness(t, heal.StatusSucceeded)
+	h.api.symptomEnd = heal.SymptomFailed
+	h.runner.Healer.SymptomWait = 10 * time.Minute
+	h.runner.Steady = steadyScript(func() (bool, string) { return !broken, "frontend error rate 0.40" })
+	exp := h.experiment([]Root{{"scale", "redis"}}, Scale("redis", 0))
+	exp.Inject = append([]Action{step{"break", func(context.Context, *Cluster) error { broken = true; return nil }}}, exp.Inject...)
+	exp.Restore = []Action{step{"fix", func(context.Context, *Cluster) error { broken = false; return nil }}}
+	exp.Heal = &HealExpectation{Decide: "approve", Expect: heal.StatusSucceeded, Symptom: heal.SymptomFailed}
+	if err := h.runner.Run(context.Background(), []Planned{{Experiment: exp, Trial: 1}}, RunInfo{Seed: 1}); err != nil {
+		t.Fatal(err)
+	}
+	got := h.records(t)[2].Result.Heal
+	if got == nil || got.Problem != "" || !got.Matches || got.HealedWithoutRestore {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestTheDoubleFaultInjectsThePolicyBeforeTheScale(t *testing.T) {
+	e := RestoreDoesNotClearSymptom()
+	if len(e.Inject) != 2 || !strings.Contains(e.Inject[0].Describe(), "NetworkPolicy") && !strings.Contains(e.Inject[0].Describe(), "deny") {
+		t.Fatalf("inject steps: %v", e.Inject)
+	}
+	if !strings.Contains(e.Inject[1].Describe(), "scale") {
+		t.Fatalf("the scale must come second so it is the only recorded change: %v", e.Inject[1].Describe())
 	}
 }

@@ -192,7 +192,7 @@ function healing(){
     r.name, r.cause_type, r.action_type,
     Number(r.min_confidence||0).toFixed(2),
     `${r.max_per_hour}/h`,
-    'approval required'
+    r.proposal_only ? 'proposal only · will not run' : 'approval required'
   ]);
   const mode = state.healMode||{};
   const modeText = mode.live_enabled && !mode.kill_switch
@@ -208,7 +208,7 @@ function healing(){
     </div>
     <div class="scroll">
       <div class="sec-h"><b>Remediation queue</b><span>AUDIT STORE</span></div>
-      ${actions.length ? `<table class="dt"><thead><tr><th>Created</th><th>Rule</th><th>Action</th><th>Target</th><th class="num">Conf</th><th>Status</th><th>Approval</th><th>Review</th></tr></thead><tbody>${actions.map(a=>`
+      ${actions.length ? `<table class="dt"><thead><tr><th>Created</th><th>Rule</th><th>Action</th><th>Target</th><th class="num">Conf</th><th>Status</th><th>Symptom</th><th>Approval</th><th>Review</th></tr></thead><tbody>${actions.map(a=>`
         <tr style="cursor:default">
           <td class="dim">${fmtTime(a.created_at,true)}</td>
           <td>${esc(a.rule||'—')}</td>
@@ -216,6 +216,7 @@ function healing(){
           <td class="dim">${a.target?`${esc(a.namespace||'default')}/${esc(a.target)}`:'—'}</td>
           <td class="num">${(a.confidence||0).toFixed(2)}</td>
           <td class="${a.status==='blocked'||a.status==='failed'?'sev-warning':''}">${esc(a.status)}</td>
+          <td title="${esc(a.symptom_detail||'')}">${a.symptom_check?`<span class="${a.symptom_check==='failed'?'sev-warning':a.symptom_check==='succeeded'?'':'dim'}">${esc(a.symptom_check)}</span>`:'<span class="dim">—</span>'}</td>
           <td class="dim">${esc(a.state||a.approval)}</td>
           <td>${awaitingApproval(a)
             ? `<button class="k pri" data-approve="${esc(a.id)}">approve</button> <button class="k no" data-deny="${esc(a.id)}">deny</button>`

@@ -19,6 +19,7 @@ import (
 
 	"github.com/Halcyonic-01/Chronicle/internal/event"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
+	"github.com/Halcyonic-01/Chronicle/internal/revision"
 )
 
 type K8sCollector struct {
@@ -268,12 +269,25 @@ func (k *K8sCollector) diffPods(old, new *corev1.Pod) {
 			Payload: mustJSON(map[string]any{
 				"owner":       ownerRef(new),
 				"ready_count": podReadyCount(new),
+				// Kubernetes' own answer to a process that stops responding is a
+				// liveness probe; a restart proposal says so when there is none.
+				"has_liveness_probe": hasLivenessProbe(new),
+				"restart_count":      podRestartCount(new),
 			}),
 		})
 	}
 	if !oldReady && newReady {
 		k.Emit(event.Event{Source: "k8s", EntityKind: "Pod", EntityName: new.Name, Namespace: new.Namespace, Type: "became_ready", Severity: "info", Title: fmt.Sprintf("%s started serving traffic", new.Name), Payload: mustJSON(map[string]any{"owner": ownerRef(new), "ready_count": podReadyCount(new)})})
 	}
+}
+
+func hasLivenessProbe(p *corev1.Pod) bool {
+	for _, c := range p.Spec.Containers {
+		if c.LivenessProbe != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // maxSpecChangeAge bounds how old a field-manager timestamp may be and still
@@ -324,6 +338,8 @@ func (k *K8sCollector) emitDeploymentStatus(d *appsv1.Deployment) {
 
 func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 	changedAt, changedBy := specChangeTime(new)
+	// The whole pod template before and after: what a rollback must match exactly.
+	fromTemplate, toTemplate := revision.TemplateHash(old.Spec.Template), revision.TemplateHash(new.Spec.Template)
 
 	if old.Status.ReadyReplicas != new.Status.ReadyReplicas || old.Status.AvailableReplicas != new.Status.AvailableReplicas {
 		k.emitDeploymentStatus(new)
@@ -346,10 +362,12 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s deployed: %s -> %s", new.Name, shortTag(oldImg), shortTag(newImg)),
 			Payload: mustJSON(k.withGitOps(new, map[string]any{
-				"old_image":  oldImg,
-				"new_image":  newImg,
-				"commit_sha": extractSHA(newImg),
-				"changed_by": changedBy,
+				"old_image":          oldImg,
+				"new_image":          newImg,
+				"commit_sha":         extractSHA(newImg),
+				"changed_by":         changedBy,
+				"from_template_hash": fromTemplate,
+				"to_template_hash":   toTemplate,
 			})),
 		})
 	}
@@ -366,7 +384,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "resource_change",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s resource limits changed", new.Name),
-			Payload:    mustJSON(k.withGitOps(new, map[string]any{"new_mem_limit": memoryLimit(new.Spec.Template.Spec.Containers[0]), "old_mem_limit": memoryLimit(old.Spec.Template.Spec.Containers[0]), "changed_by": changedBy})),
+			Payload:    mustJSON(k.withGitOps(new, map[string]any{"new_mem_limit": memoryLimit(new.Spec.Template.Spec.Containers[0]), "old_mem_limit": memoryLimit(old.Spec.Template.Spec.Containers[0]), "changed_by": changedBy, "from_template_hash": fromTemplate, "to_template_hash": toTemplate})),
 		})
 	}
 
@@ -380,7 +398,7 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 			Type:       "config_change",
 			Severity:   "info",
 			Title:      fmt.Sprintf("%s configuration changed (%s)", new.Name, strings.Join(changed, ", ")),
-			Payload:    mustJSON(k.withGitOps(new, map[string]any{"changed": changed, "changed_by": changedBy, "from_hash": configFingerprint(old), "to_hash": configFingerprint(new)})),
+			Payload:    mustJSON(k.withGitOps(new, map[string]any{"changed": changed, "changed_by": changedBy, "from_hash": configFingerprint(old), "to_hash": configFingerprint(new), "from_template_hash": fromTemplate, "to_template_hash": toTemplate})),
 		})
 	}
 
@@ -404,6 +422,8 @@ func (k *K8sCollector) diffDeployments(old, new *appsv1.Deployment) {
 // key is added only when there is one, leaving other payloads unchanged.
 func (k *K8sCollector) withGitOps(d *appsv1.Deployment, payload map[string]any) map[string]any {
 	if manager := graph.GitOpsManager(d.Labels, d.Annotations, k.Applications); manager != "" {
+		payload["gitops"] = manager
+	} else if manager := graph.ReleaseController(d.Name, d.OwnerReferences, d.Labels, d.Annotations); manager != "" {
 		payload["gitops"] = manager
 	}
 	return payload

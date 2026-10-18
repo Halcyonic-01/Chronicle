@@ -201,10 +201,21 @@ func report(t *testing.T, label string, rows []healRow) {
 		}
 	}
 	names := make([]string, 0, len(byRule))
+	var unmeasured []string
 	for n := range byRule {
+		// A rule whose remedy the benchmark has no judgement for cannot be scored:
+		// "wrong" would only mean "unlabelled". revert-bad-config is one: it acts
+		// on a Deployment's config change from revision evidence these fixtures
+		// predate, and the same cause type on a ConfigMap has no remedy at all.
+		// It is tested against real revisions instead (see internal/heal/README.md).
+		if rule := ruleNamed(n); rule != nil && appropriateAction[rule.CauseType] == "" {
+			unmeasured = append(unmeasured, n)
+			continue
+		}
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	sort.Strings(unmeasured)
 	floors := []float64{0.5, 0.65, 0.8, 0.85, 0.9, 0.95}
 	fmt.Fprintf(&sb, "  precision of each rule's proposals as its confidence floor moves (proposals n / precision):\n")
 	fmt.Fprintf(&sb, "    %-30s shipped", "rule")
@@ -231,6 +242,10 @@ func report(t *testing.T, label string, rows []healRow) {
 			fmt.Fprintf(&sb, " %3d/%-6s", n1, ratio(ok, n1))
 		}
 		fmt.Fprintln(&sb)
+	}
+
+	if len(unmeasured) > 0 {
+		fmt.Fprintf(&sb, "  not scored here (no remedy judgement in the fixtures): %s\n", strings.Join(unmeasured, ", "))
 	}
 
 	// How often a confidence is right, across every incident that has a cause.
@@ -276,4 +291,13 @@ func TestHealingBenchmark(t *testing.T) {
 	if !NewEngine(&memoryAudit{}).DryRun {
 		t.Fatal("the engine must default to dry-run")
 	}
+}
+
+func ruleNamed(name string) *Rule {
+	for i := range defaultRules {
+		if defaultRules[i].Name == name {
+			return &defaultRules[i]
+		}
+	}
+	return nil
 }

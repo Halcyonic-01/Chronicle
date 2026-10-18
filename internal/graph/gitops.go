@@ -3,6 +3,8 @@ package graph
 import (
 	"strings"
 	"sync"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // KnownApplication reports whether name is an Argo CD Application that Argo CD
@@ -66,6 +68,41 @@ func GitOpsManager(labels, annotations map[string]string, known KnownApplication
 	}
 	if app := labels["app.kubernetes.io/instance"]; app != "" && known != nil && known(app) {
 		return "argocd:" + app
+	}
+	return ""
+}
+
+// ReleaseController names a progressive-delivery controller that owns a
+// workload's releases and rollbacks ("argo-rollouts:<name>", "flagger:<name>"),
+// or "" when none is evident. Such a controller decides what runs and when to
+// roll back; a competing rollback from Chronicle would fight it.
+//
+// Detected by owner reference (an Argo Rollouts Rollout, a Flagger Canary), by
+// annotation or label prefix, and by Flagger's documented "<name>-primary"
+// naming. This is conservative by design (a match only ever means "hands off")
+// and has not been verified against a live Argo Rollouts or Flagger install.
+func ReleaseController(name string, owners []metav1.OwnerReference, labels, annotations map[string]string) string {
+	for _, o := range owners {
+		group, _, _ := strings.Cut(o.APIVersion, "/")
+		switch {
+		case group == "argoproj.io" && o.Kind == "Rollout":
+			return "argo-rollouts:" + o.Name
+		case group == "flagger.app" && o.Kind == "Canary":
+			return "flagger:" + o.Name
+		}
+	}
+	for _, set := range []map[string]string{annotations, labels} {
+		for key := range set {
+			switch {
+			case strings.HasPrefix(key, "rollout.argoproj.io/"), strings.HasPrefix(key, "rollouts.argoproj.io/"):
+				return "argo-rollouts:" + name
+			case strings.HasPrefix(key, "flagger.app/"):
+				return "flagger:" + name
+			}
+		}
+	}
+	if strings.HasSuffix(name, "-primary") {
+		return "flagger:" + strings.TrimSuffix(name, "-primary")
 	}
 	return ""
 }

@@ -728,3 +728,107 @@ func TestPostgresRecordsTheVerifiedApprover(t *testing.T) {
 		t.Fatalf("a shared-token decision carries an identity: %+v", got)
 	}
 }
+
+// Finding 24: a second analysis of the same incident gets the decision that was
+// written, not the ID of a row that never was.
+func TestPostgresADuplicateIncidentReturnsTheWinnersDecision(t *testing.T) {
+	s, pool, sx := healTestStore(t)
+	ctx, now := context.Background(), time.Now().UTC()
+	first := proposal("dup-a-"+sx, "c-dup-"+sx, "redis", now)
+	first.IncidentID = "inc-shared-" + sx
+	second := proposal("dup-b-"+sx, "c-dup2-"+sx, "worker", now.Add(time.Second))
+	second.IncidentID = first.IncidentID
+	if err := s.RecordAction(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	err := s.RecordAction(ctx, second)
+	if !errors.Is(err, ErrAlreadyRecorded) {
+		t.Fatalf("got %v, want ErrAlreadyRecorded", err)
+	}
+	if second.ID != first.ID || second.Target != "redis" || second.State != "pending_approval" {
+		t.Fatalf("the caller was not given the existing decision: id=%s target=%s state=%s", second.ID, second.Target, second.State)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM heal_actions WHERE incident_id=$1`, first.IncidentID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("expected one row, got %d (%v)", n, err)
+	}
+	got, err := s.ActionForIncident(ctx, first.IncidentID)
+	if err != nil || got.ID != first.ID {
+		t.Fatalf("ActionForIncident: %+v, %v", got, err)
+	}
+	if _, err := s.ActionForIncident(ctx, "inc-none-"+sx); !errors.Is(err, ErrActionNotFound) {
+		t.Fatalf("an unknown incident: %v", err)
+	}
+}
+
+// Two analyses racing for one incident: one row, and both callers end up
+// holding it.
+func TestPostgresConcurrentAnalysesOfOneIncidentAgree(t *testing.T) {
+	s, _, sx := healTestStore(t)
+	ctx, now := context.Background(), time.Now().UTC()
+	ids := make(chan string, 8)
+	for i := 0; i < 8; i++ {
+		go func(i int) {
+			a := proposal(fmt.Sprintf("race-%d-%s", i, sx), fmt.Sprintf("c-race-%d-%s", i, sx), "redis", now)
+			a.IncidentID = "inc-race-" + sx
+			if err := s.RecordAction(ctx, a); err != nil && !errors.Is(err, ErrAlreadyRecorded) {
+				t.Error(err)
+			}
+			ids <- a.ID
+		}(i)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		seen[<-ids] = true
+	}
+	if len(seen) != 1 {
+		t.Fatalf("callers ended up with %d different decisions: %v", len(seen), seen)
+	}
+}
+
+// The revision history, from recorded change events: which revisions a workload
+// ran, and whether each ran healthily, against the real SQL.
+func TestPostgresRevisionHistoryAndHealthyPeriods(t *testing.T) {
+	s, pool, sx := healTestStore(t)
+	ctx := context.Background()
+	workload := "rev-" + sx[:12]
+	now := time.Now().UTC().Truncate(time.Second)
+	insert := func(id string, at time.Time, kind, name, typ, severity, payload string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO events (id,occurred_at,ingested_at,source,namespace,entity_kind,entity_name,type,severity,title,payload)
+			VALUES ($1,$2,$2,'test','default',$3,$4,$5,$6,$5,$7)`, id, at, kind, name, typ, severity, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	step := func(id string, at time.Time, from, to, typ string) {
+		insert(id+"-"+sx, at, "Deployment", workload, typ, "info", `{"from_template_hash":"`+from+`","to_template_hash":"`+to+`"}`)
+	}
+	// X -> A at -120m, A -> B at -60m (a deploy and a config change: one edit), B -> C (the bad one) now.
+	step("s1", now.Add(-120*time.Minute), "X", "A", "deploy")
+	step("s2", now.Add(-60*time.Minute), "A", "B", "deploy")
+	step("s2b", now.Add(-60*time.Minute), "A", "B", "config_change")
+	step("s3", now, "B", "C", "deploy")
+	// A failed while it ran; B had one only in the rollout that brought it in.
+	insert("f1-"+sx, now.Add(-90*time.Minute), "Pod", workload+"-6d79-abc", "became_unready", "warning", `{}`)
+	insert("f2-"+sx, now.Add(-59*time.Minute), "Pod", workload+"-7f9c-xyz", "became_unready", "warning", `{}`)
+	// Another workload's failure must not count against this one.
+	insert("f3-"+sx, now.Add(-30*time.Minute), "Pod", workload+"x-1-abc", "became_unready", "warning", `{}`)
+
+	prior, err := s.PriorRevisions(ctx, "default", workload, "C", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prior) != 3 || prior[0].Hash != "B" || prior[1].Hash != "A" || prior[2].Hash != "X" {
+		t.Fatalf("chain %+v", prior)
+	}
+	min := 30 * time.Minute
+	for i, want := range []struct {
+		ok       bool
+		contains string
+	}{{true, "without a recorded failure"}, {false, "a failure was recorded"}, {false, "less than"}} {
+		ok, why, err := s.RanHealthily(ctx, "default", workload, prior[i], min)
+		if err != nil || ok != want.ok || !strings.Contains(why, want.contains) {
+			t.Errorf("revision %s: %v %q %v, want %v containing %q", prior[i].Hash, ok, why, err, want.ok, want.contains)
+		}
+	}
+}

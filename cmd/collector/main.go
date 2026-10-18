@@ -345,7 +345,11 @@ func main() {
 			// re-checks every gate before acting. It also expires stale
 			// decisions, so it runs even while live healing is off.
 			leaderGroup.Go(func() error {
-				worker := heal.NewController(heal.NewPostgresAuditStore(pool), newExecutor())
+				workerStore := heal.NewPostgresAuditStore(pool)
+				worker := heal.NewController(workerStore, newExecutor())
+				// After a successful action, check the symptom really cleared. It
+				// re-reads the metric the alert fired on, and runs on the leader only.
+				worker.Symptoms = heal.NewSymptomCheckerFromEnv(workerStore, heal.NewPromProbe(promClient))
 				return worker.Run(leaderCtx, 5*time.Second)
 			})
 

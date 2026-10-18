@@ -330,3 +330,38 @@ func TestAHelmReleaseIsNotRecordedAsGitOpsManaged(t *testing.T) {
 		t.Fatalf("a real Argo CD application should be recorded, got %+v", ev)
 	}
 }
+
+// Every change event names the whole template before and after: what a rollback
+// must match exactly. An env-only change leaves the first image untouched, which
+// is why the image was never enough.
+func TestChangeEventsCarryTheWholeTemplateBeforeAndAfter(t *testing.T) {
+	env := func(v string) corev1.EnvVar { return corev1.EnvVar{Name: "REDIS_URL", Value: v} }
+	deploy := emittedBy(deployment("api:1", env("redis:6379")), deployment("api:2", env("redis:6379")))
+	config := emittedBy(deployment("api:1", env("redis:6379")), deployment("api:1", env("redis-typo:6379")))
+	for name, events := range map[string][]event.Event{"deploy": deploy, "config_change": config} {
+		if len(events) != 1 {
+			t.Fatalf("%s: %+v", name, events)
+		}
+		from, to := gjsonString(events[0], "from_template_hash"), gjsonString(events[0], "to_template_hash")
+		if from == "" || to == "" || from == to {
+			t.Fatalf("%s: template hashes %q -> %q", name, from, to)
+		}
+	}
+	// The hash of the "after" of one change is the "before" of the next.
+	first := emittedBy(deployment("api:1"), deployment("api:2"))[0]
+	second := emittedBy(deployment("api:2"), deployment("api:3"))[0]
+	if gjsonString(first, "to_template_hash") != gjsonString(second, "from_template_hash") {
+		t.Fatal("consecutive changes do not chain: a revision history cannot be rebuilt")
+	}
+}
+
+// A workload a rollout controller owns is stamped, so healing never proposes a
+// competing rollback.
+func TestAReleaseControllerOwnedDeployIsRecordedAsManaged(t *testing.T) {
+	old, new := deployment("api:1"), deployment("api:2")
+	new.OwnerReferences = []metav1.OwnerReference{{APIVersion: "argoproj.io/v1alpha1", Kind: "Rollout", Name: "api-rollout"}}
+	events := emittedBy(old, new)
+	if len(events) != 1 || gjsonString(events[0], "gitops") != "argo-rollouts:api-rollout" {
+		t.Fatalf("got %+v", events)
+	}
+}

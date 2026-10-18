@@ -20,6 +20,8 @@ What it adds to `deploy/chronicle`:
 | `HEAL_LIVE_ENABLED` / `HEAL_KILL_SWITCH` | `false` / `true` | `true` / `false` | the point of the environment |
 | `HEAL_OBSERVATION_STARTED_AT` | first decision | `2026-01-01T00:00:00Z` | a new cluster has no 30-day history |
 | `HEAL_MIN_DECISIVE_DECISIONS` / `HEAL_MIN_PRECISION` | `20` / `0.80` | `0` / `0` | nor any labelled outcomes |
+| `HEAL_ROLLBACK_MIN_HEALTHY` | `30m` | `90s` | a revision must have run healthily this long before a rollback returns to it; the campaign changes the same workloads every few minutes |
+| `HEAL_RESTART_EXECUTION_ENABLED` / `_UNREADY_FOR` / `_QUIET` | `false` / `5m` / `10m` | `true` / `60s` / `2m` | restarts are proposal-only in the base; here they run, after a pod has been unready for a minute rather than five |
 | `HEAL_TARGET_COOLDOWN` | `30m` | `10m` | the campaign tests the cooldown once, then needs the workload again |
 | `rollback-bad-deploy` / `restore-scaled-down-workload` hourly caps | `1` / `2` | `3` / `6` | the campaign runs two rollbacks and three restores within an hour; the caps count across targets |
 

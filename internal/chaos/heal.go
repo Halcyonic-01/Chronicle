@@ -24,6 +24,9 @@ type HealExpectation struct {
 	// Expect is the final state: succeeded, failed, blocked, denied, or none
 	// (no proposal should exist, e.g. a cause no rule acts on).
 	Expect string `json:"expect"`
+	// Symptom, when set, is the verdict of the post-action symptom check
+	// (succeeded, failed or unknown) the execution must end with.
+	Symptom string `json:"symptom,omitempty"`
 	// Reason, when set, must appear in the result or error: "blocked" by the
 	// confidence floor is not "blocked" by the cooldown.
 	Reason string `json:"reason,omitempty"`
@@ -59,6 +62,11 @@ type HealOutcome struct {
 	// restored anything, so the remediation alone fixed the outage.
 	HealedWithoutRestore bool    `json:"healed_without_restore"`
 	HealedAfter          float64 `json:"healed_after_seconds,omitempty"`
+
+	// SymptomCheck is what the check concluded after the action: did the alert
+	// clear and stay clear. Empty when no check ran (nothing succeeded).
+	SymptomCheck  string `json:"symptom_check,omitempty"`
+	SymptomDetail string `json:"symptom_detail,omitempty"`
 
 	Matches bool   `json:"matches_expectation"`
 	Problem string `json:"problem,omitempty"`
@@ -155,6 +163,9 @@ type Healer struct {
 	Approver, NonApprover TokenSource
 	// Terminal bounds the wait for the worker to finish (execution plus verify).
 	Terminal time.Duration
+	// SymptomWait bounds the wait for the symptom check after a success (zero:
+	// do not wait). It must outlast the checker's improve window plus its hold.
+	SymptomWait time.Duration
 }
 
 var terminalStates = map[string]bool{
@@ -186,7 +197,8 @@ func (r *Runner) heal(ctx context.Context, out *Outcome, want HealExpectation) *
 	h := &HealOutcome{Expected: want}
 	defer func() {
 		h.Matches = h.Problem == "" && h.Final == want.Expect &&
-			(want.Reason == "" || strings.Contains(h.Result+" "+h.Error, want.Reason))
+			(want.Reason == "" || strings.Contains(h.Result+" "+h.Error, want.Reason)) &&
+			(want.Symptom == "" || h.SymptomCheck == want.Symptom)
 	}()
 	action, err := r.findProposal(ctx, out)
 	if err != nil {
@@ -260,12 +272,41 @@ func (r *Runner) heal(ctx context.Context, out *Outcome, want HealExpectation) *
 		}
 	}
 	if h.Final == heal.StatusSucceeded {
+		// How long recovery took, measured before the symptom check's hold. With a
+		// check to follow, a symptom that never clears must not stall the run for
+		// the full steady-state timeout.
+		wait := r.Config.SteadyTimeout
+		if r.Healer.SymptomWait > 0 && wait > 3*time.Minute {
+			wait = 3 * time.Minute
+		}
 		start := r.now()
-		ok, why := waitSteady(ctx, r.Steady, r.Config.SteadyTimeout, r.Config.Poll, 15*time.Second, r.now, r.sleep)
+		ok, why := waitSteady(ctx, r.Steady, wait, r.Config.Poll, 15*time.Second, r.now, r.sleep)
 		h.HealedWithoutRestore, h.HealedAfter = ok, r.now().Sub(start).Seconds()
-		if !ok {
+		if r.Healer.SymptomWait > 0 {
+			// The harness must not restore while the check is still measuring, or
+			// it would be judging the harness's own repair.
+			h.SymptomCheck, h.SymptomDetail = r.awaitSymptomCheck(ctx, action.ID)
+		}
+		if !ok && h.SymptomCheck != heal.SymptomFailed {
 			h.Problem = "the remediation succeeded but the steady state did not return: " + why
 		}
 	}
 	return h
+}
+
+// awaitSymptomCheck polls until the check leaves "pending", or the wait ends.
+func (r *Runner) awaitSymptomCheck(ctx context.Context, id string) (verdict, detail string) {
+	deadline := r.now().Add(r.Healer.SymptomWait)
+	for {
+		if current, err := r.findProposal(ctx, &Outcome{ProposalID: id}); err == nil && current != nil &&
+			current.SymptomCheck != "" && current.SymptomCheck != heal.SymptomPending {
+			return current.SymptomCheck, current.SymptomDetail
+		}
+		if !r.now().Before(deadline) {
+			return heal.SymptomPending, "the check did not conclude in time"
+		}
+		if err := r.sleep(ctx, r.Config.Poll); err != nil {
+			return heal.SymptomPending, "interrupted"
+		}
+	}
 }

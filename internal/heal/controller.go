@@ -38,6 +38,10 @@ type Policy struct {
 	// is the least time between two actions on one workload.
 	MaxExecutionsPerHour int
 	TargetCooldown       time.Duration
+	// RestartExecutionEnabled lets restart_pod run. Off, a restart is proposed and
+	// approved like any decision but never executed: it stays proposal-only until
+	// the restart path has passed safety testing (HEAL_RESTART_EXECUTION_ENABLED).
+	RestartExecutionEnabled bool
 }
 
 // EvidenceSummary is what the observation period actually produced. Unknown
@@ -66,18 +70,19 @@ func (e EvidenceSummary) Precision() float64 {
 
 func PolicyFromEnv() Policy {
 	return Policy{
-		LiveEnabled:          os.Getenv("HEAL_LIVE_ENABLED") == "true",
-		KillSwitch:           os.Getenv("HEAL_KILL_SWITCH") != "false",
-		AllowedNamespaces:    csvSet(os.Getenv("HEAL_ALLOWED_NAMESPACES")),
-		AllowedActions:       csvSet(os.Getenv("HEAL_ALLOWED_ACTIONS")),
-		AllowedTargets:       csvSet(os.Getenv("HEAL_ALLOWED_TARGETS")),
-		Timeout:              durationEnv("HEAL_ACTION_TIMEOUT", 30*time.Second),
-		VerifyTimeout:        durationEnv("HEAL_VERIFY_TIMEOUT", 3*time.Minute),
-		ObservationSince:     timeEnv("HEAL_OBSERVATION_STARTED_AT"),
-		MinDecisive:          intEnv("HEAL_MIN_DECISIVE_DECISIONS", 20),
-		MinPrecision:         floatEnv("HEAL_MIN_PRECISION", 0.80),
-		MaxExecutionsPerHour: intEnv("HEAL_MAX_EXECUTIONS_PER_HOUR", 3),
-		TargetCooldown:       durationEnv("HEAL_TARGET_COOLDOWN", 30*time.Minute),
+		LiveEnabled:             os.Getenv("HEAL_LIVE_ENABLED") == "true",
+		KillSwitch:              os.Getenv("HEAL_KILL_SWITCH") != "false",
+		AllowedNamespaces:       csvSet(os.Getenv("HEAL_ALLOWED_NAMESPACES")),
+		AllowedActions:          csvSet(os.Getenv("HEAL_ALLOWED_ACTIONS")),
+		AllowedTargets:          csvSet(os.Getenv("HEAL_ALLOWED_TARGETS")),
+		Timeout:                 durationEnv("HEAL_ACTION_TIMEOUT", 30*time.Second),
+		VerifyTimeout:           durationEnv("HEAL_VERIFY_TIMEOUT", 3*time.Minute),
+		ObservationSince:        timeEnv("HEAL_OBSERVATION_STARTED_AT"),
+		MinDecisive:             intEnv("HEAL_MIN_DECISIVE_DECISIONS", 20),
+		MinPrecision:            floatEnv("HEAL_MIN_PRECISION", 0.80),
+		MaxExecutionsPerHour:    intEnv("HEAL_MAX_EXECUTIONS_PER_HOUR", 3),
+		TargetCooldown:          durationEnv("HEAL_TARGET_COOLDOWN", 30*time.Minute),
+		RestartExecutionEnabled: os.Getenv("HEAL_RESTART_EXECUTION_ENABLED") == "true",
 	}
 }
 
@@ -85,6 +90,9 @@ type Controller struct {
 	Store    ExecutionStore
 	Executor Executor
 	Notifier Notifier
+	// Symptoms, when set, checks after every successful action that the
+	// symptom actually cleared. Optional: without it nothing changes.
+	Symptoms *SymptomChecker
 	Policy   Policy
 	// Rules are the current ones: a decision is re-checked against today's
 	// floor, not the one it was planned under.
@@ -142,6 +150,14 @@ func (c *Controller) rule(name string) *Rule {
 	return nil
 }
 
+// NotYet is returned for an approved decision that is not yet eligible to run.
+// Nothing was claimed or changed; the decision stays approved.
+type NotYet struct{ Until time.Time }
+
+func (n *NotYet) Error() string {
+	return fmt.Sprintf("not eligible until %s", n.Until.UTC().Format(time.RFC3339))
+}
+
 // ExecuteApproved runs one approved decision. It is default-deny: every check
 // is repeated here, the claim enforces the limits atomically, and any refusal
 // is final -- a blocked decision is never executed later.
@@ -162,6 +178,22 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 	}
 	if reason := c.Revalidate(ctx, action); reason != "" {
 		return block(reason)
+	}
+	// An approved decision that is not yet eligible stays approved and is looked at
+	// again on the next pass; it expires with its approval if it never becomes so.
+	if gate, ok := c.Executor.(interface {
+		NotBefore(context.Context, *Action) (time.Time, error)
+	}); ok {
+		notBefore, err := gate.NotBefore(ctx, action)
+		var declined *Refusal
+		switch {
+		case errors.As(err, &declined):
+			return block(declined.Reason)
+		case err != nil:
+			return action, err
+		case c.now().Before(notBefore):
+			return action, &NotYet{Until: notBefore}
+		}
 	}
 	rule := c.rule(action.Rule)
 	workload := action.Workload
@@ -227,12 +259,32 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 			verification = "executor completed; no verifier configured"
 		}
 	}
-	if execErr != nil {
+	var declined *Refusal
+	switch {
+	case errors.As(execErr, &declined):
+		// The executor declined: the cluster no longer matches the decision.
+		// Nothing was changed, so this is a refusal, not a failed execution.
+		action.Status, action.Result, action.Error = StatusBlocked, declined.Reason, declined.Reason
+		if refuser, ok := c.Store.(interface {
+			RefuseExecution(context.Context, string, string) error
+		}); ok {
+			_ = refuser.RefuseExecution(ctx, action.ID, declined.Reason)
+		} else {
+			_ = c.Store.CompleteExecution(ctx, action.ID, StatusBlocked, declined.Reason, declined.Reason, "")
+		}
+	case execErr != nil:
 		action.Status, action.Error, action.Result = StatusFailed, execErr.Error(), "execution failed"
 		_ = c.Store.CompleteExecution(ctx, action.ID, StatusFailed, action.Result, action.Error, verification)
-	} else {
+	default:
 		action.Status, action.Result, action.Verification = StatusSucceeded, result, verification
 		_ = c.Store.CompleteExecution(ctx, action.ID, StatusSucceeded, result, "", verification)
+		if c.Symptoms != nil {
+			if err := c.Symptoms.Begin(ctx, action.ID, c.now()); err != nil {
+				slog.Warn("could not start the symptom check", "action", action.ID, "err", err)
+			} else {
+				action.SymptomCheck = SymptomPending
+			}
+		}
 	}
 	if c.Notifier != nil {
 		if err := c.Notifier.Notify(context.Background(), action); err != nil {
@@ -262,6 +314,13 @@ func (c *Controller) Tick(ctx context.Context) error {
 	} else if n > 0 {
 		slog.Warn("closed interrupted healing executions", "rows", n)
 	}
+	// Checks follow executions that already happened, so they run even when live
+	// healing has since been turned off.
+	if c.Symptoms != nil {
+		if err := c.Symptoms.Pass(ctx, now); err != nil {
+			slog.Error("symptom check pass failed", "err", err)
+		}
+	}
 	if !c.Policy.LiveEnabled {
 		return nil
 	}
@@ -274,6 +333,11 @@ func (c *Controller) Tick(ctx context.Context) error {
 			return ctx.Err()
 		}
 		if _, err := c.ExecuteApproved(ctx, &approved[i]); err != nil {
+			var waiting *NotYet
+			if errors.As(err, &waiting) {
+				slog.Debug("an approved healing action is not yet eligible", "action", approved[i].ID, "until", waiting.Until)
+				continue
+			}
 			slog.Warn("healing action did not run", "action", approved[i].ID, "err", err)
 		}
 	}
@@ -410,6 +474,9 @@ func (p Policy) Allows(a *Action) error {
 	// line above ignored the list entirely.
 	if !executableActions[a.ActionType] {
 		return fmt.Errorf("action type %q cannot be executed: it has no verified executor", a.ActionType)
+	}
+	if a.ActionType == ActionRestartPod && !p.RestartExecutionEnabled {
+		return fmt.Errorf("restart_pod is proposal-only: it will not run until HEAL_RESTART_EXECUTION_ENABLED=true, after the restart path has passed safety testing")
 	}
 	if !p.LiveEnabled {
 		return fmt.Errorf("live healing is disabled")

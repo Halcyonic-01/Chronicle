@@ -113,6 +113,22 @@ type Analysis struct {
 	Alternatives []string `json:"alternatives,omitempty"`
 	Provisional  bool     `json:"provisional"`
 	Outcome      string   `json:"outcome"`
+	// What the score was made of, for the leading candidates: the evidence needed
+	// to say why a diagnosis was or was not confident (see repeated outages).
+	Strength   float64          `json:"strength,omitempty"`
+	Separation float64          `json:"separation,omitempty"`
+	Trace      []CandidateTrace `json:"trace,omitempty"`
+}
+
+// CandidateTrace is one ranked candidate and the factors behind its score.
+type CandidateTrace struct {
+	Type     string       `json:"type"`
+	Entity   string       `json:"entity"`
+	Score    float64      `json:"score"`
+	Distance int          `json:"distance"`
+	Reverts  string       `json:"reverts,omitempty"`
+	NotRoot  string       `json:"not_root,omitempty"`
+	Factors  []rca.Factor `json:"factors"`
 }
 
 // Outcome is everything measured about one experiment.
@@ -445,6 +461,14 @@ func (r *Runner) analyse(ctx context.Context, c eval.Case, s rca.Signal) (Analys
 	a := Analysis{Symptom: symptomOf(s), Verdict: res.Verdict, Confidence: res.Confidence, Provisional: res.Provisional, Outcome: row.Outcome, Top: row.Top, Alternatives: row.Alternatives}
 	if len(a.Top) > 3 {
 		a.Top = a.Top[:3]
+	}
+	a.Strength, a.Separation = res.Strength, res.Separation
+	for i, c := range res.Candidates {
+		if i == 5 {
+			break
+		}
+		a.Trace = append(a.Trace, CandidateTrace{Type: c.Event.Type, Entity: c.Event.EntityName, Score: c.Score, Distance: c.Distance,
+			Reverts: c.Reverts, NotRoot: c.NotRoot, Factors: c.Factors})
 	}
 	return a, res, action, nil
 }

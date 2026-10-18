@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+. scripts/kube-context.sh
+
 kubectl apply -f deploy/chronicle/namespace.yaml
 
 ui_manifest="$(mktemp)"

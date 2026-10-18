@@ -1,5 +1,9 @@
 .PHONY: rca-benchmark rca-benchmark-baseline setup teardown migrate build-chronicle deploy-chronicle deploy-ui test-phase4 test-phase5-kind chaos-list chaos-plan chaos-run chaos-report kyverno-test kyverno-live-test
 
+# Every cluster-changing target acts on this context, and only kind-* is accepted.
+KUBE_CONTEXT ?= kind-chronicle
+KUBE_GUARD = $(if $(filter kind-%,$(KUBE_CONTEXT)),,$(error refusing KUBE_CONTEXT=$(KUBE_CONTEXT): local kind clusters only))
+
 POSTGRES_URL ?= postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable
 
 setup:
@@ -15,7 +19,7 @@ deploy-victim:
 	@echo "Loading image into kind..."
 	@kind load docker-image chronicle-victim:latest --name chronicle
 	@echo "Deploying victim application..."
-	@kubectl apply -f deploy/victim/
+	$(KUBE_GUARD)@kubectl --context $(KUBE_CONTEXT) apply -f deploy/victim/
 
 migrate:
 	@for migration in migrations/*.sql; do \

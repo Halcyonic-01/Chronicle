@@ -3,6 +3,8 @@ package graph
 import (
 	"sync"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestGitOpsManagerReadsOnlyControllerSpecificMarkers(t *testing.T) {
@@ -83,4 +85,32 @@ func TestApplicationSetIsSafeForConcurrentUse(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestReleaseControllerDetection(t *testing.T) {
+	owner := func(group, kind, name string) []metav1.OwnerReference {
+		return []metav1.OwnerReference{{APIVersion: group + "/v1", Kind: kind, Name: name}}
+	}
+	cases := []struct {
+		name        string
+		workload    string
+		owners      []metav1.OwnerReference
+		labels      map[string]string
+		annotations map[string]string
+		want        string
+	}{
+		{"argo rollout owner", "api", owner("argoproj.io", "Rollout", "api"), nil, nil, "argo-rollouts:api"},
+		{"flagger canary owner", "api-primary", owner("flagger.app", "Canary", "api"), nil, nil, "flagger:api"},
+		{"rollout annotation", "api", nil, nil, map[string]string{"rollout.argoproj.io/revision": "3"}, "argo-rollouts:api"},
+		{"flagger annotation", "api", nil, nil, map[string]string{"flagger.app/config-tracking": "x"}, "flagger:api"},
+		{"flagger primary name", "api-primary", nil, nil, nil, "flagger:api"},
+		{"plain deployment", "api", nil, map[string]string{"app": "api"}, nil, ""},
+		{"owned by a ReplicaSet-like kind of another group", "api", owner("apps", "Rollout", "x"), nil, nil, ""},
+		{"a Canary from another group", "api", owner("example.com", "Canary", "x"), nil, nil, ""},
+	}
+	for _, c := range cases {
+		if got := ReleaseController(c.workload, c.owners, c.labels, c.annotations); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
 }

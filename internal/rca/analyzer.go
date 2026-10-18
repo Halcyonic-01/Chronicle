@@ -9,6 +9,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -312,6 +313,11 @@ func (cfg *Config) horizonFor(cause event.Event) time.Duration {
 	return cfg.DefaultHorizon
 }
 
+// eventResolution is the coarsest ordering the sources give: Kubernetes
+// timestamps are whole seconds, so two events in the same second cannot be put
+// in order, and one is not "before" the other.
+const eventResolution = time.Second
+
 // causalTime is when an event actually happened. Ingestion time is how the
 // event store is indexed; it is not when the world changed, and using it for
 // ordering makes causality mean "the order we noticed things".
@@ -506,7 +512,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 		candidates = append(candidates, c)
 	}
 	// Collapse repeats first: the pairwise passes below are quadratic.
-	candidates = collapseRepeats(candidates, hypothesis)
+	candidates = cfg.collapseRepeats(candidates, hypothesis)
 	upstreamOf := make(map[string]map[string]int)
 	reaches := func(from, to string) bool {
 		if local != nil {
@@ -524,6 +530,7 @@ func (a *Analyzer) Analyze(ctx context.Context, symptom event.Event) (*Result, e
 	// Weigh each candidate against the failures actually observed: history is set
 	// aside, then a change that explains none of them is held back.
 	cfg.markRecovered(candidates, raw, impactOf, onset, lifecycleOf)
+	cfg.markResolvedHistory(candidates, raw, impactOf, onset, symptom)
 	cfg.relate(candidates, reaches)
 	cfg.dampUncorroborated(candidates)
 	bridgeToFirstEffect(candidates, onset, decay)
@@ -1017,6 +1024,114 @@ func (cfg *Config) markRecovered(candidates []Candidate, events []event.Event, i
 	}
 }
 
+// markResolvedHistory sets aside an alert, a log line, a failure fact or a status
+// from an incident that had already recovered before this episode began.
+// markRecovered does this for changes and for failure facts on their own scope; what is left
+// of that earlier incident is still in the window, and left as it was it reads
+// as a faint rival of the new cause (separation 0.93 where the same outage with
+// no history scored 1.00).
+//
+// There are two ways an earlier incident is known to have ended, and a
+// candidate needs one of them, with the recovery held (see heldRecovery):
+//   - a recovery of its own kind: an alert by its own resolution, a log line,
+//     which cannot resolve itself, by the next recovery in its scope (as in
+//     recoveredAt);
+//   - the incident around the symptom ended after it. A pod that went unready in
+//     the earlier outage has a scope too small to see the service-level alerts
+//     that show the outage was over; the symptom's scope is the incident's.
+//
+// One alert resolving while another of the same incident still fires sets
+// nothing aside. Failures after a held recovery, including this episode's own
+// early ones, are a new incident and say nothing about the old one.
+func (cfg *Config) markResolvedHistory(candidates []Candidate, events []event.Event, impactOf func(string) map[string]int, onset time.Time, symptom event.Event) {
+	// When the incident around the symptom last recovered before this episode,
+	// if it held: the latest recovery in the symptom's scope after which nothing
+	// there was failing and nothing failed for the flap window. One alert of an
+	// incident resolving while another still fires is not the end of it.
+	var signalEnd time.Time
+	signalScope := impactOf(key(symptom))
+	for _, e := range events {
+		t := causalTime(e)
+		if !t.Before(onset) {
+			break
+		}
+		if _, in := signalScope[key(e)]; in && (isRecovery(e) || strings.HasSuffix(e.Type, "_resolved")) {
+			if cfg.heldRecovery(events, signalScope, t, onset) {
+				signalEnd = t
+			}
+		}
+	}
+	signalHeld := !signalEnd.IsZero()
+	for i := range candidates {
+		c := &candidates[i]
+		// Changes are judged by markRecovered; this is for what a change leaves behind.
+		if c.inert || c.Reverts != "" || changeTypes[c.Event.Type] {
+			continue
+		}
+		at := causalTime(c.Event)
+		if !at.Before(onset) {
+			continue
+		}
+		var recovered time.Time
+		if signalHeld && at.Before(signalEnd) {
+			recovered = signalEnd
+		} else if alertTypes[c.Event.Type] {
+			scope := impactOf(key(c.Event))
+			var lastRecovery time.Time
+			for _, e := range events {
+				t := causalTime(e)
+				if !t.After(at) {
+					continue
+				}
+				if !t.Before(onset) {
+					break
+				}
+				entity := key(e)
+				if _, in := scope[entity]; !in {
+					continue
+				}
+				if isRecovery(e) || strings.HasSuffix(e.Type, "_resolved") {
+					lastRecovery = t
+					if c.Event.Type == "log_error" || (e.Type == c.Event.Type+"_resolved" && entity == key(c.Event)) {
+						recovered = t
+					}
+				}
+			}
+			if recovered.IsZero() || !cfg.heldRecovery(events, scope, lastRecovery, onset) {
+				continue
+			}
+		}
+		if recovered.IsZero() {
+			continue
+		}
+		c.inert = true
+		c.Reasons = append(c.Reasons, fmt.Sprintf("an earlier incident that recovered at %s (×%.2f)", recovered.Format(time.RFC3339), cfg.NonRootFactor))
+		c.applyFactor(Factor{Label: "Recovered", Detail: "the incident it belongs to recovered before this one began", Multiplier: cfg.NonRootFactor})
+	}
+}
+
+// heldRecovery reports whether the incident in scope had recovered by recovery
+// and stayed so for the flap window: nothing still failing just after it, and no
+// failure inside the window. A later failure is a new incident, not a relapse.
+func (cfg *Config) heldRecovery(events []event.Event, scope map[string]int, recovery, onset time.Time) bool {
+	if onset.Sub(recovery) < cfg.FlapWindow || failingAt(events, scope, recovery.Add(time.Millisecond)) {
+		return false
+	}
+	for _, e := range events {
+		t := causalTime(e)
+		if !t.After(recovery) {
+			continue
+		}
+		if !t.Before(recovery.Add(cfg.FlapWindow)) {
+			break
+		}
+		if _, in := scope[key(e)]; in && (alertTypes[e.Type] || failureFacts[e.Type]) && (e.Severity == "warning" || e.Severity == "critical") {
+			return false
+		}
+	}
+	return true
+}
+
 // recoveredAt returns when the failure that followed cause had recovered, if
 // that recovery held for FlapWindow before the next failure (or the onset).
 // Each alert or failure fact closes only by its own recovery; silence closes
@@ -1339,13 +1454,20 @@ func mergeEvents(have, more []event.Event) []event.Event {
 	return have
 }
 
-// collapseRepeats keeps each hypothesis's earliest and best-scoring copy; Occurrences carries the count.
-func collapseRepeats(candidates []Candidate, hypothesis hypothesisCache) []Candidate {
+// collapseRepeats keeps each hypothesis's earliest and best-scoring copy within
+// one episode; Occurrences carries the count. Copies of one hypothesis further
+// apart than that kind of event's own episode gap are different episodes
+// (logs stream while a failure lasts, so a quiet spell means it stopped) and are
+// not merged. Merging them let an earlier outage's copy stand in for the new
+// outage's: the "earliest copy" was the old one, the new outage's first effect
+// was dropped, and a repeat outage scored 0.72 against 0.80 for the same fault.
+func (cfg *Config) collapseRepeats(candidates []Candidate, hypothesis hypothesisCache) []Candidate {
+	episode := cfg.episodeOf(candidates, hypothesis)
 	type group struct{ first, best, count int }
 	groups := make(map[string]*group, len(candidates))
 	order := make([]string, 0, len(candidates))
 	for i, c := range candidates {
-		k := hypothesis.of(c.Event)
+		k := episode[i]
 		g, ok := groups[k]
 		if !ok {
 			groups[k] = &group{first: i, best: i, count: 1}
@@ -1376,6 +1498,36 @@ func collapseRepeats(candidates []Candidate, hypothesis hypothesisCache) []Candi
 		kept = append(kept, first, best)
 	}
 	return kept
+}
+
+// episodeOf names the episode of each candidate's hypothesis: the hypothesis,
+// and a counter that advances whenever two copies are further apart than the
+// episode gap of their kind.
+func (cfg *Config) episodeOf(candidates []Candidate, hypothesis hypothesisCache) []string {
+	byHypothesis := make(map[string][]int, len(candidates))
+	var order []string
+	for i, c := range candidates {
+		k := hypothesis.of(c.Event)
+		if _, seen := byHypothesis[k]; !seen {
+			order = append(order, k)
+		}
+		byHypothesis[k] = append(byHypothesis[k], i)
+	}
+	out := make([]string, len(candidates))
+	for _, k := range order {
+		idx := byHypothesis[k]
+		sort.SliceStable(idx, func(a, b int) bool {
+			return causalTime(candidates[idx[a]].Event).Before(causalTime(candidates[idx[b]].Event))
+		})
+		n := 0
+		for j, i := range idx {
+			if j > 0 && causalTime(candidates[i].Event).Sub(causalTime(candidates[idx[j-1]].Event)) > cfg.episodeGapFor(candidates[i].Event) {
+				n++
+			}
+			out[i] = k + "#" + strconv.Itoa(n)
+		}
+	}
+	return out
 }
 
 // contested reports whether any candidate is a rival of the leader rather than
@@ -1682,7 +1834,13 @@ func revertingChanges(events []event.Event, affected func(target string) map[str
 		if !seen || last.from != to || last.to != from {
 			continue // not a there-and-back pair with the change right before it
 		}
-		if failingAt(events, affected(target), e.IngestedAt) {
+		// Was the target already failing when the change was made? Judged at the
+		// change's own time, not when it was noticed, and not counting its own
+		// consequences: Kubernetes stamps whole seconds, so the pod a scale to zero
+		// kills is warned about in the same second as the scale itself, and judged at
+		// ingestion that warning came "before" and made the new fault look like a
+		// repair of a failure it had just caused.
+		if failingAt(events, affected(target), causalTime(e).Add(-eventResolution)) {
 			reverts[e.ID] = last.id
 		}
 	}
@@ -1723,9 +1881,18 @@ func isRecovery(e event.Event) bool {
 // ready again. A deleted resource therefore closes its own episode — whatever
 // was unhealthy no longer exists.
 //
+// A log line is the exception: it has no recovery of its own, so a pod that
+// logged an error would otherwise stay "failing" for ever. Log-only failures end
+// at the next recovery in scope, as recoveredAt already treats them. Without
+// this, an incident that had recovered still read as failing, and the next,
+// unrelated fault was taken for a repair of it and demoted (a repeat outage
+// scored 0.38 where the first scored 0.81). A failure with a signal of its own
+// (an alert, a pod going unready) is still closed only by its own recovery.
+//
 // Events must be in ascending time order, which EventsBetween guarantees.
 func failingAt(events []event.Event, scope map[string]int, at time.Time) bool {
 	failing := make(map[string]bool)
+	logOnly := make(map[string]bool) // failing only because of a log line
 	for _, e := range events {
 		if !causalTime(e).Before(at) {
 			break
@@ -1737,8 +1904,18 @@ func failingAt(events []event.Event, scope map[string]int, at time.Time) bool {
 		switch {
 		case e.Type == "resource_deleted", isRecovery(e):
 			delete(failing, entity)
+			delete(logOnly, entity)
+			for k := range logOnly {
+				delete(failing, k)
+				delete(logOnly, k)
+			}
+		case e.Type == "log_error":
+			if !failing[entity] {
+				failing[entity], logOnly[entity] = true, true
+			}
 		case e.Severity == "warning" || e.Severity == "critical":
 			failing[entity] = true
+			delete(logOnly, entity)
 		}
 	}
 	return len(failing) > 0
