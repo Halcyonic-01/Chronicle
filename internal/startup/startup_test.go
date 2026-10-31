@@ -30,7 +30,7 @@ func TestAClusterNeverUsesTheBuiltInDatabasePassword(t *testing.T) {
 }
 
 func TestProductionNeedsAnAPITokenAndRealApproversForLiveHealing(t *testing.T) {
-	base := []string{"CHRONICLE_ENVIRONMENT", "production", "POSTGRES_URL", "postgres://x"}
+	base := []string{"CHRONICLE_ENVIRONMENT", "production", "POSTGRES_URL", "postgres://x?sslmode=require"}
 	got := Problems(env(base...))
 	if len(got) != 1 || !strings.Contains(got[0], "CHRONICLE_API_TOKEN") {
 		t.Fatalf("no token: %v", got)
@@ -49,5 +49,73 @@ func TestProductionNeedsAnAPITokenAndRealApproversForLiveHealing(t *testing.T) {
 	// Everything wrong is reported at once, not one fix at a time.
 	if got := Problems(env("CHRONICLE_ENVIRONMENT", "production", "HEAL_LIVE_ENABLED", "true")); len(got) != 3 {
 		t.Fatalf("%v", got)
+	}
+}
+
+func TestProductionRefusesADatabaseConnectionThatCanFallBackToPlainText(t *testing.T) {
+	prod := func(url string) []string {
+		return Problems(env("CHRONICLE_ENVIRONMENT", "production", "POSTGRES_URL", url, "CHRONICLE_API_TOKEN", "t"))
+	}
+	for _, ok := range []string{"postgres://u:p@h/db?sslmode=require", "postgres://u:p@h/db?sslmode=verify-full", "postgres://u:p@h/db?sslmode=verify-ca"} {
+		if got := prod(ok); len(got) != 0 {
+			t.Errorf("%s was refused: %v", ok, got)
+		}
+	}
+	for _, bad := range []string{"postgres://u:p@h/db", "postgres://u:p@h/db?sslmode=disable", "postgres://u:p@h/db?sslmode=prefer", "postgres://u:p@h/db?sslmode=allow"} {
+		if got := prod(bad); len(got) != 1 || !strings.Contains(got[0], "sslmode") {
+			t.Errorf("%s: %v", bad, got)
+		}
+	}
+	// The message names the mode but never the password.
+	if got := prod("postgres://u:hunter2@h/db?sslmode=disable"); len(got) != 1 || strings.Contains(got[0], "hunter2") {
+		t.Errorf("a credential leaked into the message: %v", got)
+	}
+	// Outside production a laptop or a kind cluster may use plain text.
+	if got := Problems(env("POSTGRES_URL", "postgres://u:p@localhost/db?sslmode=disable")); len(got) != 0 {
+		t.Errorf("development was refused: %v", got)
+	}
+}
+
+func TestASchemaNameMustBeAPlainIdentifier(t *testing.T) {
+	for _, bad := range []string{`x"; drop schema public; --`, "Chronicle", "pg_catalog", "a b"} {
+		if got := Problems(env("POSTGRES_SCHEMA", bad)); len(got) != 1 || !strings.Contains(got[0], "POSTGRES_SCHEMA") {
+			t.Errorf("%q: %v", bad, got)
+		}
+	}
+	if got := Problems(env("POSTGRES_SCHEMA", "chronicle")); len(got) != 0 {
+		t.Errorf("%v", got)
+	}
+}
+
+func TestWarningsNameTheSupabasePitfalls(t *testing.T) {
+	direct := "postgresql://postgres:pw@db.abcdefgh.supabase.co:5432/postgres"
+	session := "postgresql://postgres.abcdefgh:pw@aws-0-eu-west-1.pooler.supabase.com:5432/postgres"
+	transaction := "postgresql://postgres.abcdefgh:pw@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+	has := func(ws []string, want string) bool {
+		for _, w := range ws {
+			if strings.Contains(w, want) {
+				return true
+			}
+		}
+		return false
+	}
+	if ws := Warnings(env("POSTGRES_URL", direct)); !has(ws, "IPv6") || !has(ws, "POSTGRES_SCHEMA") {
+		t.Errorf("direct host: %v", ws)
+	}
+	if ws := Warnings(env("POSTGRES_URL", transaction, "POSTGRES_SCHEMA", "chronicle")); len(ws) != 1 || !has(ws, "transaction pooler") {
+		t.Errorf("transaction pooler: %v", ws)
+	}
+	if ws := Warnings(env("POSTGRES_URL", session, "POSTGRES_SCHEMA", "chronicle")); len(ws) != 0 {
+		t.Errorf("the recommended setup produced warnings: %v", ws)
+	}
+	if ws := Warnings(env("POSTGRES_URL", "postgres://u:p@postgres.internal:5432/db")); len(ws) != 0 {
+		t.Errorf("an ordinary database produced warnings: %v", ws)
+	}
+	for _, ws := range [][]string{Warnings(env("POSTGRES_URL", direct)), Warnings(env("POSTGRES_URL", transaction))} {
+		for _, w := range ws {
+			if strings.Contains(w, "pw@") || strings.Contains(w, ":pw") {
+				t.Errorf("a credential leaked into a warning: %s", w)
+			}
+		}
 	}
 }

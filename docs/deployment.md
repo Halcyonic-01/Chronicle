@@ -45,6 +45,33 @@ Keep from the base: two replicas, read-only RBAC, `HEAL_LIVE_ENABLED=false`,
 `HEAL_KILL_SWITCH=true`. **Do not include `deploy/heal-executor`**: those are the
 write permissions, and dry-run does not need them.
 
+## Using Supabase (or another managed PostgreSQL)
+
+Chronicle needs ordinary PostgreSQL 16 or newer, so Supabase works. Four things differ
+from a plain database; the first is a security matter.
+
+| What | Why it matters | What to do |
+|---|---|---|
+| **Use a schema of its own** | Supabase can publish `public` through its REST API, and every table created there automatically gives the `anon`, `authenticated` and `service_role` roles full access, with row-level security off. Chronicle's events, decisions and approver identities would be readable and writable by anyone holding the project's public `anon` key. | Set `POSTGRES_SCHEMA=chronicle` (the production overlay does). The migrate init container creates it; Chronicle selects it on every connection. Nothing goes in `public`, and the API roles have no access to the new schema. Set it **before the first start**: tables already in `public` are not moved. |
+| **Do not use the direct host from a cluster** | `db.<ref>.supabase.co` has only an IPv6 address. A laptop may reach it; containers and most Kubernetes clusters (kind, typical EKS) cannot. | Use the **session pooler** from the dashboard (Connect): `aws-0-<region>.pooler.supabase.com:5432`, user `postgres.<ref>`. |
+| **Never the transaction pooler** | Port 6543 does not keep session state. The migration runner holds a session-level advisory lock and Chronicle relies on prepared statements. | Port 5432 of the pooler (session mode). Chronicle logs a warning at start-up if it sees 6543. |
+| **TLS and connection limits** | Without `sslmode` the driver may fall back to plain text. Supabase allows few connections (60 on small plans) and every replica has its own pool. | `?sslmode=require` in `POSTGRES_URL` (Chronicle refuses to start in production without it); `POSTGRES_MAX_CONNS=5` per replica (the production overlay sets it). |
+
+**Verified on a real Supabase project (2026-11-01), through both the direct host and
+the session pooler (`aws-0-eu-north-1.pooler.supabase.com:5432`):** all 18 migrations
+apply twice in a dedicated schema through the init-container script, 7 tables land
+there and none in `public`, and the API roles can neither use the schema nor read the
+tables. Chronicle's own code works through the pooler: every pooled connection is in
+the schema, two approvers are counted once each (also when they approve at the same
+instant), and six workers racing for one decision produce exactly one claim. The pooler
+has an IPv4 address and a container could reach it, which the direct host does not allow.
+Not verified: Chronicle running as a pod against Supabase, the transaction pooler (it is
+refused by design), and what the project's Data API exposes.
+
+Latency matters too: a query from a distant laptop took about 280 ms, and one
+analysis makes many. Run Chronicle in the same region as the database. The password
+goes in the secret manager (`chronicle/postgres`), never in Git.
+
 ## Secrets
 
 Chronicle reads two Kubernetes Secrets: `chronicle-config` (API token, Slack and

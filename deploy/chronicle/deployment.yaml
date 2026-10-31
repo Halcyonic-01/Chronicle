@@ -51,16 +51,31 @@ spec:
                   key: postgres-password
             - name: POSTGRES_URL
               value: postgres://postgres:$(POSTGRES_PASSWORD)@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
+            # Chronicle's schema; empty keeps the database's default (public).
+            # Must equal the same setting on the chronicle container.
+            - name: POSTGRES_SCHEMA
+              value: ""
           command: ["/bin/sh", "-ec"]
           args:
             - |
               until pg_isready -d "$POSTGRES_URL"; do sleep 2; done
+              # The name is checked before anything runs, and reaches SQL only as a
+              # plain identifier.
+              case "${POSTGRES_SCHEMA:-}" in
+                *[!a-z0-9_]*|[0-9]*|pg_*) echo "invalid POSTGRES_SCHEMA" >&2; exit 1 ;;
+              esac
               # Every replica runs every migration at start-up. One session holds an
               # advisory lock for the whole run, so replicas starting together apply
               # them one after another instead of interleaved (two pods once copied
               # the same outcome labels twice).
               {
                 echo "SELECT pg_advisory_lock(7429001);"
+                # Inside the same session, so the lock covers it: create the schema
+                # and select it for every migration that follows.
+                if [ -n "${POSTGRES_SCHEMA:-}" ]; then
+                  echo "CREATE SCHEMA IF NOT EXISTS \"$POSTGRES_SCHEMA\";"
+                  echo "SET search_path TO \"$POSTGRES_SCHEMA\";"
+                fi
                 for migration in /migrations/*.sql; do
                   printf '\\echo Applying %s\n' "$migration"
                   cat "$migration"
@@ -96,6 +111,15 @@ spec:
                   key: postgres-password
             - name: POSTGRES_URL
               value: postgres://postgres:$(POSTGRES_PASSWORD)@postgres-postgresql.chronicle.svc.cluster.local:5432/postgres?sslmode=disable
+            # Where Chronicle's tables live. Empty: the default schema (public). On a
+            # managed database that publishes public (Supabase) set a schema of
+            # its own; it must equal the migrate init container's.
+            - name: POSTGRES_SCHEMA
+              value: ""
+            # Most connections one replica may hold. Empty: the driver's default.
+            # Managed databases allow few, and every replica holds its own pool.
+            - name: POSTGRES_MAX_CONNS
+              value: ""
             - name: PROMETHEUS_URL
               value: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
             - name: LOKI_URL

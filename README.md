@@ -226,7 +226,8 @@ ones that matter most:
 
 | Variable | Purpose |
 |---|---|
-| `POSTGRES_URL` | The database. Required in a cluster and in production. |
+| `POSTGRES_URL` | The database. Required in a cluster and in production, where it must use `sslmode=require` or stronger. |
+| `POSTGRES_SCHEMA`, `POSTGRES_MAX_CONNS` | A schema of its own for Chronicle's tables (use one on Supabase, which publishes `public` through an API), and a cap on each replica's connections. See [docs/deployment.md](docs/deployment.md). |
 | `CHRONICLE_API_TOKEN` | Bearer token for `/api/*`. Required in production. |
 | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_ALLOWED_GROUPS` | Approver sign-in. Required for live healing in production. |
 | `HEAL_LIVE_ENABLED`, `HEAL_KILL_SWITCH`, `HEAL_ALLOWED_*` | The master switches and allowlists for healing. |

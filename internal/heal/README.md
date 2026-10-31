@@ -163,6 +163,7 @@ own checks.
 | `HEAL_MAX_EXECUTIONS_PER_HOUR` | `3` | Global cap across rules (0 = none) |
 | `HEAL_TARGET_COOLDOWN` | `30m` | Least time between two actions on one workload |
 | `HEAL_GIT_REMEDIATION_ENABLED`, `HEAL_GIT_TOKEN`, `HEAL_GIT_API_URL`, `HEAL_GIT_ALLOWED_REPOS` | off / unset | Git-based remediation for Argo CD and Flux workloads; see *GitOps-aware healing* |
+| `POSTGRES_SCHEMA` / `POSTGRES_MAX_CONNS` | empty / driver default | Chronicle's schema (created at start-up, selected on every connection) and each replica's connection cap; see *Using Supabase* in `docs/deployment.md` |
 | `METRICS_ADDR` / `API_ADDR` / `API_REQUEST_TIMEOUT` | `:9102` / `:8181` / `60s` | Metrics port (no token), API and console address, and the longest an API request may take |
 | `HEAL_ROLLBACK_MIN_HEALTHY` | `30m` | A revision must have run this long without a recorded failure before a rollback returns to it; otherwise an older verified revision is named, or none |
 | `HEAL_RESTART_EXECUTION_ENABLED` | `false` | `restart_pod` is proposed and approved but never executed until this is `true` |

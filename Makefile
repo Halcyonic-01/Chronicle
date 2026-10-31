@@ -4,6 +4,7 @@
 KUBE_CONTEXT ?= kind-chronicle
 KUBE_GUARD = $(if $(filter kind-%,$(KUBE_CONTEXT)),,$(error refusing KUBE_CONTEXT=$(KUBE_CONTEXT): local kind clusters only))
 
+POSTGRES_SCHEMA ?=
 POSTGRES_URL ?= postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable
 
 setup:
@@ -21,10 +22,13 @@ deploy-victim:
 	@echo "Deploying victim application..."
 	$(KUBE_GUARD)@kubectl --context $(KUBE_CONTEXT) apply -f deploy/victim/
 
+# POSTGRES_SCHEMA, when set, is created and selected first, so nothing lands in public.
 migrate:
+	@case "$(POSTGRES_SCHEMA)" in *[!a-z0-9_]*|[0-9]*|pg_*) echo "invalid POSTGRES_SCHEMA" >&2; exit 1;; esac
+	@if [ -n "$(POSTGRES_SCHEMA)" ]; then psql "$(POSTGRES_URL)" -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS "$(POSTGRES_SCHEMA)"'; fi
 	@for migration in migrations/*.sql; do \
 		echo "Applying $$migration"; \
-		psql "$(POSTGRES_URL)" -v ON_ERROR_STOP=1 -f "$$migration"; \
+		{ [ -z "$(POSTGRES_SCHEMA)" ] || echo 'SET search_path TO "$(POSTGRES_SCHEMA)";'; cat "$$migration"; } | psql "$(POSTGRES_URL)" -v ON_ERROR_STOP=1 -f -; \
 	done
 
 build-chronicle:

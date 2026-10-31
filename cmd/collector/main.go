@@ -93,20 +93,22 @@ func main() {
 		}
 		os.Exit(1)
 	}
+	for _, w := range startup.Warnings(os.Getenv) {
+		slog.Warn(w)
+	}
 	pgURL := os.Getenv("POSTGRES_URL")
 	if pgURL == "" {
 		// Only a laptop reaches here (startup.Problems refused the rest).
 		pgURL = "postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable"
 	}
-	poolConfig, err := pgxpool.ParseConfig(pgURL)
+	// POSTGRES_SCHEMA puts Chronicle's tables in a schema of their own (and out of
+	// public, which managed databases such as Supabase publish through an API);
+	// POSTGRES_MAX_CONNS bounds each replica's pool.
+	poolConfig, err := store.PoolConfig(pgURL, os.Getenv("POSTGRES_SCHEMA"), intFromEnv("POSTGRES_MAX_CONNS", 0))
 	if err != nil {
-		slog.Error("invalid POSTGRES_URL", "err", err)
+		slog.Error("invalid database configuration", "err", err)
 		os.Exit(1)
 	}
-	// An unreachable database must fail a connection in seconds, not after the
-	// operating system gives up on the dial.
-	poolConfig.ConnConfig.ConnectTimeout = 5 * time.Second
-	poolConfig.HealthCheckPeriod = 30 * time.Second
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		slog.Error("failed to connect to postgres", "err", err)

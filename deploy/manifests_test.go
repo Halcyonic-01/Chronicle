@@ -270,6 +270,12 @@ func TestMigrationInitContainerSerializesAndStopsOnError(t *testing.T) {
 			if !strings.Contains(script, "-v ON_ERROR_STOP=1") {
 				t.Error("a failing migration must stop the run")
 			}
+			if !strings.Contains(script, "CREATE SCHEMA IF NOT EXISTS") || !strings.Contains(script, "SET search_path TO") {
+				t.Error("the schema must be created and selected inside the same session as the migrations")
+			}
+			if strings.Index(script, "invalid POSTGRES_SCHEMA") > strings.Index(script, "| psql") {
+				t.Error("the schema name must be validated before the pipeline that runs SQL starts")
+			}
 			if strings.Contains(script, `-f "$migration"`) {
 				t.Error("applying each file in its own psql session lets replicas interleave")
 			}
@@ -667,4 +673,105 @@ func TestTheProductionOverlayIsDryRunAndComplete(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The migrate init container creates the schema and the chronicle container reads
+// it; if they disagree the tables are made in one place and queried in another.
+// Every manifest that sets the schema sets it identically on both.
+func TestTheSchemaIsTheSameForMigrationsAndForChronicle(t *testing.T) {
+	for _, path := range []string{"chronicle/deployment.yaml", "production/env.yaml"} {
+		var values = map[string]string{}
+		for _, doc := range documents(t, path) {
+			var d struct {
+				Kind string `json:"kind"`
+				Spec struct {
+					Template struct {
+						Spec struct {
+							InitContainers []struct {
+								Name string                         `json:"name"`
+								Env  []struct{ Name, Value string } `json:"env"`
+							} `json:"initContainers"`
+							Containers []struct {
+								Name string                         `json:"name"`
+								Env  []struct{ Name, Value string } `json:"env"`
+							} `json:"containers"`
+						} `json:"spec"`
+					} `json:"template"`
+				} `json:"spec"`
+			}
+			if err := yaml.Unmarshal(doc, &d); err != nil || d.Kind != "Deployment" {
+				continue
+			}
+			for _, c := range d.Spec.Template.Spec.InitContainers {
+				for _, e := range c.Env {
+					if e.Name == "POSTGRES_SCHEMA" {
+						values["migrate"] = e.Value
+					}
+				}
+			}
+			for _, c := range d.Spec.Template.Spec.Containers {
+				for _, e := range c.Env {
+					if e.Name == "POSTGRES_SCHEMA" {
+						values["chronicle"] = e.Value
+					}
+				}
+			}
+		}
+		migrate, okM := values["migrate"]
+		chronicle, okC := values["chronicle"]
+		if !okM || !okC {
+			t.Errorf("%s: POSTGRES_SCHEMA must be set on both the migrate init container and the chronicle container (migrate %v, chronicle %v)", path, okM, okC)
+		}
+		if migrate != chronicle {
+			t.Errorf("%s: the migrate container uses schema %q and chronicle uses %q", path, migrate, chronicle)
+		}
+	}
+	prod, err := os.ReadFile("production/env.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`POSTGRES_SCHEMA, value: chronicle`).Match(prod) {
+		t.Error("the production overlay must give Chronicle a schema of its own: public is published by managed databases such as Supabase")
+	}
+}
+
+// Kubernetes expands $(VAR) only from variables listed before it, and a
+// kustomize patch lists its own entries first. A URL ahead of the password goes
+// to the database with the literal "$(POSTGRES_PASSWORD)" as the password.
+func TestThePasswordIsListedBeforeTheURLThatUsesIt(t *testing.T) {
+	for _, path := range []string{"chronicle/deployment.yaml", "production/env.yaml"} {
+		for _, doc := range documents(t, path) {
+			var d struct {
+				Kind string `json:"kind"`
+				Spec struct {
+					Template struct {
+						Spec struct {
+							InitContainers []envList `json:"initContainers"`
+							Containers     []envList `json:"containers"`
+						} `json:"spec"`
+					} `json:"template"`
+				} `json:"spec"`
+			}
+			if err := yaml.Unmarshal(doc, &d); err != nil || d.Kind != "Deployment" {
+				continue
+			}
+			all := append(d.Spec.Template.Spec.InitContainers, d.Spec.Template.Spec.Containers...)
+			for _, c := range all {
+				pw := -1
+				for i, e := range c.Env {
+					switch {
+					case e.Name == "POSTGRES_PASSWORD":
+						pw = i
+					case strings.Contains(e.Value, "$(POSTGRES_PASSWORD)") && pw < 0:
+						t.Errorf("%s: %s lists %s before POSTGRES_PASSWORD, so the password is not expanded", path, c.Name, e.Name)
+					}
+				}
+			}
+		}
+	}
+}
+
+type envList struct {
+	Name string                         `json:"name"`
+	Env  []struct{ Name, Value string } `json:"env"`
 }
