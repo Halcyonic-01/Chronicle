@@ -34,6 +34,11 @@ type workerEnv struct {
 	mu     sync.Mutex
 }
 
+// dbPrecision is the finest time PostgreSQL stores. A clock finer than this does
+// not survive a round trip, so a test comparing what it saved with what it read
+// back would pass on a Mac (microsecond clock) and fail on Linux (nanoseconds).
+const dbPrecision = time.Microsecond
+
 func (e *workerEnv) clock() time.Time { e.mu.Lock(); defer e.mu.Unlock(); return e.now }
 func (e *workerEnv) advance(d time.Duration) {
 	e.mu.Lock()
@@ -71,7 +76,7 @@ func newWorkerEnv(t *testing.T, workloads map[string]int32) *workerEnv {
 		return false, nil, nil
 	})
 
-	e := &workerEnv{t: t, store: store, pool: pool, client: client, sx: sx, now: time.Now().UTC()}
+	e := &workerEnv{t: t, store: store, pool: pool, client: client, sx: sx, now: time.Now().UTC().Truncate(dbPrecision)}
 	targets := map[string]bool{}
 	for name := range workloads {
 		targets["default/"+name] = true
@@ -592,5 +597,19 @@ func TestPostgresASymptomCheckEndsOnceAndKeepsItsFirstImprovement(t *testing.T) 
 	// Once finished, a late improvement report changes nothing.
 	if err := e.store.RecordSymptomImprovement(ctx, a.ID, second.Add(time.Hour)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The environment's clock is at the database's precision, so every time derived
+// from it comes back from PostgreSQL exactly as it went in, on any machine.
+func TestTheWorkerEnvironmentClockSurvivesAPostgresRoundTrip(t *testing.T) {
+	e := newWorkerEnv(t, map[string]int32{"cache": 1})
+	if now := e.clock(); !now.Equal(now.Truncate(dbPrecision)) {
+		t.Fatalf("the test clock %v is finer than PostgreSQL's %v", now, dbPrecision)
+	}
+	e.advance(1500 * time.Millisecond)
+	var back time.Time
+	if err := e.pool.QueryRow(context.Background(), `SELECT $1::timestamptz`, e.clock()).Scan(&back); err != nil || !back.Equal(e.clock()) {
+		t.Fatalf("a time came back as %v, want %v (%v)", back, e.clock(), err)
 	}
 }
