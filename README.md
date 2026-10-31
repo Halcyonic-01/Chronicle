@@ -183,7 +183,8 @@ every time.
   token, without a real database URL, or with live healing but no OIDC.
 
 The measurements, drills and open items are in
-[docs/production-readiness.md](docs/production-readiness.md).
+[docs/production-readiness.md](docs/production-readiness.md); deploying to a real
+cluster with GitOps is in [docs/deployment.md](docs/deployment.md).
 
 ---
 
@@ -313,11 +314,11 @@ Open items in detail: [internal/heal/README.md](internal/heal/README.md)
 | [docs/architecture.md](docs/architecture.md) | The signal-to-remediation path and the tool choices |
 | [internal/heal/README.md](internal/heal/README.md) | Healing safety, configuration, review findings, every hardening round |
 | [docs/production-readiness.md](docs/production-readiness.md) | SLOs, failure drills, scale, open items |
+| [docs/deployment.md](docs/deployment.md) | Deploying to a real cluster with GitOps, in dry-run |
 | [internal/rca/benchdata/README.md](internal/rca/benchdata/README.md) | How RCA accuracy is measured |
 | [internal/chaos/README.md](internal/chaos/README.md) | The fault-injection harness |
 | [deploy/e2e/README.md](deploy/e2e/README.md) | The disposable live-healing environment |
 | [deploy/secrets/README.md](deploy/secrets/README.md) | External secrets and rotation |
-| `docs/chronicle-build-guide.html` | The complete build guide (also as PDF) |
 
 ## License
 

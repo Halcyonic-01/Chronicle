@@ -30,8 +30,10 @@ vendor/
 # macOS
 .DS_Store
 
-# User requested exclusions
-docs/
+# User requested exclusions: the personal build guide stays local; the rest of
+# docs/ is published.
+docs/Chronicle-Build-Guide.pdf
+docs/chronicle-build-guide.html
 /collector
 
 # Intermediate benchmark runs; the kept results are before_*, after_*, holdout_*,
