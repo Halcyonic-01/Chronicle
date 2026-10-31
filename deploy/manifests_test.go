@@ -620,3 +620,51 @@ func TestAlertsReferenceMetricsChronicleExports(t *testing.T) {
 		}
 	}
 }
+
+// The production overlay runs Chronicle in dry-run: it never turns live healing
+// on or the kill switch off, never includes the executor's write permissions, and
+// lists every migration and console file, or a new one would be missing in the
+// cluster.
+func TestTheProductionOverlayIsDryRunAndComplete(t *testing.T) {
+	kust, err := os.ReadFile("production/kustomization.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := os.ReadFile("production/env.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(kust), "\n") {
+		if strings.Contains(line, "heal-executor") && !strings.HasPrefix(strings.TrimSpace(line), "#") &&
+			!strings.Contains(line, "not ../heal-executor") {
+			t.Errorf("the production overlay includes the executor's write permissions: %q", line)
+		}
+	}
+	for _, unsafe := range []string{"HEAL_LIVE_ENABLED", "HEAL_KILL_SWITCH", "HEAL_RESTART_EXECUTION_ENABLED", "HEAL_MIN_DECISIVE_DECISIONS", "HEAL_MIN_PRECISION", "HEAL_OBSERVATION_STARTED_AT"} {
+		if regexp.MustCompile(`name:\s*` + unsafe + `\b`).Match(env) {
+			t.Errorf("the production overlay sets %s; the base default must stand until live healing is decided", unsafe)
+		}
+	}
+	if !regexp.MustCompile(`CHRONICLE_ENVIRONMENT, value: production`).Match(env) {
+		t.Error("the production overlay does not set CHRONICLE_ENVIRONMENT=production, so the start-up refusals are off")
+	}
+	listed := func(dir string) map[string]bool {
+		out := map[string]bool{}
+		for _, m := range regexp.MustCompile(`- \.\./\.\./`+regexp.QuoteMeta(dir)+`/(\S+)`).FindAllStringSubmatch(string(kust), -1) {
+			out[m[1]] = true
+		}
+		return out
+	}
+	for _, dir := range []string{"migrations", "internal/web/static"} {
+		entries, err := os.ReadDir("../" + dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		have := listed(dir)
+		for _, e := range entries {
+			if !e.IsDir() && !have[e.Name()] {
+				t.Errorf("%s/%s is not in the production overlay's ConfigMap", dir, e.Name())
+			}
+		}
+	}
+}

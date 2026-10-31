@@ -6,8 +6,8 @@ watches, diagnoses and proposes, and changes nothing. Turning on live healing is
 later, separate step, described at the end.
 
 > **Not tested here.** The repository's manifests have only run on kind. The
-> production overlay below is an example to adapt: it has not been applied to a
-> real cluster, and neither has the AWS Secrets Manager setup or a managed
+> production overlay below (`deploy/production`) renders and is checked by a test,
+> but it has not been applied to a real cluster, and neither has the AWS Secrets Manager setup or a managed
 > database. Check each step on a non-critical cluster first.
 
 ## What you need
@@ -59,7 +59,10 @@ Chronicle refuses to start without it.
 
 ## Example production overlay
 
-Create `deploy/production/` (it is not in the repository):
+The repository has this overlay in `deploy/production/`, with every value to fill in
+marked `CHANGE-ME` and listed in [its README](../deploy/production/README.md). It
+leaves out Kafka (events go straight to PostgreSQL) and the monitoring manifests
+(they need the Prometheus Operator). In outline:
 
 ```yaml
 # deploy/production/kustomization.yaml

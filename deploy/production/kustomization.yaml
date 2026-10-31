@@ -1,0 +1,53 @@
+# Production overlay: Chronicle in DRY-RUN on a real cluster, synced by GitOps.
+# See deploy/production/README.md for the values to fill in before the first sync.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../chronicle        # not ../heal-executor: dry-run needs no write access
+  - ../secrets/aws      # chronicle-config and postgres-postgresql from AWS Secrets Manager
+  # - ../monitoring     # needs the Prometheus Operator CRDs
+images:
+  - name: chronicle
+    newName: CHANGE-ME.registry.example.com/chronicle
+    newTag: CHANGE-ME-git-sha
+generatorOptions:
+  disableNameSuffixHash: true
+# Both are mounted by the base Deployment. Every migration and console file must
+# be listed (TestTheProductionOverlayIsDryRunAndComplete checks it).
+configMapGenerator:
+  - name: chronicle-migrations
+    namespace: chronicle
+    files:
+      - ../../migrations/001_events.sql
+      - ../../migrations/002_graph.sql
+      - ../../migrations/003_snapshots.sql
+      - ../../migrations/004_heal_actions.sql
+      - ../../migrations/005_heal_approvals_and_payload.sql
+      - ../../migrations/006_heal_execution.sql
+      - ../../migrations/007_graph_edge_maintenance.sql
+      - ../../migrations/008_event_dedupe.sql
+      - ../../migrations/009_heal_outcomes.sql
+      - ../../migrations/010_heal_cause_identity.sql
+      - ../../migrations/011_heal_safety.sql
+      - ../../migrations/012_heal_outcome_history.sql
+      - ../../migrations/013_heal_outcome_relabel_v3.sql
+      - ../../migrations/014_heal_outcome_history_unique.sql
+      - ../../migrations/015_heal_approver_identity.sql
+      - ../../migrations/016_heal_symptom_check.sql
+      - ../../migrations/017_heal_two_approvers.sql
+  - name: chronicle-ui
+    namespace: chronicle
+    files:
+      - ../../internal/web/static/app.css
+      - ../../internal/web/static/app.js
+      - ../../internal/web/static/auth.js
+      - ../../internal/web/static/graph-controls.css
+      - ../../internal/web/static/graph.css
+      - ../../internal/web/static/graph.js
+      - ../../internal/web/static/incidents.js
+      - ../../internal/web/static/index.html
+      - ../../internal/web/static/ops.css
+      - ../../internal/web/static/replay.js
+      - ../../internal/web/static/theme.css
+patches:
+  - path: env.yaml
