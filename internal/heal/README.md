@@ -325,7 +325,7 @@ tested).
 | 23 | Restart rule fires on any unready pod | **Fixed** (not live) | Eligibility is checked at execution: unready 5 min, quiet 10 min, not mid-rollout; until then the approved decision waits (P1 below): `TestARestartWaitsUntilThePodHasBeenUnreadyForFiveMinutes` and the tests beside it |
 | 24 | Duplicate-insert race returns a phantom ID | **Fixed** | `RecordAction` returns the existing decision (`ErrAlreadyRecorded`) and a duplicate is not announced twice: `TestPostgresADuplicateIncidentReturnsTheWinnersDecision`, `TestPostgresConcurrentAnalysesOfOneIncidentAgree`, `TestALostInsertReturnsTheWinnersDecisionAndDoesNotNotify` |
 | 25 | Re-analysis hides the existing decision | **Fixed** | Re-analysis returns the decision already made, with its state: `TestReAnalysisReturnsTheExistingDecision` |
-| 26 | Approver identity is self-declared | **Fixed** (with limits) | OIDC: `TestTheApproverIsTheVerifiedIdentityNotTheBody`, `TestTheSharedTokenStopsWorkingOnceOIDCIsConfigured`, `TestTokensThatDoNotVerifyAreRefused`, `TestPostgresRecordsTheVerifiedApprover`. Not run against a real provider; see *Approver authentication* |
+| 26 | Approver identity is self-declared | **Fixed** (with limits) | OIDC: `TestTheApproverIsTheVerifiedIdentityNotTheBody`, `TestTheSharedTokenStopsWorkingOnceOIDCIsConfigured`, `TestTokensThatDoNotVerifyAreRefused`, `TestPostgresRecordsTheVerifiedApprover`. Run against Keycloak 26.6 in the disposable e2e cluster (real ID tokens; no token got 401 and a non-approver 403 every time); not yet against a production provider. See *Approver authentication* |
 | 27 | Slack failures silent, no action link | **Fixed** | Failures are logged, and a pending decision's message links to the console when `CHRONICLE_PUBLIC_URL` is set and says how many approvers it needs: `TestSlackSaysHowManyApproversAreNeededAndLinksToTheConsole` |
 | 28 | Console claims dry-run regardless of mode | **Fixed** | The banner reads the live, kill-switch, TTL, cap and cooldown values from `/api/heal/rules`. |
 | 29 | RBAC wider than needed | **Fixed** | `TestDefaultRBACGrantsNoWritesOutsideChronicle`, `TestExecutorRBACIsNamespaced` |
@@ -698,9 +698,10 @@ not been deployed. The live harness was extended and not used.
 * **Start-up refusals** (`internal/startup`): a cluster never uses the built-in
   development database URL; production needs `CHRONICLE_API_TOKEN`; live healing
   in production needs OIDC.
-* **Go toolchain**: `go.mod` now pins `toolchain go1.26.9` and the Dockerfiles use
-  `golang:1.26.9-alpine`. `govulncheck` found 30 standard-library vulnerabilities
-  fixed between 1.26.1 and 1.26.9 on the old 1.26.0, and none after.
+* **Go toolchain**: `go.mod` pins `toolchain go1.26.10` and the Dockerfiles use
+  `golang:1.26.10-alpine`. `govulncheck` found 30 standard-library vulnerabilities
+  on the old 1.26.0 (fixed up to 1.26.9), then one more (GO-2026-6809, compromised
+  intermediate certificates in `crypto/x509`) fixed in 1.26.10; none called after.
 * **Unchanged by decision**: the migration runner stays a locked shell loop.
 
 **Not done**: the live check of the two-approver flow (the realm has a second
@@ -735,18 +736,25 @@ row changed, only the source hash.
 
 ## Tracked work
 
-Not fixed, and not claimed as fixed.
+Not fixed, or fixed only in tests, and not claimed as more.
 
 | Item | Why it is open |
 |---|---|
-| Findings 5, 8, 9, 27 | partial; what remains is in the table above |
-| Findings 14, 21-23, 30 | deferred; each needs data or a design decision |
-| An Argo CD Application and a Helm release that share a *name* | the instance label cannot tell them apart; the workload is then treated as Argo-managed, which errs on the side of refusing to write it |
-| The migration runner is a shell loop in an init container | a real migration tool with a version table would replace per-file idempotence |
-| Kyverno policies are tested only on a one-node cluster | webhook latency, Kyverno outages and upgrades are untested |
-| `restart_pod` has never run through RCA live | confirmed again in P1: a deadlocked redis scored 0.36 (five hops upstream, 0.5 type weight), under the 0.80 floor, so the floor refuses; the executor's eviction path is tested against a real API server instead. Lowering the floor is a calibration decision, not made here |
-| Release-controller detection (Argo Rollouts, Flagger) | written from documented ownership and labels; no live installation was available to verify it |
+| Finding 21 | config changes on a Deployment are reverted (`revert-bad-config`); service, node and autoscaler causes still have no rule, and ConfigMap/Secret contents never will |
+| Finding 22 | the reliability table exists, but no action type has the judged outcomes to review its floor, so every floor is unchanged |
+| Finding 26 | OIDC has run against Keycloak only, not a production identity provider |
+| Fixed but never run live: findings 8, 9 and 23, and all of P3 | the memory-bump cap, the maintenance mark, restart eligibility, the two-approver flow, the 5-minute sign-in and the per-action evidence gate are unit, fake-client and PostgreSQL tested only; the P3 build has not been deployed |
+| `restart_pod` has never run through RCA live | a deadlocked redis scored 0.36 (five hops upstream, 0.5 type weight), under the 0.80 floor, so the floor refuses; the executor's eviction path is tested against a real API server instead. Lowering the floor is a calibration decision, not made here |
+| No real-cluster evidence yet | live healing needs 30 days of dry-run observation and 20 judged outcomes per action type at 80% precision; no cluster other than the disposable e2e one has produced any |
 | Live healing runs only in the disposable e2e cluster | `deploy/e2e` waives the observation and evidence gates there; the base manifests keep live off |
+| Release-controller detection (Argo Rollouts, Flagger) | written from documented ownership and labels; no live installation was available to verify it |
+| AWS Secrets Manager | the ESO overlay is written but has not been run (`deploy/secrets/README.md`) |
+| An Argo CD Application and a Helm release that share a *name* | the instance label cannot tell them apart; the workload is then treated as Argo-managed, which errs on the side of refusing to write it |
+| Kyverno policies are tested only on a one-node cluster | webhook latency, Kyverno outages and upgrades are untested |
+| Production readiness | soak, outage drills for the Kubernetes API, OIDC and notifications, and multi-node tests are open; see `docs/production-readiness.md`, "Open" |
+
+The migration runner (a locked shell loop in an init container) is kept by
+decision; it is not an open item.
 
 ## Running the tests
 
