@@ -280,6 +280,12 @@ make kyverno-test                               # admission policies
 HEAL_TEST_KUBE_CONTEXT=kind-kyverno-test go test ./internal/heal -run RealCluster   # against a real API server
 ```
 
+**CI** (`.github/workflows/ci.yml`) runs on every push and pull request: gofmt,
+`go vet`, every test with the race detector against a real PostgreSQL (all
+migrations applied twice, as each pod start does), the Kyverno policy tests,
+`govulncheck`, and both image builds. The GitOps end-to-end test
+(`e2e-gitops.yml`) runs only when started by hand from the Actions tab.
+
 The live suites (the chaos campaign, failure drills and KWOK scale runs) are
 heavy: they need the kind clusters and can saturate a laptop's Docker. Run them
 deliberately; see [internal/chaos/README.md](internal/chaos/README.md) and

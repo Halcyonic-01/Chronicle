@@ -1,0 +1,96 @@
+# Every push and pull request: the checks that hold Chronicle's safety guarantees
+# (dry-run defaults, confidence floors, approval rules, "never push to the watched
+# branch") and keep the code building. The heavy kind end-to-end tests are not run
+# here; see e2e-gitops.yml.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: format, vet, tests (with PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: chronicle_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      CHRONICLE_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/chronicle_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "not gofmt-formatted:"; echo "$unformatted"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: apply every migration, twice (each pod start re-applies them)
+        run: |
+          for pass in 1 2; do
+            for f in migrations/*.sql; do
+              psql "$CHRONICLE_TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+            done
+          done
+      - name: tests (unit, PostgreSQL integration, RCA benchmarks, manifest checks)
+        run: go test -race -count=1 ./...
+
+  kyverno:
+    name: Kyverno policy tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KYVERNO_VERSION: v1.19.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: install the Kyverno CLI (pinned, checksum-verified)
+        run: |
+          asset="kyverno-cli_${KYVERNO_VERSION}_linux_x86_64.tar.gz"
+          base="https://github.com/kyverno/kyverno/releases/download/${KYVERNO_VERSION}"
+          curl -sSfLO "$base/$asset"
+          curl -sSfL -o checksums.txt "$base/checksums.txt"
+          grep " $asset\$" checksums.txt | sha256sum -c -
+          tar -xzf "$asset" kyverno
+          sudo install kyverno /usr/local/bin/kyverno
+      - run: make kyverno-test
+
+  vulnerabilities:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  images:
+    name: container images build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Chronicle
+        run: docker build -t chronicle:ci -f Dockerfile .
+      - name: demo app
+        run: docker build -t chronicle-victim:ci -f victim/Dockerfile .

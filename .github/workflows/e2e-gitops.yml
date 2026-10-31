@@ -1,0 +1,43 @@
+# The GitOps end-to-end test on a throwaway kind cluster inside the runner:
+# a bad commit, Argo CD's sync, Chronicle's diagnosis, approval, pull request,
+# merge, sync and recovery (deploy/e2e-gitops/README.md). About 30 minutes, so it
+# runs only when started by hand.
+name: e2e-gitops
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KIND_VERSION: v0.31.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: install kind (pinned)
+        run: |
+          curl -sSfLo kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          sudo install kind /usr/local/bin/kind
+      - name: build the environment
+        run: scripts/e2e-gitops.sh up
+      - name: run the remediation path
+        run: scripts/e2e-gitops.sh run
+      - name: keep the logs
+        if: always()
+        run: |
+          kubectl --context kind-chronicle-gitops -n chronicle logs deploy/chronicle --tail=400 > chronicle.log 2>&1 || true
+          kubectl --context kind-chronicle-gitops -n argocd get application victim -o yaml > argocd-app.yaml 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-gitops-logs
+          path: |
+            chronicle.log
+            argocd-app.yaml
+      - name: delete the cluster
+        if: always()
+        run: scripts/e2e-gitops.sh down
