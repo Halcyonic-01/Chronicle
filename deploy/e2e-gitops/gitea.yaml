@@ -1,0 +1,36 @@
+# A throwaway Git server for the GitOps end-to-end test: Argo CD syncs from it,
+# Chronicle opens pull requests on it. SQLite, no persistence, no registration.
+apiVersion: v1
+kind: Namespace
+metadata: {name: gitea}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: gitea, namespace: gitea}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: gitea}}
+  template:
+    metadata: {labels: {app: gitea}}
+    spec:
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.24.6-rootless
+          env:
+            - {name: GITEA__database__DB_TYPE, value: sqlite3}
+            - {name: GITEA__security__INSTALL_LOCK, value: "true"}
+            - {name: GITEA__server__ROOT_URL, value: "http://gitea-http.gitea.svc:3000/"}
+            - {name: GITEA__server__HTTP_PORT, value: "3000"}
+            - {name: GITEA__service__DISABLE_REGISTRATION, value: "true"}
+            - {name: GITEA__repository__DEFAULT_PRIVATE, value: public}
+            - {name: GITEA__log__LEVEL, value: warn}
+          ports: [{containerPort: 3000}]
+          readinessProbe: {httpGet: {path: /api/healthz, port: 3000}, periodSeconds: 3}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gitea-http, namespace: gitea}
+spec:
+  selector: {app: gitea}
+  ports: [{port: 3000, targetPort: 3000}]

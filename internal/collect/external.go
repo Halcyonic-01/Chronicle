@@ -56,6 +56,22 @@ func (a *ArgoCollector) poll(ctx context.Context) error {
 				Name      string `json:"name"`
 				Namespace string `json:"namespace"`
 			} `json:"metadata"`
+			// Where the desired state lives, so a Git revert knows what to change.
+			Spec struct {
+				Source *struct {
+					RepoURL        string `json:"repoURL"`
+					Path           string `json:"path"`
+					TargetRevision string `json:"targetRevision"`
+					Chart          string `json:"chart"`
+				} `json:"source"`
+				Sources     []json.RawMessage `json:"sources"`
+				Destination struct {
+					Namespace string `json:"namespace"`
+				} `json:"destination"`
+				SyncPolicy struct {
+					Automated json.RawMessage `json:"automated"`
+				} `json:"syncPolicy"`
+			} `json:"spec"`
 			Status struct {
 				Sync struct {
 					Status   string `json:"status"`
@@ -64,6 +80,19 @@ func (a *ArgoCollector) poll(ctx context.Context) error {
 				Health struct {
 					Status string `json:"status"`
 				} `json:"health"`
+				// When the revision was actually synced: the event must be dated by
+				// that, not by when Chronicle happened to poll, or the sync looks
+				// like it came after the changes it made.
+				OperationState struct {
+					StartedAt  string `json:"startedAt"`
+					SyncResult struct {
+						Revision string `json:"revision"`
+					} `json:"syncResult"`
+				} `json:"operationState"`
+				History []struct {
+					Revision   string `json:"revision"`
+					DeployedAt string `json:"deployedAt"`
+				} `json:"history"`
 			} `json:"status"`
 		} `json:"items"`
 	}
@@ -103,7 +132,21 @@ func (a *ArgoCollector) poll(ctx context.Context) error {
 		revision := app.Status.Sync.Revision
 		if revision != "" && a.seen[key] != revision {
 			a.seen[key] = revision
-			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: graph.ArgoNamespace, Type: "deploy", Severity: "info", Title: fmt.Sprintf("%s synced revision %s", name, shortRevision(revision)), Payload: mustJSON(map[string]any{"revision": revision, "sync_status": app.Status.Sync.Status})})
+			payload := map[string]any{"revision": revision, "sync_status": app.Status.Sync.Status,
+				"destination_namespace": app.Spec.Destination.Namespace,
+				"auto_sync":             len(app.Spec.SyncPolicy.Automated) > 0 && string(app.Spec.SyncPolicy.Automated) != "null",
+				"multi_source":          len(app.Spec.Sources) > 0}
+			if src := app.Spec.Source; src != nil {
+				payload["repo_url"], payload["path"], payload["branch"] = src.RepoURL, src.Path, src.TargetRevision
+				if src.Chart != "" {
+					payload["chart"] = src.Chart // a chart from a Helm repository, not a path in Git
+				}
+			}
+			synced := syncTime(revision, app.Status.OperationState.StartedAt, app.Status.OperationState.SyncResult.Revision, app.Status.History)
+			if !synced.IsZero() {
+				payload["synced_at"] = synced.UTC().Format(time.RFC3339)
+			}
+			a.Emit(event.Event{Source: "argocd", EntityKind: "Application", EntityName: name, Namespace: graph.ArgoNamespace, Type: "deploy", Severity: "info", Title: fmt.Sprintf("%s synced revision %s", name, shortRevision(revision)), OccurredAt: synced, Payload: mustJSON(payload)})
 		}
 		healthKey := name + "/health"
 		health := app.Status.Health.Status
@@ -213,6 +256,28 @@ func durationFromEnv(name string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// syncTime is when Argo CD synced a revision: the running operation's start when
+// it is that revision's, else the history entry's deployment time. Zero when Argo
+// CD does not say (the event is then dated when it was seen).
+func syncTime(revision, startedAt, operationRevision string, history []struct {
+	Revision   string `json:"revision"`
+	DeployedAt string `json:"deployedAt"`
+}) time.Time {
+	if operationRevision == revision {
+		if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
+			return t
+		}
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Revision == revision {
+			if t, err := time.Parse(time.RFC3339, history[i].DeployedAt); err == nil {
+				return t
+			}
+		}
+	}
+	return time.Time{}
 }
 
 func shortRevision(revision string) string {

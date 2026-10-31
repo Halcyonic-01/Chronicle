@@ -52,6 +52,10 @@ type Policy struct {
 	// TwoApprover names the action types that need two distinct approvers
 	// (HEAL_TWO_APPROVER_ACTIONS).
 	TwoApprover map[string]bool
+	// GitRemediationEnabled lets git_revert open pull requests
+	// (HEAL_GIT_REMEDIATION_ENABLED). Off, a Git revert is proposed and can be
+	// approved but nothing is pushed.
+	GitRemediationEnabled bool
 }
 
 // EvidenceSummary is what the observation period actually produced. Unknown
@@ -94,6 +98,7 @@ func PolicyFromEnv() Policy {
 		TargetCooldown:          durationEnv("HEAL_TARGET_COOLDOWN", 30*time.Minute),
 		RestartExecutionEnabled: os.Getenv("HEAL_RESTART_EXECUTION_ENABLED") == "true",
 		TwoApprover:             TwoApproverActionsFromEnv(),
+		GitRemediationEnabled:   os.Getenv("HEAL_GIT_REMEDIATION_ENABLED") == "true",
 	}
 }
 
@@ -112,7 +117,9 @@ type Controller struct {
 	// ApproverStillPermitted, when set, re-checks each approver against today's
 	// allowlist before anything runs (an approver removed since is not honoured).
 	ApproverStillPermitted func(Approval) bool
-	mu                     sync.Mutex
+	// Git follows the pull requests git_revert opened. Optional.
+	Git GitStatusReader
+	mu  sync.Mutex
 }
 
 func NewController(store ExecutionStore, executor Executor) *Controller {
@@ -136,7 +143,9 @@ func (c *Controller) Revalidate(ctx context.Context, action *Action) string {
 		return "the approval expired"
 	}
 	rule := c.rule(action.Rule)
-	if rule == nil || rule.ActionType != action.ActionType {
+	// A rollback of a GitOps-managed workload is carried out as a git_revert.
+	gitopsRollback := rule != nil && rule.ActionType == ActionRollbackDeployment && action.ActionType == ActionGitRevert
+	if rule == nil || (rule.ActionType != action.ActionType && !gitopsRollback) {
 		return fmt.Sprintf("rule %q no longer proposes %s", action.Rule, action.ActionType)
 	}
 	if action.Confidence < rule.MinConfidence {
@@ -297,7 +306,15 @@ func (c *Controller) ExecuteApproved(ctx context.Context, action *Action) (*Acti
 	default:
 		action.Status, action.Result, action.Verification = StatusSucceeded, result, verification
 		_ = c.Store.CompleteExecution(ctx, action.ID, StatusSucceeded, result, "", verification)
-		if c.Symptoms != nil {
+		if action.GitChange != nil {
+			// The pull request is the action's result; the tracker follows it to a
+			// merge and a sync, and starts the symptom check only then.
+			if store, ok := c.Store.(GitChangeStore); ok {
+				if err := store.RecordGitChange(ctx, action.ID, *action.GitChange); err != nil {
+					slog.Error("could not record the pull request on its decision", "action", action.ID, "err", err)
+				}
+			}
+		} else if c.Symptoms != nil {
 			if err := c.Symptoms.Begin(ctx, action.ID, c.now()); err != nil {
 				slog.Warn("could not start the symptom check", "action", action.ID, "err", err)
 			} else {
@@ -339,6 +356,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 	}
 	// Checks follow executions that already happened, so they run even when live
 	// healing has since been turned off.
+	c.trackGitChanges(ctx, now)
 	if c.Symptoms != nil {
 		if err := c.Symptoms.Pass(ctx, now); err != nil {
 			slog.Error("symptom check pass failed", "err", err)
@@ -390,6 +408,7 @@ var executableActions = map[string]bool{
 	ActionRestoreReplicas:    true,
 	ActionBumpMemory:         true,
 	ActionRollbackDeployment: true,
+	ActionGitRevert:          true,
 }
 
 // ObservationStart resolves when the dry-run observation period began.
@@ -514,6 +533,9 @@ func (p Policy) Allows(a *Action) error {
 	// line above ignored the list entirely.
 	if !executableActions[a.ActionType] {
 		return fmt.Errorf("action type %q cannot be executed: it has no verified executor", a.ActionType)
+	}
+	if a.ActionType == ActionGitRevert && !p.GitRemediationEnabled {
+		return fmt.Errorf("git_revert is proposal-only: Chronicle will not open pull requests until HEAL_GIT_REMEDIATION_ENABLED=true")
 	}
 	if a.ActionType == ActionRestartPod && !p.RestartExecutionEnabled {
 		return fmt.Errorf("restart_pod is proposal-only: it will not run until HEAL_RESTART_EXECUTION_ENABLED=true, after the restart path has passed safety testing")

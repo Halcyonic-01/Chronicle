@@ -211,12 +211,23 @@ written to be safe to re-run.
 
 ## How Chronicle behaves with GitOps
 
-A workload that Argo CD manages is never written to by Chronicle: Argo CD would
-undo the change. For those, Chronicle proposes reverting the change in Git
-instead. Give Chronicle `ARGOCD_URL` and `ARGOCD_TOKEN` (read-only) so it knows
-which Applications exist; without them it recognises Argo CD by the tracking
-annotations alone. Workloads run by Argo Rollouts or Flagger are likewise left to
-those controllers.
+A workload that Argo CD or Flux manages is never written to by Chronicle: the
+controller would undo the change. For those, Chronicle's remedy is a **pull
+request** that restores the application's files to the last revision that ran
+healthily; people review and merge it, and the controller syncs it. Workloads run
+by Argo Rollouts or Flagger are left to those controllers.
+
+* Give Chronicle `ARGOCD_URL` and `ARGOCD_TOKEN` (read-only) so it knows which
+  Applications exist and which revision each one synced. Flux needs nothing: it is
+  read through the Kubernetes API.
+* To let Chronicle open pull requests, add `HEAL_GIT_TOKEN` to the
+  `chronicle/config` secret (a token that may push branches and open pull requests
+  on the GitOps repository, nothing more), and set `HEAL_GIT_API_URL`,
+  `HEAL_GIT_USERNAME` and `HEAL_GIT_ALLOWED_REPOS`. Leave
+  `HEAL_GIT_REMEDIATION_ENABLED=false` in dry-run: Git reverts are then proposed and
+  recorded, and nothing is pushed.
+* Protect the watched branch so that merging needs a review. Chronicle never pushes
+  to it, but branch protection makes that a property of the repository too.
 
 ## Before turning on live healing
 

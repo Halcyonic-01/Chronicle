@@ -1642,6 +1642,17 @@ func (cfg *Config) dampPropagation(candidates []Candidate, reaches func(from, to
 	}
 }
 
+// gitopsApplied: a GitOps controller's sync and the change it made to a workload
+// it manages are one intervention seen twice, once as the controller's revision
+// and once as the object it rewrote. Counting them as rival causes split the
+// confidence of every Git-delivered change. Reachability (the graph edge from the
+// Application or Kustomization to the workload) and timing are still required.
+func gitopsApplied(from, to event.Event) bool {
+	sync := from.Type == "deploy" &&
+		(from.Source == "argocd" && from.EntityKind == "Application" || from.Source == "flux" && from.EntityKind == "Kustomization")
+	return sync && to.Source == "k8s"
+}
+
 // sameChain reports whether two candidates are links of one causal chain.
 func sameChain(a, b Candidate) bool {
 	if a.Chain == "" || b.Chain == "" {
@@ -1694,7 +1705,7 @@ func (cfg *Config) linkChains(candidates []Candidate, reaches func(from, to stri
 			// effect of the config change before it. They are rivals, and linking
 			// them hid exactly the ambiguity confidence exists to show. The one
 			// real exception is an autoscaler limit and the scale it causes.
-			if changeTypes[to.Type] && !(from.Type == "hpa_change" && to.Type == "scale" && key(from) == key(to)) {
+			if changeTypes[to.Type] && !(from.Type == "hpa_change" && to.Type == "scale" && key(from) == key(to)) && !gitopsApplied(from, to) {
 				continue
 			}
 			explained[j] = true

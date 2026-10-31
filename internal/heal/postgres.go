@@ -144,6 +144,7 @@ const actionColumns = `id, incident_id, rule, cause_type, action_type, namespace
 	COALESCE(outcome,''), COALESCE(outcome_detail,''), COALESCE(outcome_labeller,''), outcome_at,
 	COALESCE(symptom_check,''), COALESCE(symptom_detail,''), symptom_improved_at, symptom_due_at, symptom_checked_at,
 	approvals_required,
+	COALESCE(git_url,''), COALESCE(git_number,0), COALESCE(git_branch,''), COALESCE(git_commit,''), COALESCE(git_state,''), COALESCE(git_detail,''), git_merged_at, git_synced_at,
 	COALESCE((SELECT json_agg(json_build_object('issuer', p.issuer, 'subject', p.subject, 'display', p.display, 'email', p.email,
 	                                           'groups', to_json(p.groups), 'reason', p.reason, 'at', p.approved_at) ORDER BY p.approved_at)
 	          FROM heal_action_approvals p WHERE p.action_id = heal_actions.id), '[]'::json)`
@@ -151,14 +152,18 @@ const actionColumns = `id, incident_id, rule, cause_type, action_type, namespace
 func scanAction(row pgx.Row) (Action, error) {
 	var a Action
 	var reasoningJSON, relatedJSON, approvalsJSON []byte
+	var g GitChange
 	if err := row.Scan(&a.ID, &a.IncidentID, &a.Rule, &a.CauseType, &a.ActionType, &a.Namespace, &a.Target, &a.Confidence,
 		&reasoningJSON, &a.Status, &a.Result, &a.Error, &a.Approval, &a.Payload, &a.DryRun, &a.CreatedAt,
 		&a.DecisionBy, &a.DecisionIssuer, &a.DecisionSubject, &a.DecisionReason, &a.DecidedAt, &a.StartedAt, &a.FinishedAt, &a.Verification, &a.Attempts,
 		&a.CauseEventID, &a.Workload, &a.Proposed, &a.ExpiresAt, &relatedJSON,
 		&a.Outcome, &a.OutcomeDetail, &a.OutcomeLabeller, &a.OutcomeAt,
 		&a.SymptomCheck, &a.SymptomDetail, &a.SymptomImprovedAt, &a.SymptomDueAt, &a.SymptomCheckedAt,
-		&a.ApprovalsRequired, &approvalsJSON); err != nil {
+		&a.ApprovalsRequired, &g.URL, &g.Number, &g.Branch, &g.Commit, &g.State, &g.Detail, &g.MergedAt, &g.SyncedAt, &approvalsJSON); err != nil {
 		return a, err
+	}
+	if g.URL != "" || g.State != "" {
+		a.GitChange = &g
 	}
 	if err := json.Unmarshal(approvalsJSON, &a.Approvals); err != nil {
 		return a, fmt.Errorf("decode approvals: %w", err)
@@ -879,4 +884,65 @@ func (s *PostgresAuditStore) RanHealthily(ctx context.Context, namespace, worklo
 	}
 	ok, why := judgeRevision(p, observed, failures, min)
 	return ok, why, nil
+}
+
+// GitOpsRevisions lists the revisions a GitOps application deployed, newest
+// first, from the Argo CD and Flux collectors' records.
+func (s *PostgresAuditStore) GitOpsRevisions(ctx context.Context, controller, app string, at time.Time) ([]GitOpsRevision, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT occurred_at, COALESCE(payload->>'revision',''), COALESCE(payload->>'repo_url',''), COALESCE(payload->>'branch',''),
+		       COALESCE(payload->>'path',''), COALESCE(payload->>'destination_namespace',''),
+		       COALESCE(payload->>'auto_sync','') = 'true', COALESCE(payload->>'multi_source','') = 'true',
+		       COALESCE(payload->>'chart',''), COALESCE(payload->>'source_kind',''), COALESCE(payload->>'suspended','') = 'true'
+		FROM events
+		WHERE source = $1 AND entity_name = $2 AND type = 'deploy' AND occurred_at <= $3
+		ORDER BY occurred_at DESC LIMIT 50`, controller, app, at)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GitOpsRevision
+	for rows.Next() {
+		var r GitOpsRevision
+		if err := rows.Scan(&r.At, &r.Revision, &r.RepoURL, &r.Branch, &r.Path, &r.Namespace, &r.AutoSync, &r.MultiSource,
+			&r.Chart, &r.SourceKind, &r.Suspended); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RecordGitChange stores the pull request a git_revert opened.
+func (s *PostgresAuditStore) RecordGitChange(ctx context.Context, id string, g GitChange) error {
+	return s.UpdateGitChange(ctx, id, g)
+}
+
+// UpdateGitChange records a pull request's progress.
+func (s *PostgresAuditStore) UpdateGitChange(ctx context.Context, id string, g GitChange) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE heal_actions SET git_url=NULLIF($2,''), git_number=NULLIF($3,0), git_branch=NULLIF($4,''), git_commit=NULLIF($5,''),
+		       git_state=NULLIF($6,''), git_detail=NULLIF($7,''), git_merged_at=$8, git_synced_at=$9
+		WHERE id=$1`, id, g.URL, g.Number, g.Branch, g.Commit, g.State, g.Detail, g.MergedAt, g.SyncedAt)
+	return err
+}
+
+// PendingGitChanges are the Git remediations still on their way: open, or merged
+// and not yet synced.
+func (s *PostgresAuditStore) PendingGitChanges(ctx context.Context, limit int) ([]Action, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+actionColumns+` FROM heal_actions
+		WHERE action_type = 'git_revert' AND git_state IN ('open','merged') ORDER BY started_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Action
+	for rows.Next() {
+		a, err := scanAction(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }

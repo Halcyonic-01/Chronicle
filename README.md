@@ -120,10 +120,18 @@ final healing campaign.
 | `bump-memory-on-oom` | an OOM kill | raise the memory limit, capped at twice the original | 0.85 | 2 |
 | `restart-deadlocked-pod` | a pod stuck unready | evict it (PodDisruptionBudgets apply) | 0.80 | 1, and **proposal-only** until enabled |
 
-Rollbacks name the exact revision by a hash of the whole pod template, return
-only to a revision Chronicle has seen run healthily (an older one if the
-previous was not), and are never proposed for workloads that Argo CD, Argo
-Rollouts or Flagger manage (those get a "revert in Git" proposal instead).
+Rollbacks name the exact revision by a hash of the whole pod template, and
+return only to a revision Chronicle has seen run healthily (an older one if the
+previous was not).
+
+**GitOps-managed workloads are remediated in Git.** For a workload that Argo CD
+or Flux manages, Chronicle never writes to the cluster: its remedy is a
+`git_revert`, a pull request that restores the application's files to the last
+revision that ran healthily. One approver in Chronicle opens it; a reviewer merges
+it in Git; the controller syncs it; Chronicle then checks the symptom cleared.
+It never pushes to the branch the controller watches, and refuses if the files
+changed in Git since the bad release. Workloads run by Argo Rollouts or Flagger are
+left to those controllers.
 ConfigMap and Secret contents are never reverted: Chronicle does not read them.
 A workload annotated `chronicle.io/maintenance` is not restored.
 
@@ -284,11 +292,13 @@ deliberately; see [internal/chaos/README.md](internal/chaos/README.md) and
 **Works and verified:** collection, the versioned graph, replay, RCA (measured on
 benchmarks and live faults), healing proposals with every refusal recorded, OIDC
 approval, live restore and rollback with recovery and symptom checks on a kind
-cluster, failure drills, simulated scale, and secret rotation on kind.
+cluster, Git-based remediation of an Argo CD workload end to end (bad commit,
+diagnosis, approval, pull request, merge, sync, recovery), failure drills,
+simulated scale, and secret rotation on kind.
 
-**Built and tested, but never run live:** the two-approver flow and 5-minute
-sign-in, the per-action evidence gate, the memory-bump cap, the maintenance
-annotation, and restart eligibility.
+**Built and tested, but never run live:** the per-action evidence gate, the
+memory-bump cap, the maintenance annotation, restart eligibility, and Git-based
+remediation for Flux, GitHub and Forgejo (Argo CD with Gitea is verified).
 
 **Not done or not proven:**
 

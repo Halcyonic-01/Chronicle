@@ -35,6 +35,7 @@ configMapGenerator:
       - ../../migrations/015_heal_approver_identity.sql
       - ../../migrations/016_heal_symptom_check.sql
       - ../../migrations/017_heal_two_approvers.sql
+      - ../../migrations/018_heal_git_changes.sql
   - name: chronicle-ui
     namespace: chronicle
     files:

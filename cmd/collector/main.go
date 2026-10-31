@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -33,6 +34,7 @@ import (
 	"github.com/Halcyonic-01/Chronicle/internal/auth"
 	"github.com/Halcyonic-01/Chronicle/internal/collect"
 	"github.com/Halcyonic-01/Chronicle/internal/event"
+	"github.com/Halcyonic-01/Chronicle/internal/gitops"
 	"github.com/Halcyonic-01/Chronicle/internal/graph"
 	"github.com/Halcyonic-01/Chronicle/internal/heal"
 	"github.com/Halcyonic-01/Chronicle/internal/metrics"
@@ -144,9 +146,19 @@ func main() {
 		argoApps = &graph.ApplicationSet{}
 		knownApplication = argoApps.Has
 	}
+	// Git-based remediation for Argo CD and Flux workloads. Without a token and
+	// an API it is simply not available, and Git reverts are refused at execution.
+	var gitRemediator *gitops.Remediator
+	if cfg, ok := gitops.ConfigFromEnv(); ok {
+		gitRemediator = gitops.New(cfg)
+		slog.Info("Git-based remediation configured", "api", cfg.APIURL, "repositories", len(cfg.AllowedRepos))
+	}
 	newExecutor := func() *heal.KubernetesExecutor {
 		executor := heal.NewKubernetesExecutor(k8sClient)
 		executor.Applications = knownApplication
+		if gitRemediator != nil {
+			executor.Git = gitRemediator
+		}
 		return executor
 	}
 
@@ -216,6 +228,7 @@ func main() {
 						deployments = append(deployments, *d)
 					}
 					allEdges = append(allEdges, graph.BuildArgoEdges(deployments, knownApplication)...)
+					allEdges = append(allEdges, graph.BuildFluxEdges(deployments)...)
 				} else {
 					slog.Warn("failed to read deployments for graph", "err", err)
 				}
@@ -273,6 +286,13 @@ func main() {
 			leaderGroup.Go(func() error { return collect.NewLokiCollector(collectorEvents).Run(leaderCtx) })
 			if argocd := collect.NewArgoCollectorFromEnv(collectorEvents, argoApps); argocd != nil {
 				leaderGroup.Go(func() error { return argocd.Run(leaderCtx) })
+			}
+			// Flux, when installed: the revisions it applies, for Git reverts.
+			if dyn, err := newDynamicClient(); err == nil {
+				flux := collect.NewFluxCollector(dyn, collectorEvents)
+				leaderGroup.Go(func() error { return flux.Run(leaderCtx) })
+			} else {
+				slog.Warn("no dynamic client; the Flux collector is off", "err", err)
 			}
 			if terraform := collect.NewTerraformCollectorFromEnv(collectorEvents); terraform != nil {
 				leaderGroup.Go(func() error { return terraform.Run(leaderCtx) })
@@ -368,6 +388,9 @@ func main() {
 				workerStore := heal.NewPostgresAuditStore(pool)
 				worker := heal.NewController(workerStore, newExecutor())
 				worker.ApproverStillPermitted = approverStillPermitted
+				if gitRemediator != nil {
+					worker.Git = gitRemediator
+				}
 				// After a successful action, check the symptom really cleared. It
 				// re-reads the metric the alert fired on, and runs on the leader only.
 				worker.Symptoms = heal.NewSymptomCheckerFromEnv(workerStore, heal.NewPromProbe(promClient))
@@ -560,20 +583,33 @@ func main() {
 	}
 }
 
-func newK8sClient() (kubernetes.Interface, error) {
+func restConfig() (*rest.Config, error) {
 	config, err := rest.InClusterConfig()
+	if err == nil {
+		return config, nil
+	}
+	// fallback to local kubeconfig for out-of-cluster dev
+	kubeconfig := os.Getenv("KUBECONFIG")
+	if kubeconfig == "" {
+		kubeconfig = os.Getenv("HOME") + "/.kube/config"
+	}
+	return clientcmd.BuildConfigFromFlags("", kubeconfig)
+}
+
+func newK8sClient() (kubernetes.Interface, error) {
+	config, err := restConfig()
 	if err != nil {
-		// fallback to local kubeconfig for out-of-cluster dev
-		kubeconfig := os.Getenv("KUBECONFIG")
-		if kubeconfig == "" {
-			kubeconfig = os.Getenv("HOME") + "/.kube/config"
-		}
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	return kubernetes.NewForConfig(config)
+}
+
+func newDynamicClient() (dynamic.Interface, error) {
+	config, err := restConfig()
+	if err != nil {
+		return nil, err
+	}
+	return dynamic.NewForConfig(config)
 }
 
 func valueOrEnv(name, fallback string) string {

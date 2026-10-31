@@ -215,6 +215,19 @@ spec:
               value: 30m
             - name: HEAL_TWO_APPROVER_ACTIONS
               value: rollback_deployment,bump_memory
+            # Git-based remediation for Argo CD and Flux workloads; off by default.
+            - name: HEAL_GIT_REMEDIATION_ENABLED
+              value: "false"
+            - name: HEAL_GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chronicle-config
+                  key: HEAL_GIT_TOKEN
+                  optional: true
+            - name: HEAL_GIT_API_URL
+              value: ""
+            - name: HEAL_GIT_ALLOWED_REPOS
+              value: ""
             - name: HEAL_MAX_EXECUTIONS_PER_HOUR
               value: "3"
             - name: HEAL_TARGET_COOLDOWN

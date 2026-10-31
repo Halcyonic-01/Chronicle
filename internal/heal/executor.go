@@ -31,6 +31,9 @@ type Executor interface {
 type KubernetesExecutor struct {
 	Client              kubernetes.Interface
 	MaxMemoryMultiplier float64
+	// Git opens the pull request for a git_revert. Without it a Git revert is
+	// refused at execution.
+	Git GitReverter
 	// A restart is for a pod that is stuck, not one that is momentarily unready:
 	// it must have been unready for RestartUnreadyFor, with no container restart in
 	// the last RestartQuiet (HEAL_RESTART_UNREADY_FOR, HEAL_RESTART_QUIET). Initial
@@ -147,11 +150,12 @@ func (e *KubernetesExecutor) refuseGitOps(d *appsv1.Deployment) error {
 }
 
 func (e *KubernetesExecutor) Execute(ctx context.Context, action *Action) (string, error) {
-	if e == nil || e.Client == nil {
-		return "", fmt.Errorf("kubernetes executor requires a client")
-	}
 	if action == nil {
 		return "", fmt.Errorf("action is nil")
+	}
+	// A Git revert changes Git, never the cluster, so it needs no client.
+	if e == nil || (e.Client == nil && action.ActionType != ActionGitRevert) {
+		return "", fmt.Errorf("kubernetes executor requires a client")
 	}
 	if action.DryRun {
 		return "", refuse("refusing to execute a dry-run action")
@@ -164,6 +168,8 @@ func (e *KubernetesExecutor) Execute(ctx context.Context, action *Action) (strin
 		return e.restartPod(ctx, action)
 	case ActionBumpMemory:
 		return e.bumpMemory(ctx, action)
+	case ActionGitRevert:
+		return e.gitRevert(ctx, action)
 	case ActionRollbackDeployment:
 		return e.rollbackDeployment(ctx, action)
 	case ActionRestoreReplicas:
@@ -246,6 +252,10 @@ func (e *KubernetesExecutor) Verify(ctx context.Context, action *Action) (string
 	// A progress-deadline failure older than this is the fault being fixed.
 	since := time.Now().Add(-time.Second)
 	switch action.ActionType {
+	case ActionGitRevert:
+		// Nothing in the cluster has changed yet: the tracker verifies after the
+		// merge and the sync.
+		return "pull request opened; recovery is checked after it is merged and the controller syncs it", nil
 	case ActionRestoreReplicas:
 		// Zero of zero replicas available would otherwise read as recovered.
 		d, err := e.Client.AppsV1().Deployments(action.Namespace).Get(ctx, action.Target, metav1.GetOptions{})

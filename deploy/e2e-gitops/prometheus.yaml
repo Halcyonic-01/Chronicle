@@ -1,0 +1,41 @@
+# Just enough Prometheus for Chronicle's alert rules: the demo apps' own
+# http_requests_total, scraped every 5 s.
+apiVersion: v1
+kind: Namespace
+metadata: {name: monitoring}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus, namespace: monitoring}
+data:
+  prometheus.yml: |
+    global: {scrape_interval: 5s, evaluation_interval: 5s}
+    scrape_configs:
+      - job_name: victim
+        static_configs:
+          - targets: [frontend.default.svc:8080, api.default.svc:8080, worker.default.svc:8080]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prometheus, namespace: monitoring}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: prometheus}}
+  template:
+    metadata: {labels: {app: prometheus}}
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.55.1
+          args: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=2h]
+          ports: [{containerPort: 9090}]
+          volumeMounts: [{name: config, mountPath: /etc/prometheus}]
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+      volumes: [{name: config, configMap: {name: prometheus}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: prometheus, namespace: monitoring}
+spec:
+  selector: {app: prometheus}
+  ports: [{port: 9090, targetPort: 9090}]

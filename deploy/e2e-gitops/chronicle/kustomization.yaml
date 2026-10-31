@@ -1,0 +1,10 @@
+# Disposable kind cluster only (scripts/e2e-gitops.sh). Live healing is on here so
+# the whole path can run; the base keeps it off.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../chronicle
+images:
+  - {name: chronicle, newTag: gitops}
+patches:
+  - path: env.yaml

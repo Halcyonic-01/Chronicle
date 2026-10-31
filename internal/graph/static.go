@@ -149,6 +149,27 @@ func BuildArgoEdges(deployments []appsv1.Deployment, known KnownApplication) []E
 	return dedupeEdges(edges)
 }
 
+// BuildFluxEdges links a Flux Kustomization to the Deployments it applied, from
+// the labels Flux stamps on everything it manages. Without them a Flux sync has
+// no path to the workload it changed.
+func BuildFluxEdges(deployments []appsv1.Deployment) []Edge {
+	var edges []Edge
+	for _, d := range deployments {
+		name, namespace := d.Labels["kustomize.toolkit.fluxcd.io/name"], d.Labels["kustomize.toolkit.fluxcd.io/namespace"]
+		if name == "" || namespace == "" {
+			continue
+		}
+		edges = append(edges, Edge{
+			From:   Node{Kind: "Kustomization", Name: name, Namespace: namespace},
+			To:     Node{Kind: "Deployment", Name: d.Name, Namespace: d.Namespace},
+			Kind:   "owns",
+			Weight: 1,
+			Source: "static",
+		})
+	}
+	return dedupeEdges(edges)
+}
+
 // BuildOwnerEdges builds 'owns' edges from Deployments to Pods.
 func BuildOwnerEdges(pods []corev1.Pod) []Edge {
 	var edges []Edge

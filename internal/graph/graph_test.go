@@ -222,3 +222,17 @@ func TestUpstreamStillFollowsSharedInfrastructure(t *testing.T) {
 		t.Fatal("a mesh outage is a legitimate cause and must stay reachable")
 	}
 }
+
+// A Flux Kustomization owns what it applied, so its sync can explain the change.
+func TestBuildFluxEdgesLinkKustomizationsToWhatTheyApplied(t *testing.T) {
+	managed := appsv1.Deployment{}
+	managed.Name, managed.Namespace = "api", "default"
+	managed.Labels = map[string]string{"kustomize.toolkit.fluxcd.io/name": "apps", "kustomize.toolkit.fluxcd.io/namespace": "flux-system"}
+	plain := appsv1.Deployment{}
+	plain.Name, plain.Namespace = "web", "default"
+	edges := BuildFluxEdges([]appsv1.Deployment{managed, plain})
+	if len(edges) != 1 || edges[0].From.Kind != "Kustomization" || edges[0].From.Name != "apps" || edges[0].From.Namespace != "flux-system" ||
+		edges[0].To.Name != "api" || edges[0].Kind != "owns" {
+		t.Fatalf("%+v", edges)
+	}
+}

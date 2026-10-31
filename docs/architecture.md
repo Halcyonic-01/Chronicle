@@ -57,8 +57,9 @@ flowchart LR
 ```
 
 `*` Optional collectors. When Argo CD is configured, its Application list decides
-which workloads are GitOps-managed (Chronicle then proposes a Git revert and never
-writes).
+which workloads are GitOps-managed. Flux is read through the Kubernetes API when
+it is installed. For those workloads Chronicle never writes to the cluster: it
+remediates in Git, with a pull request (below).
 
 ## The path of one incident
 
@@ -112,12 +113,31 @@ writes).
    `confirmed`, `contradicted` or `unknown`. Those labels feed the evidence
    gate that must be passed before live healing is allowed.
 
+## GitOps-managed workloads
+
+```mermaid
+flowchart LR
+  Bad["Bad commit in Git"] --> Sync1["Argo CD / Flux syncs it"] --> Down["Workload breaks"]
+  Down --> RCA2["RCA names the change"] --> Plan["Engine: git_revert<br/>(good revision = last healthy)"]
+  Plan --> Approve["One approver in Chronicle"] --> PR["Worker opens a pull request<br/>(never pushes to the watched branch)"]
+  PR --> Merge["A reviewer merges it in Git"] --> Sync2["Argo CD / Flux syncs the revert"]
+  Sync2 --> Check["Chronicle sees the sync,<br/>then checks the symptom"]
+```
+
+The collectors record every revision Argo CD or Flux deploys, with its repository,
+branch and path, so the planner knows what was running when things broke and what
+ran healthily before. The pull request restores only that application's files, and
+is refused if anyone changed them in Git since. Workloads nobody manages from Git
+are remediated directly, as before. Details: `internal/heal/README.md`,
+*GitOps-aware healing*.
+
 ## Components kept, replaced or added
 
 | Concern | Choice | Why |
 |---|---|---|
 | RCA | **Kept, custom** | Deterministic, explainable, measured on frozen benchmarks; no off-the-shelf tool does change-aware, topology-aware ranking over this event model |
 | Approver identity | **OIDC via `go-oidc`; Keycloak in the test env** | Standard, provider-agnostic; replaced a shared token and a self-declared name |
+| GitOps remediation | **Pull requests, built with go-git** (pure Go, no `git` binary in the image) on any host with the GitHub pull-request API (GitHub, Gitea, Forgejo) | The desired state stays in Git and the controller stays the only writer; review and merge happen where the team already works |
 | Two-person rule | **Approval rows in PostgreSQL**, counted under a row lock | Distinct people, not distinct clicks; two people approving at once are both counted; no extra service |
 | Restart | **Kubernetes Eviction API** (was a raw delete) | Honours PodDisruptionBudgets; `unhealthyPodEvictionPolicy: AlwaysAllow` lets a deadlocked pod go |
 | Rollback target | **Whole-pod-template hash** (`internal/revision`), judged against recorded failures | The image alone cannot see an env, sidecar or limit change; "the previous revision" is not evidence that it was healthy |

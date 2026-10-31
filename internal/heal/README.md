@@ -162,6 +162,7 @@ own checks.
 | `HEAL_APPROVAL_TTL` | `30m` | Deadline for approval *and* execution |
 | `HEAL_MAX_EXECUTIONS_PER_HOUR` | `3` | Global cap across rules (0 = none) |
 | `HEAL_TARGET_COOLDOWN` | `30m` | Least time between two actions on one workload |
+| `HEAL_GIT_REMEDIATION_ENABLED`, `HEAL_GIT_TOKEN`, `HEAL_GIT_API_URL`, `HEAL_GIT_ALLOWED_REPOS` | off / unset | Git-based remediation for Argo CD and Flux workloads; see *GitOps-aware healing* |
 | `METRICS_ADDR` / `API_ADDR` / `API_REQUEST_TIMEOUT` | `:9102` / `:8181` / `60s` | Metrics port (no token), API and console address, and the longest an API request may take |
 | `HEAL_ROLLBACK_MIN_HEALTHY` | `30m` | A revision must have run this long without a recorded failure before a rollback returns to it; otherwise an older verified revision is named, or none |
 | `HEAL_RESTART_EXECUTION_ENABLED` | `false` | `restart_pod` is proposed and approved but never executed until this is `true` |
@@ -710,6 +711,92 @@ the shortened live suite (3 of its steps remain: `api-bad-release`,
 `worker-restore-blocked-by-quota`, `api-two-bad-releases`); a race-detector run of
 the full suite after these changes. The independent benchmark was re-measured: no
 row changed, only the source hash.
+
+## GitOps-aware healing (2026-10-31)
+
+A workload whose desired state lives in Git (Argo CD or Flux) is remediated **in
+Git**, never in the cluster: a direct write would be undone on the next sync, or
+would leave the cluster drifting from Git. Workloads nobody manages from Git keep
+the direct remediation described above, unchanged.
+
+| Workload | A bad release or config change leads to |
+|---|---|
+| Not GitOps-managed | `rollback_deployment`, as before (exact revision, healthy target) |
+| Managed by Argo CD or Flux, Git source known | **`git_revert`**: a pull request restoring the app's files to the last healthy revision |
+| Managed by Argo CD or Flux, but no earlier revision on record, a Helm chart repository, several sources, or a non-Git Flux source | advice only, not approvable: "revert the change in Git" |
+| Managed by Argo Rollouts or Flagger | advice only: the rollout controller owns rollback |
+| Any of the above, for a stuck pod | `restart_pod` (a restart does not change the desired state) |
+
+**How the revert is chosen.** The Argo CD and Flux collectors record each revision
+an application syncs, with its repository, branch and path (Flux is read through
+the Kubernetes API, read-only). The bad revision is the one running when the
+incident began; the good one is the revision before it, and it must have run
+healthily for `HEAL_ROLLBACK_MIN_HEALTHY`, exactly as for a direct rollback.
+
+**What the pull request does** (`internal/gitops`, go-git, no `git` binary):
+
+* clones the branch, checks both revisions are on it, and restores only the files
+  under the app's path that differ between them (a file the bad release added is
+  removed);
+* refuses, changing nothing, if any of those files changed in Git after the bad
+  revision (someone is already working on it), if they already match the good
+  revision, or if the repository is not in `HEAL_GIT_ALLOWED_REPOS`;
+* commits with the decision and its approvers as trailers, pushes to a branch named
+  after the decision (`chronicle/revert-<app>-<decision>`), and opens a pull
+  request with the evidence. **It never pushes to the branch the controller
+  watches**: merging is a person's review, in Git;
+* a retry finds its own open pull request instead of opening another.
+
+Hosts: anything with the GitHub pull-request API: GitHub, Gitea, Forgejo
+(`HEAL_GIT_API_URL`). GitLab is not supported yet.
+
+**Gates.** All of the existing ones, plus `HEAL_GIT_REMEDIATION_ENABLED` (off by
+default: a Git revert is proposed and can be approved, but nothing is pushed) and
+the repository allowlist. `git_revert` must be in `HEAL_ALLOWED_ACTIONS`, and the
+target allowlist names the application (`<namespace>/<app>`). It needs one
+Chronicle approver; the merge is the second person (add `git_revert` to
+`HEAL_TWO_APPROVER_ACTIONS` to require two before the pull request is opened).
+Its evidence is counted on its own record, as for every action type.
+
+**After approval.** The worker opens the pull request; that is the action's
+result, and nothing in the cluster has changed. A tracker on the leader follows it:
+`open` → `merged` → `synced` (the controller reports a new revision after the
+merge) → the usual symptom check; or `closed` without merging, which is recorded
+and notified, and nothing else happens. A merge the controller does not sync
+within 30 minutes is flagged (automatic sync may be off; the proposal says so in
+advance). Every step is on the decision record (migration `018`) and in the
+console, with a link to the pull request.
+
+**Verified live, 2026-10-31** (`scripts/e2e-gitops.sh`: one-node kind, Argo CD
+2.14.15, Gitea 1.24, the demo app managed by Argo CD): a bad release committed to
+Git was synced in 4 s and raised an alert 15 s later; RCA named Argo CD's sync of it
+at confidence 1.00; the decision was a `git_revert` waiting for approval, with no
+pull request and no change anywhere before it; after one approval the worker opened
+a pull request changing only `apps/victim/api.yaml`, while `main` and the cluster
+stayed untouched; after the merge Chronicle saw Argo CD sync the revert, the api ran
+the good release again, and the symptom check **succeeded**. The Deployment's field
+managers were Argo CD and Kubernetes only. 14 of 14 checks passed.
+
+**What the live test found first, and what was fixed.** (1) The good revision was
+judged unhealthy because its period ended when the collector *polled* Argo CD, after
+the bad release had already broken the app: Argo CD sync events are now dated by
+Argo CD's own sync time, and the period ends at the cluster's change. (2) A sync and
+the Deployment change it applied counted as two rival causes, so a clear-cut bad
+release scored 0.68: RCA now links a GitOps sync to the change it made (the
+Application or Kustomization must reach the workload in the graph), the only
+exception to "two changes do not explain each other" besides an autoscaler and its
+scale. Development and held-out benchmark reports are byte-identical and no
+independent row changed. A run in between was correctly refused at the 0.90 floor
+(0.84) because the harness's own repair three minutes earlier competed as a weak
+rival; the harness now lets its repairs age out of the lookback.
+
+Also tested: `internal/gitops` against a real Git smart-HTTP server
+(`git http-backend`) with authentication; the planner, gates, executor and tracker
+with test doubles (every safety rule mutation-checked); the queries against
+PostgreSQL. **Not tested live:** Flux (Kubernetes' fake dynamic client only), GitHub
+and Forgejo (the same API as Gitea, but not exercised), a production identity
+provider for the approval (the live run used the shared token), and a merge the
+controller never syncs.
 
 ## Also fixed in this round
 

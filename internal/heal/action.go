@@ -42,6 +42,10 @@ const (
 	ActionBumpMemory         = "bump_memory"
 	ActionRollbackDeployment = "rollback_deployment"
 	ActionRestoreReplicas    = "restore_replicas"
+	// ActionGitRevert remediates a GitOps-managed workload in Git: a pull request
+	// that puts the application's files back to the last healthy revision. The
+	// cluster changes only when people merge it and the controller syncs it.
+	ActionGitRevert = "git_revert"
 )
 
 type Action struct {
@@ -102,7 +106,30 @@ type Action struct {
 	SymptomImprovedAt *time.Time `json:"symptom_improved_at,omitempty"`
 	SymptomDueAt      *time.Time `json:"symptom_due_at,omitempty"`
 	SymptomCheckedAt  *time.Time `json:"symptom_checked_at,omitempty"`
+	// GitChange is the pull request a git_revert opened, and how far it got.
+	GitChange *GitChange `json:"git_change,omitempty"`
 }
+
+// GitChange tracks a Git-based remediation: open, merged, synced by the GitOps
+// controller (then the symptom check runs), or closed without merging.
+type GitChange struct {
+	URL      string     `json:"url"`
+	Number   int        `json:"number"`
+	Branch   string     `json:"branch"`
+	Commit   string     `json:"commit,omitempty"`
+	State    string     `json:"state"`
+	Detail   string     `json:"detail,omitempty"`
+	MergedAt *time.Time `json:"merged_at,omitempty"`
+	SyncedAt *time.Time `json:"synced_at,omitempty"`
+}
+
+// Git change states.
+const (
+	GitOpen   = "open"
+	GitMerged = "merged"
+	GitSynced = "synced"
+	GitClosed = "closed"
+)
 
 // Approval is one person's yes, as their identity provider vouched for them.
 type Approval struct {
@@ -144,6 +171,12 @@ func StateOf(a *Action) string {
 
 // workloadOf names the workload an action would change.
 func workloadOf(actionType, entity string, payload json.RawMessage) string {
+	if actionType == ActionGitRevert {
+		// A Git revert acts on the application: allowlists and cooldowns name it.
+		if app := gjson.GetBytes(payload, "gitops_app").String(); app != "" {
+			return app
+		}
+	}
 	if actionType == ActionRestartPod || actionType == ActionBumpMemory {
 		if owner := gjson.GetBytes(payload, "owner").String(); owner != "" {
 			return owner
@@ -201,7 +234,9 @@ func formatBelow(value, floor float64) (string, string) {
 // It is checked when planning and again before executing, so the engine never
 // plans what the executor would refuse.
 func precondition(actionType string, payload json.RawMessage) string {
-	if manager := gjson.GetBytes(payload, "gitops").String(); manager != "" && actionType != ActionRestartPod {
+	// A restart does not change the desired state, and a git_revert changes it in
+	// Git; anything else on a GitOps-managed workload would fight the controller.
+	if manager := gjson.GetBytes(payload, "gitops").String(); manager != "" && actionType != ActionRestartPod && actionType != ActionGitRevert {
 		return gitopsProposal(manager)
 	}
 	switch actionType {
@@ -218,6 +253,12 @@ func precondition(actionType string, payload json.RawMessage) string {
 	case ActionBumpMemory:
 		if gjson.GetBytes(payload, "owner").String() == "" || gjson.GetBytes(payload, "original_mem_bytes").Int() <= 0 {
 			return "the OOM evidence lacks the owner and original memory limit; a bump could not be bounded"
+		}
+	case ActionGitRevert:
+		for _, field := range []string{"repo_url", "bad_revision", "good_revision", "gitops_app"} {
+			if gjson.GetBytes(payload, field).String() == "" {
+				return fmt.Sprintf("the Git revert lacks %s; revert the change in Git by hand", field)
+			}
 		}
 	case ActionRollbackDeployment:
 		// Identity by the whole pod template, when the change recorded it; the
@@ -390,7 +431,7 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	// A rollback returns a Deployment to a pod template. A ConfigMap's or
 	// Secret's contents are never reverted: Chronicle neither reads nor stores
 	// them, so there is nothing exact to restore and any revert would be a guess.
-	if rule.ActionType == ActionRollbackDeployment && top.Event.EntityKind != "Deployment" && top.Event.EntityKind != "Application" {
+	if rule.ActionType == ActionRollbackDeployment && top.Event.EntityKind != "Deployment" && top.Event.EntityKind != "Application" && top.Event.EntityKind != "Kustomization" {
 		action.Result = fmt.Sprintf("a %s's contents are never reverted: Chronicle does not store them, so there is nothing exact to restore", top.Event.EntityKind)
 		return e.record(ctx, action)
 	}
@@ -409,18 +450,36 @@ func (e *Engine) Evaluate(ctx context.Context, result *rca.Result) (*Action, err
 	}
 	// Approval is requested only below, once every check has passed: a blocked
 	// or refused decision is never approvable.
-	if top.Event.EntityKind == "Application" && rule.ActionType == ActionRollbackDeployment {
-		action.Result = gitopsProposal("argocd:" + top.Event.EntityName)
-		return e.record(ctx, action)
+	// A workload whose desired state lives in Git is remediated in Git: the
+	// rollback becomes a pull request (git_revert). Every gate below still applies.
+	if rule.ActionType == ActionRollbackDeployment {
+		cause := eventView{Source: top.Event.Source, EntityKind: top.Event.EntityKind, EntityName: top.Event.EntityName,
+			Namespace: top.Event.Namespace, OccurredAt: top.Event.OccurredAt, Payload: top.Event.Payload}
+		if controller, app := gitopsTarget(cause); controller != "" {
+			why, blocked, err := e.planGitRevert(ctx, action, cause, controller, app)
+			if err != nil {
+				return nil, err
+			}
+			if why != "" {
+				if blocked {
+					action.Status = StatusBlocked
+				}
+				action.Result = why
+				return e.record(ctx, action)
+			}
+		} else if top.Event.EntityKind == "Application" {
+			action.Result = gitopsProposal("argocd:" + top.Event.EntityName)
+			return e.record(ctx, action)
+		}
 	}
 	// Never plan what the executor would refuse.
-	if reason := precondition(rule.ActionType, top.Event.Payload); reason != "" {
+	if reason := precondition(action.ActionType, action.Payload); reason != "" {
 		action.Result = reason
 		return e.record(ctx, action)
 	}
 	// A rollback that names revisions needs a target that is known to have run
 	// healthily, or it is not proposed.
-	if rule.ActionType == ActionRollbackDeployment && gjson.GetBytes(top.Event.Payload, "to_template_hash").String() != "" &&
+	if action.ActionType == ActionRollbackDeployment && gjson.GetBytes(top.Event.Payload, "to_template_hash").String() != "" &&
 		result.Confidence >= rule.MinConfidence {
 		why, err := e.chooseRevision(ctx, action, action.Workload, gjson.GetBytes(top.Event.Payload, "to_template_hash").String())
 		if err != nil {

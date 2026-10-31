@@ -220,7 +220,9 @@ function healing(){
           <td class="dim">${esc(a.state||a.approval)}${(a.approvals_required||1)>1?`<br><span title="${esc((a.approvals||[]).map(p=>p.display).join(', '))}">${(a.approvals||[]).length} of ${a.approvals_required} approvals</span>`:''}</td>
           <td>${awaitingApproval(a)
             ? `<button class="k pri" data-approve="${esc(a.id)}">approve</button> <button class="k no" data-deny="${esc(a.id)}">deny</button>`
-            : `<span class="dim">${esc(a.result||a.approval||'')}</span>`}</td>
+            : a.git_change && /^https?:\/\//.test(a.git_change.url||'')
+              ? `<a href="${esc(a.git_change.url)}" target="_blank" rel="noopener noreferrer">PR #${esc(a.git_change.number)}</a> <span class="dim">${esc(a.git_change.state)}${a.git_change.detail?' · '+esc(a.git_change.detail):''}</span>`
+              : `<span class="dim">${esc(a.result||a.approval||'')}</span>`}</td>
         </tr>`).join('')}</tbody></table>`
         : empty('No remediation actions recorded','run RCA on a signal; a matched rule appears here as an audited decision')}
       <div class="sec-h" style="border-top:1px solid var(--line2)"><b>Rules</b><span>CONFIDENCE FLOOR · RATE LIMIT</span></div>
