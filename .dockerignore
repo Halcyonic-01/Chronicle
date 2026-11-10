@@ -4,3 +4,6 @@
 .vscode
 .DS_Store
 *.log
+# Terraform: ~900 MB of providers, and state that holds private keys
+infra/
+chaos-results/
