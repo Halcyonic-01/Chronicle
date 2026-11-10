@@ -1,0 +1,40 @@
+# The victim demo app on the EKS cluster: images from ECR instead of loaded
+# into kind, and every pod in the Linkerd mesh. Synced by the Argo CD
+# Application "victim" into the default namespace. The ECR registry is kept
+# out of Git: Argo CD swaps it in for ecr.invalid and keeps the tag.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../victim/frontend.yaml
+  - ../../victim/api.yaml
+  - ../../victim/worker.yaml
+  - ../../victim/redis.yaml
+  - ../../victim/postgres.yaml
+  - ../../victim/loadgen.yaml
+  - ../../victim/monitoring.yaml
+images:
+  - name: chronicle-victim
+    newName: ecr.invalid/chronicle-victim
+    newTag: "CHANGE-ME" # set by scripts/push-images.sh
+patches:
+  # kind loads the image locally (Never); here it is pulled from ECR.
+  - target:
+      kind: Deployment
+      name: ^(frontend|api|worker)$
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+  # kind meshes the whole default namespace; here each workload opts in.
+  - target:
+      kind: Deployment
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: any
+      spec:
+        template:
+          metadata:
+            annotations:
+              linkerd.io/inject: enabled

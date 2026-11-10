@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+
+# The account that holds the AWS credits. Terraform refuses any other account.
+aws_account_id = "CHANGE-ME"
+
+region = "us-east-1"
+
+# Your public IP, so only you can reach the Kubernetes API: curl -s https://checkip.amazonaws.com
+api_allowed_cidrs = ["CHANGE-ME/32"]
+
+node_instance_type = "t3.large"
+node_count         = 2
+node_capacity_type = "ON_DEMAND" # SPOT is cheaper, but a node can disappear mid-demo
+
+# Database (kept out of Git; Argo CD injects it). For Supabase: Connect -> Session pooler.
+# The password is not here: scripts/set-aws-secrets.sh puts it in Secrets Manager.
+database_host = "CHANGE-ME" # e.g. aws-1-us-east-1.pooler.supabase.com
+database_user = "CHANGE-ME" # e.g. postgres.<project-ref>
+
+# Branch Argo CD syncs from.
+git_target_revision = "main"
+
+budget_limit_usd   = 50
+budget_alert_email = "" # set to get alert emails

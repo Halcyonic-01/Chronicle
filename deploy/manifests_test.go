@@ -675,6 +675,46 @@ func TestTheProductionOverlayIsDryRunAndComplete(t *testing.T) {
 	}
 }
 
+// The EKS demo overlay builds on the production overlay and may only fill in
+// values: it inherits dry-run and must not undo it.
+func TestTheEKSOverlayStaysDryRun(t *testing.T) {
+	kust, err := os.ReadFile("eks/chronicle/kustomization.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := os.ReadFile("eks/chronicle/env.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^\s*- \.\./\.\./production\s*$`).Match(kust) {
+		t.Error("the EKS overlay must build on ../../production")
+	}
+	if strings.Contains(string(kust), "heal-executor") {
+		t.Error("the EKS overlay includes the executor's write permissions")
+	}
+	for _, unsafe := range []string{"HEAL_LIVE_ENABLED", "HEAL_KILL_SWITCH", "HEAL_RESTART_EXECUTION_ENABLED", "HEAL_MIN_DECISIVE_DECISIONS", "HEAL_MIN_PRECISION", "HEAL_OBSERVATION_STARTED_AT", "CHRONICLE_ENVIRONMENT", "POSTGRES_SCHEMA"} {
+		if regexp.MustCompile(`name:\s*` + unsafe + `\b`).Match(env) {
+			t.Errorf("the EKS overlay sets %s; it must keep the production overlay's value", unsafe)
+		}
+	}
+	// The repository is public: the AWS account (in an ECR address) and the
+	// database host come from the Argo CD Application, never from these files.
+	files, err := filepath.Glob("eks/*/*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := regexp.MustCompile(`\d{12}\.dkr\.ecr|pooler\.supabase\.com|postgres\.[a-z0-9]{20}`)
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := private.Find(raw); m != nil {
+			t.Errorf("%s holds %q, which must come from the Argo CD Application instead", path, m)
+		}
+	}
+}
+
 // The migrate init container creates the schema and the chronicle container reads
 // it; if they disagree the tables are made in one place and queried in another.
 // Every manifest that sets the schema sets it identically on both.

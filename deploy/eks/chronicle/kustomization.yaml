@@ -1,0 +1,21 @@
+# Chronicle on the demo EKS cluster built by infra/terraform: the production
+# overlay with this cluster's values. Still dry-run (the production overlay's
+# test guards that). Synced by the Argo CD Application "chronicle".
+#
+# Kept out of this public repository, and injected by that Application from
+# Terraform: the ECR registry (it names the AWS account) and the database
+# host and user (POSTGRES_URL).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../production
+  - ../../monitoring    # the cluster has the Prometheus Operator
+images:
+  # ecr.invalid is a placeholder: Argo CD swaps in the real registry and keeps
+  # this tag.
+  - name: CHANGE-ME.registry.example.com/chronicle
+    newName: ecr.invalid/chronicle
+    newTag: "CHANGE-ME" # set by scripts/push-images.sh
+patches:
+  - path: env.yaml
+  - path: secret-store.yaml
